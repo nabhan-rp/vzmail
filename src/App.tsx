@@ -7,6 +7,7 @@ import {
   type ActiveHostView,
 } from './components/MailLinksTopBar';
 import { useLanguage } from './hooks/useLanguage';
+import { usePwaInstall } from './hooks/usePwaInstall';
 import { useSsoSession } from './hooks/useSsoSession';
 import { useTheme } from './hooks/useTheme';
 import { sanitizeHandle } from './utils/mailIdentity';
@@ -45,6 +46,11 @@ const UniversalSsoModal = lazy(() =>
 const VaultBackupModal = lazy(() =>
   import('./components/VaultBackupModal').then((m) => ({
     default: m.VaultBackupModal,
+  }))
+);
+const PwaInstallModal = lazy(() =>
+  import('./components/PwaInstallModal').then((m) => ({
+    default: m.PwaInstallModal,
   }))
 );
 
@@ -146,6 +152,14 @@ export default function App() {
     setActiveHost(nextHost);
   };
   const urlBioUser = useMemo(() => detectBioSubdomainUser(), []);
+  const {
+    os,
+    isIos,
+    isInstalled,
+    canPromptNative,
+    promptInstall,
+  } = usePwaInstall();
+  const [pwaOpen, setPwaOpen] = useState(false);
   const [ssoOpen, setSsoOpen] = useState(false);
   const [vaultOpen, setVaultOpen] = useState(false);
   const [composeCounter, setComposeCounter] = useState(0);
@@ -189,6 +203,9 @@ export default function App() {
           session={session}
           onOpenSso={() => setSsoOpen(true)}
           onOpenCompose={() => setComposeCounter((c) => c + 1)}
+          onOpenInstall={() => setPwaOpen(true)}
+          isInstalled={isInstalled}
+          isIos={isIos}
         />
 
         <CrossServiceOfferBar
@@ -350,6 +367,13 @@ export default function App() {
               </a>
               <button
                 type="button"
+                onClick={() => setPwaOpen(true)}
+                className="hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
+              >
+                {lang === 'id' ? 'Pasang App (PWA)' : 'Install App (PWA)'}
+              </button>
+              <button
+                type="button"
                 onClick={() => setLang(lang === 'id' ? 'en' : 'id')}
                 className="font-mono hover:text-slate-900 dark:hover:text-white cursor-pointer"
               >
@@ -398,6 +422,26 @@ export default function App() {
               username={session.username || 'fadhil'}
               onClose={() => setVaultOpen(false)}
               onImported={() => setMailRefreshCounter((c) => c + 1)}
+            />
+          </Suspense>
+        )}
+
+        {pwaOpen && (
+          <Suspense fallback={null}>
+            <PwaInstallModal
+              isOpen={pwaOpen}
+              lang={lang}
+              onClose={() => setPwaOpen(false)}
+              service={
+                activeHost === 'links.vz.gay' || activeHost === 'shortlinks'
+                  ? 'links'
+                  : 'mail'
+              }
+              os={os}
+              isIos={isIos}
+              isInstalled={isInstalled}
+              canPromptNative={canPromptNative}
+              onPromptInstall={promptInstall}
             />
           </Suspense>
         )}

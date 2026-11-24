@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json.schemastore.org/web-manifest-combined.json",
+  "id": "vz-links-app",
+  "name": "VZ Links — Shortlink & Bio",
+  "short_name": "VZ Links",
+  "description": "Pemendek tautan cepat imy.li/s/ dan Link-in-Bio statis privat ($USER.imy.li).",
+  "start_url": "/?host_mode=links&pwa=links",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "any",
+  "theme_color": "#0B0D11",
+  "background_color": "#0B0D11",
+  "lang": "id",
+  "dir": "ltr",
+  "categories": ["utilities", "productivity"],
+  "icons": [
+    {
+      "src": "/icons/links-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/links-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/links-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/links.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Buat Shortlink",
+      "short_name": "Shortlink",
+      "description": "Perpendek tautan cepat imy.li/s/",
+      "url": "/?host_mode=shortlinks",
+      "icons": [
+        {
+          "src": "/icons/links-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Kelola Bio",
+      "short_name": "Bio Link",
+      "description": "Kustomisasi halaman Link in Bio Anda",
+      "url": "/?host_mode=links",
+      "icons": [
+        {
+          "src": "/icons/links-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    }
+  ],
+  "launch_handler": {
+    "client_mode": "navigate-existing"
+  },
+  "prefer_related_applications": false
+}

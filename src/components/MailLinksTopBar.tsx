@@ -1,3 +1,4 @@
+import { Download } from 'lucide-react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 
@@ -15,6 +16,9 @@ interface MailLinksTopBarProps {
   session: SsoSession;
   onOpenSso: () => void;
   onOpenCompose: () => void;
+  onOpenInstall?: () => void;
+  isInstalled?: boolean;
+  isIos?: boolean;
 }
 
 export function MailLinksTopBar({
@@ -24,6 +28,9 @@ export function MailLinksTopBar({
   session,
   onOpenSso,
   onOpenCompose,
+  onOpenInstall,
+  isInstalled = false,
+  isIos = false,
 }: MailLinksTopBarProps) {
   const handle = session.isAuthenticated ? session.username : 'username';
 
@@ -123,8 +130,32 @@ export function MailLinksTopBar({
           })}
         </nav>
 
-        {/* Zone 3: 1 Primary Action Button */}
+        {/* Zone 3: Action Buttons */}
         <div className="flex items-center shrink-0">
+          {!isInstalled && onOpenInstall && (
+            <button
+              type="button"
+              onClick={onOpenInstall}
+              className="mr-2 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 hover:bg-slate-200 dark:bg-[#1C202A] dark:hover:bg-[#252B38] border border-slate-200 dark:border-[#2D3342] rounded-lg transition-colors whitespace-nowrap flex items-center gap-1.5 cursor-pointer shadow-2xs"
+              title={
+                lang === 'id'
+                  ? 'Pasang Aplikasi PWA Multi-OS'
+                  : 'Install Multi-OS PWA App'
+              }
+            >
+              <Download className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+              <span className="hidden sm:inline">
+                {isIos
+                  ? lang === 'id'
+                    ? 'Pasang di iOS'
+                    : 'Install on iOS'
+                  : lang === 'id'
+                    ? 'Pasang App'
+                    : 'Install App'}
+              </span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={handlePrimaryAction}

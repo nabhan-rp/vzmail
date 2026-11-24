@@ -95,7 +95,6 @@ const MAX_PACKETS_PER_PULL = 50;
 function buildAppCsp(auth0Domain?: string): string {
   const authOrigins = new Set<string>([
     'https://accounts.vz.gay',
-    'https://accounts.vz.gay',
   ]);
   const cleaned = (auth0Domain || '').trim().toLowerCase();
   if (cleaned && /^[a-z0-9.-]+$/.test(cleaned)) {
@@ -111,6 +110,8 @@ function buildAppCsp(auth0Domain?: string): string {
     "img-src 'self' data: https:",
     `connect-src 'self' ${authList}`,
     `frame-src 'self' ${authList}`,
+    "worker-src 'self'",
+    "manifest-src 'self'",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -912,7 +913,38 @@ export default {
         return await handleApiRequest(request, url, env);
       }
 
-      // 2. Shortlink Redirector: imy.li/s/$SLUG or links.vz.gay/s/$SLUG
+      // 2. Dynamic PWA Web App Manifests & Service Worker (Multi-OS PWA for mail.vz.gay & links.vz.gay)
+      if (url.pathname === '/manifest.webmanifest' || url.pathname === '/manifest.json') {
+        const isLinks =
+          host === 'links.vz.gay' ||
+          host.startsWith('links.') ||
+          url.searchParams.get('host_mode') === 'links' ||
+          url.searchParams.get('pwa') === 'links';
+        const targetPath = isLinks
+          ? '/manifest-links.webmanifest'
+          : '/manifest-mail.webmanifest';
+        if (env.ASSETS) {
+          const manifestReq = new Request(new URL(targetPath, request.url), request);
+          const manifestRes = await env.ASSETS.fetch(manifestReq);
+          const headers = new Headers(manifestRes.headers);
+          headers.set('Content-Type', 'application/manifest+json; charset=utf-8');
+          headers.set('Cache-Control', 'public, max-age=3600');
+          return new Response(manifestRes.body, { status: manifestRes.status, headers });
+        }
+      }
+
+      if (url.pathname === '/sw.js') {
+        if (env.ASSETS) {
+          const swRes = await env.ASSETS.fetch(request);
+          const headers = new Headers(swRes.headers);
+          headers.set('Content-Type', 'application/javascript; charset=utf-8');
+          headers.set('Service-Worker-Allowed', '/');
+          headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+          return new Response(swRes.body, { status: swRes.status, headers });
+        }
+      }
+
+      // 3. Shortlink Redirector: imy.li/s/$SLUG or links.vz.gay/s/$SLUG
       if (url.pathname.startsWith('/s/') && (request.method === 'GET' || request.method === 'HEAD')) {
         const rawSlug = url.pathname.replace(/^\/s\//, '').split('/')[0] || '';
         const slug = sanitizeSlug(rawSlug);
