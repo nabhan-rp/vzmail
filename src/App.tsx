@@ -108,7 +108,12 @@ export default function App() {
   const { lang, setLang } = useLanguage();
   const {
     session,
+    isLoading: authLoading,
+    authError,
+    auth0Domain,
     crossOffer,
+    loginWithAuth0,
+    signupWithAuth0,
     signIn,
     signOut,
     activateMail,
@@ -177,6 +182,21 @@ export default function App() {
           onDismiss={dismissCrossOffer}
           onSelectHost={setActiveHost}
         />
+
+        {authError && (
+          <div className="bg-rose-50 dark:bg-rose-950/40 border-b border-rose-200 dark:border-rose-900/60 px-4 sm:px-6 py-2.5 text-xs text-rose-700 dark:text-rose-300 flex items-center justify-between gap-4">
+            <span className="font-mono">
+              Auth0 Error: {authError.message}
+            </span>
+            <button
+              type="button"
+              onClick={() => setSsoOpen(true)}
+              className="font-semibold underline shrink-0 cursor-pointer"
+            >
+              {lang === 'id' ? 'Lihat Detail SSO' : 'Open SSO Details'}
+            </button>
+          </div>
+        )}
 
         <main className="flex-1">
           <Suspense fallback={<WorkspaceFallback />}>
@@ -333,6 +353,11 @@ export default function App() {
               isOpen={ssoOpen}
               lang={lang}
               session={session}
+              isLoading={authLoading}
+              authError={authError}
+              auth0Domain={auth0Domain}
+              onLoginWithAuth0={loginWithAuth0}
+              onSignupWithAuth0={signupWithAuth0}
               onSignIn={signIn}
               onSignOut={signOut}
               onActivateMail={() => activateMail(true)}

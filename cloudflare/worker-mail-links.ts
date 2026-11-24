@@ -1,3 +1,5 @@
+/// <reference types="@cloudflare/workers-types" />
+
 // VZ Mail (mail.vz.gay) + VZ Links (links.vz.gay & *.imy.li)
 // 2-in-1 Production Cloudflare Worker (`vzmail`):
 //
@@ -90,18 +92,31 @@ const MAX_RAW_EMAIL_SCAN_BYTES = 256 * 1024; // Bound stream read to protect 128
 const MAX_INBOUND_REJECT_BYTES = 10 * 1024 * 1024; // Reject >10 MB raw inbound messages cleanly
 const MAX_PACKETS_PER_PULL = 50;
 
-const APP_CSP = [
-  "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-  "font-src 'self' https://fonts.gstatic.com data:",
-  "img-src 'self' data: https:",
-  "connect-src 'self'",
-  "object-src 'none'",
-  "base-uri 'self'",
-  "form-action 'self'",
-  "frame-ancestors 'self'",
-].join('; ');
+function buildAppCsp(auth0Domain?: string): string {
+  const authOrigins = new Set<string>([
+    'https://accounts.vz.gay',
+    'https://accounts.vz.gay',
+  ]);
+  const cleaned = (auth0Domain || '').trim().toLowerCase();
+  if (cleaned && /^[a-z0-9.-]+$/.test(cleaned)) {
+    authOrigins.add(`https://${cleaned}`);
+  }
+  const authList = Array.from(authOrigins).join(' ');
+
+  return [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src 'self' data: https:",
+    `connect-src 'self' ${authList}`,
+    `frame-src 'self' ${authList}`,
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'self'",
+  ].join('; ');
+}
 
 const BIO_STRICT_CSP = [
   "default-src 'self'",
@@ -150,7 +165,7 @@ function jsonResponse(
 
 function applyHtmlSecurityHeaders(
   response: Response,
-  options: { isBioSubdomain?: boolean; isHttps?: boolean } = {}
+  options: { isBioSubdomain?: boolean; isHttps?: boolean; auth0Domain?: string } = {}
 ): Response {
   const headers = new Headers(response.headers);
   headers.set('X-Content-Type-Options', 'nosniff');
@@ -167,7 +182,7 @@ function applyHtmlSecurityHeaders(
   if (contentType.includes('text/html')) {
     headers.set(
       'Content-Security-Policy',
-      options.isBioSubdomain ? BIO_STRICT_CSP : APP_CSP
+      options.isBioSubdomain ? BIO_STRICT_CSP : buildAppCsp(options.auth0Domain)
     );
     headers.set('Cache-Control', 'no-cache, must-revalidate');
   }
@@ -933,6 +948,7 @@ export default {
         return applyHtmlSecurityHeaders(assetResponse, {
           isBioSubdomain,
           isHttps,
+          auth0Domain: env.AUTH0_DOMAIN,
         });
       }
 

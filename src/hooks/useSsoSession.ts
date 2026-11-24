@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useAuth0 } from '@auth0/auth0-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { sanitizeHandle } from '../utils/mailIdentity';
 
 export type CrossServiceOffer =
@@ -8,18 +9,29 @@ export type CrossServiceOffer =
 
 export interface SsoSession {
   isAuthenticated: boolean;
+  authProvider: 'auth0' | 'local';
   username: string;
   birthDate: string; // YYYY-MM-DD
   mailActivated: boolean;
   linksActivated: boolean;
   primaryDomain: string;
+  email?: string;
+  name?: string;
+  picture?: string;
+  sub?: string;
 }
 
-const STORAGE_KEY = 'vz_sso_session_v2';
+interface UserModulePrefs {
+  birthDate: string;
+  mailActivated: boolean;
+  linksActivated: boolean;
+  primaryDomain: string;
+}
 
-const DEFAULT_SESSION: SsoSession = {
-  isAuthenticated: true,
-  username: 'fadhil',
+const LOCAL_SESSION_KEY = 'vz_sso_local_session_v3';
+const MODULE_PREFS_KEY = 'vz_sso_module_prefs_v3';
+
+const DEFAULT_PREFS: UserModulePrefs = {
   birthDate: '2001-05-14',
   mailActivated: false,
   linksActivated: false,
@@ -28,6 +40,7 @@ const DEFAULT_SESSION: SsoSession = {
 
 const SIGNED_OUT_SESSION: SsoSession = {
   isAuthenticated: false,
+  authProvider: 'auth0',
   username: '',
   birthDate: '',
   mailActivated: false,
@@ -53,41 +66,154 @@ export function calculateAgeFromDob(birthDate: string): number | null {
   return age;
 }
 
+function readAllPrefs(): Record<string, UserModulePrefs> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(MODULE_PREFS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, Partial<UserModulePrefs>>;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: Record<string, UserModulePrefs> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v && typeof v === 'object') {
+        out[k] = {
+          birthDate:
+            typeof v.birthDate === 'string'
+              ? v.birthDate
+              : DEFAULT_PREFS.birthDate,
+          mailActivated: Boolean(v.mailActivated),
+          linksActivated: Boolean(v.linksActivated),
+          primaryDomain:
+            typeof v.primaryDomain === 'string' && v.primaryDomain
+              ? v.primaryDomain
+              : DEFAULT_PREFS.primaryDomain,
+        };
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function deriveHandleFromAuth0User(user: {
+  nickname?: string;
+  preferred_username?: string;
+  email?: string;
+  name?: string;
+  sub?: string;
+}): string {
+  const candidate =
+    user.preferred_username ||
+    user.nickname ||
+    (user.email ? user.email.split('@')[0] : '') ||
+    user.name ||
+    user.sub?.split('|').pop() ||
+    'user';
+  return sanitizeHandle(candidate);
+}
+
 export function useSsoSession() {
-  const [session, setSession] = useState<SsoSession>(() => {
+  const {
+    isLoading,
+    isAuthenticated: auth0Authenticated,
+    error: authError,
+    user: auth0User,
+    loginWithRedirect,
+    logout: auth0Logout,
+  } = useAuth0();
+
+  const auth0Domain =
+    import.meta.env.VITE_AUTH0_DOMAIN || 'galbay.eu.auth0.com';
+
+  const [prefsMap, setPrefsMap] = useState<Record<string, UserModulePrefs>>(() =>
+    readAllPrefs()
+  );
+
+  const [localSession, setLocalSession] = useState<SsoSession>(() => {
+    if (typeof window === 'undefined') return SIGNED_OUT_SESSION;
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = window.localStorage.getItem(LOCAL_SESSION_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as Partial<SsoSession>;
-        if (typeof parsed.isAuthenticated === 'boolean') {
+        if (parsed.isAuthenticated && parsed.authProvider === 'local') {
           return {
-            isAuthenticated: parsed.isAuthenticated,
+            isAuthenticated: true,
+            authProvider: 'local',
             username: sanitizeHandle(parsed.username || 'fadhil'),
             birthDate:
               typeof parsed.birthDate === 'string'
                 ? parsed.birthDate
-                : '2001-05-14',
+                : DEFAULT_PREFS.birthDate,
             mailActivated: Boolean(parsed.mailActivated),
             linksActivated: Boolean(parsed.linksActivated),
-            primaryDomain: parsed.primaryDomain || 'imy.li',
+            primaryDomain: parsed.primaryDomain || DEFAULT_PREFS.primaryDomain,
           };
         }
       }
     } catch {
       // Ignore storage errors
     }
-    return DEFAULT_SESSION;
+    return SIGNED_OUT_SESSION;
   });
 
   const [crossOffer, setCrossOffer] = useState<CrossServiceOffer>(null);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+      window.localStorage.setItem(MODULE_PREFS_KEY, JSON.stringify(prefsMap));
     } catch {
       // Ignore storage errors
     }
-  }, [session]);
+  }, [prefsMap]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      if (localSession.isAuthenticated && localSession.authProvider === 'local') {
+        window.localStorage.setItem(
+          LOCAL_SESSION_KEY,
+          JSON.stringify(localSession)
+        );
+      } else {
+        window.localStorage.removeItem(LOCAL_SESSION_KEY);
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }, [localSession]);
+
+  const auth0Key = useMemo(() => {
+    if (!auth0Authenticated || !auth0User) return null;
+    return auth0User.sub || deriveHandleFromAuth0User(auth0User);
+  }, [auth0Authenticated, auth0User]);
+
+  const session: SsoSession = useMemo(() => {
+    if (auth0Authenticated && auth0User && auth0Key) {
+      const prefs = prefsMap[auth0Key] || DEFAULT_PREFS;
+      const username = deriveHandleFromAuth0User(auth0User);
+      return {
+        isAuthenticated: true,
+        authProvider: 'auth0',
+        username,
+        birthDate: prefs.birthDate,
+        mailActivated: prefs.mailActivated,
+        linksActivated: prefs.linksActivated,
+        primaryDomain: prefs.primaryDomain,
+        email: auth0User.email,
+        name: auth0User.name,
+        picture: auth0User.picture,
+        sub: auth0User.sub,
+      };
+    }
+
+    if (localSession.isAuthenticated && localSession.authProvider === 'local') {
+      return localSession;
+    }
+
+    return SIGNED_OUT_SESSION;
+  }, [auth0Authenticated, auth0User, auth0Key, prefsMap, localSession]);
 
   const age = session.isAuthenticated
     ? calculateAgeFromDob(session.birthDate)
@@ -96,79 +222,140 @@ export function useSsoSession() {
     session.isAuthenticated && age !== null && age >= 21
   );
 
-  const signIn = (
-    username: string,
-    birthDate: string,
-    options?: { mailActivated?: boolean; linksActivated?: boolean }
-  ) => {
-    const cleanUser = sanitizeHandle(username || 'fadhil');
-    const nextMail = options?.mailActivated ?? false;
-    const nextLinks = options?.linksActivated ?? false;
-    setSession({
-      isAuthenticated: true,
-      username: cleanUser,
-      birthDate: birthDate || '2001-05-14',
-      mailActivated: nextMail,
-      linksActivated: nextLinks,
-      primaryDomain: 'imy.li',
+  const loginWithAuth0 = useCallback(() => {
+    void loginWithRedirect();
+  }, [loginWithRedirect]);
+
+  const signupWithAuth0 = useCallback(() => {
+    void loginWithRedirect({
+      authorizationParams: {
+        screen_hint: 'signup',
+      },
     });
-    if (nextMail && !nextLinks) {
-      setCrossOffer('offer_links_after_mail');
-    } else if (nextLinks && !nextMail) {
-      setCrossOffer('offer_mail_after_links');
-    } else {
-      setCrossOffer(null);
-    }
-  };
+  }, [loginWithRedirect]);
 
-  const signOut = () => {
-    setSession(SIGNED_OUT_SESSION);
-    setCrossOffer(null);
-  };
-
-  const activateMail = (triggerCrossOffer = true) => {
-    setSession((prev) => {
-      const next = { ...prev, mailActivated: true };
-      if (triggerCrossOffer && !prev.linksActivated) {
+  const signIn = useCallback(
+    (
+      username: string,
+      birthDate: string,
+      options?: { mailActivated?: boolean; linksActivated?: boolean }
+    ) => {
+      const cleanUser = sanitizeHandle(username || 'fadhil');
+      const nextMail = options?.mailActivated ?? false;
+      const nextLinks = options?.linksActivated ?? false;
+      setLocalSession({
+        isAuthenticated: true,
+        authProvider: 'local',
+        username: cleanUser,
+        birthDate: birthDate || DEFAULT_PREFS.birthDate,
+        mailActivated: nextMail,
+        linksActivated: nextLinks,
+        primaryDomain: 'imy.li',
+      });
+      if (nextMail && !nextLinks) {
         setCrossOffer('offer_links_after_mail');
-      } else {
-        setCrossOffer(null);
-      }
-      return next;
-    });
-  };
-
-  const deactivateMail = () => {
-    setSession((prev) => ({ ...prev, mailActivated: false }));
-    setCrossOffer(null);
-  };
-
-  const activateLinks = (triggerCrossOffer = true) => {
-    setSession((prev) => {
-      const next = { ...prev, linksActivated: true };
-      if (triggerCrossOffer && !prev.mailActivated) {
+      } else if (nextLinks && !nextMail) {
         setCrossOffer('offer_mail_after_links');
       } else {
         setCrossOffer(null);
       }
-      return next;
-    });
-  };
+    },
+    []
+  );
 
-  const deactivateLinks = () => {
-    setSession((prev) => ({ ...prev, linksActivated: false }));
+  const signOut = useCallback(() => {
+    setLocalSession(SIGNED_OUT_SESSION);
     setCrossOffer(null);
-  };
+    if (auth0Authenticated) {
+      void auth0Logout({
+        logoutParams: {
+          returnTo:
+            typeof window !== 'undefined' ? window.location.origin : undefined,
+        },
+      });
+    }
+  }, [auth0Authenticated, auth0Logout]);
 
-  const dismissCrossOffer = () => {
+  const updateActivePrefs = useCallback(
+    (updater: (prev: UserModulePrefs) => UserModulePrefs) => {
+      if (auth0Authenticated && auth0Key) {
+        setPrefsMap((prevMap) => {
+          const current = prevMap[auth0Key] || DEFAULT_PREFS;
+          return {
+            ...prevMap,
+            [auth0Key]: updater(current),
+          };
+        });
+      } else {
+        setLocalSession((prev) => {
+          const updated = updater({
+            birthDate: prev.birthDate || DEFAULT_PREFS.birthDate,
+            mailActivated: prev.mailActivated,
+            linksActivated: prev.linksActivated,
+            primaryDomain: prev.primaryDomain || DEFAULT_PREFS.primaryDomain,
+          });
+          return {
+            ...prev,
+            ...updated,
+          };
+        });
+      }
+    },
+    [auth0Authenticated, auth0Key]
+  );
+
+  const activateMail = useCallback(
+    (triggerCrossOffer = true) => {
+      updateActivePrefs((prev) => {
+        if (triggerCrossOffer && !prev.linksActivated) {
+          setCrossOffer('offer_links_after_mail');
+        } else {
+          setCrossOffer(null);
+        }
+        return { ...prev, mailActivated: true };
+      });
+    },
+    [updateActivePrefs]
+  );
+
+  const deactivateMail = useCallback(() => {
+    updateActivePrefs((prev) => ({ ...prev, mailActivated: false }));
     setCrossOffer(null);
-  };
+  }, [updateActivePrefs]);
+
+  const activateLinks = useCallback(
+    (triggerCrossOffer = true) => {
+      updateActivePrefs((prev) => {
+        if (triggerCrossOffer && !prev.mailActivated) {
+          setCrossOffer('offer_mail_after_links');
+        } else {
+          setCrossOffer(null);
+        }
+        return { ...prev, linksActivated: true };
+      });
+    },
+    [updateActivePrefs]
+  );
+
+  const deactivateLinks = useCallback(() => {
+    updateActivePrefs((prev) => ({ ...prev, linksActivated: false }));
+    setCrossOffer(null);
+  }, [updateActivePrefs]);
+
+  const dismissCrossOffer = useCallback(() => {
+    setCrossOffer(null);
+  }, []);
 
   return {
     session,
+    isLoading,
+    authError: authError ?? null,
+    auth0Domain,
     age,
     isVerifiedAdult21,
     crossOffer,
+    loginWithAuth0,
+    signupWithAuth0,
     signIn,
     signOut,
     activateMail,

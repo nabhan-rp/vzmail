@@ -57,14 +57,14 @@ DAILY_OUTBOUND_LIMIT = "25"
 # name = "SEND_EMAIL"
 #
 # 2. Ephemeral Transit Buffer KV (Zero permanent mailbox retention; auto-TTL + Pop-and-Purge):
-# [[kv_namespaces]]
-# binding = "MAIL_TRANSIT_KV"
-# id = "<YOUR_EPHEMERAL_MAIL_TRANSIT_KV_ID>"
+[[kv_namespaces]]
+binding = "MAIL_TRANSIT_KV"
+id = "b330955476094cc2820053732cbb4471"
 #
 # 3. VZ Links Shortener & Static Bio KV:
-# [[kv_namespaces]]
-# binding = "LINKS_KV"
-# id = "<YOUR_LINKS_SHORTENER_KV_ID>"
+[[kv_namespaces]]
+binding = "LINKS_KV"
+id = "9fb255e46c7b4501922aa6881c806493"
 #
 # 4. Optional Relay Auth Secret (set via CLI, NEVER commit):
 #    npx wrangler secret put RELAY_AUTH_TOKEN
