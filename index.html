@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VZ Mail (mail.vz.gay) &amp; VZ Links — Email Lokal Privat @imy.li &amp; Link-in-Bio</title>
+    <meta
+      name="description"
+      content="Layanan email privat lokal tanpa penyimpanan server (mail.vz.gay) berpasangan 1:1 dengan Link-in-Bio ($USERNAME.imy.li) dan Shortlink (imy.li/s/) dalam 1 Cloudflare Worker."
+    />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta name="author" content="PT Galeri Langkah Bahagia Yuwana (galbay)" />
+    <meta name="theme-color" content="#FAFAFA" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0B0D11" media="(prefers-color-scheme: dark)" />
+    <link rel="canonical" href="https://mail.vz.gay/" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="VZ Mail &amp; VZ Links" />
+    <meta property="og:url" content="https://mail.vz.gay/" />
+    <meta property="og:locale" content="id_ID" />
+    <meta property="og:locale:alternate" content="en_US" />
+    <meta property="og:title" content="VZ Mail (mail.vz.gay) &amp; VZ Links — Email Lokal Privat @imy.li" />
+    <meta
+      property="og:description"
+      content="Email percakapan berbasis IndexedDB perangkat lokal dengan Cloudflare Email Routing, alias + dan ., serta halaman bio $USERNAME.imy.li dan shortlink imy.li/s/."
+    />
+    <meta property="og:image" content="https://vz.gay/og-banner.jpg" />
+    <meta
+      property="og:image:alt"
+      content="VZ Mail (mail.vz.gay) &amp; VZ Links (links.vz.gay) oleh PT Galeri Langkah Bahagia Yuwana (galbay)"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="VZ Mail (mail.vz.gay) &amp; VZ Links — @imy.li" />
+    <meta
+      name="twitter:description"
+      content="Email privat tanpa penyimpanan server (Zero Retention) + Link-in-Bio $USERNAME.imy.li + Shortlink imy.li/s/ dalam 1 Cloudflare Worker."
+    />
+    <meta name="twitter:image" content="https://vz.gay/og-banner.jpg" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebApplication",
+            "@id": "https://mail.vz.gay/#app",
+            "name": "VZ Mail & VZ Links",
+            "url": "https://mail.vz.gay/",
+            "applicationCategory": "CommunicationApplication",
+            "operatingSystem": "All",
+            "inLanguage": ["id", "en"],
+            "description": "Layanan email privat lokal tanpa penyimpanan server permanen (@imy.li) yang terintegrasi 1:1 dengan Link-in-Bio ($USERNAME.imy.li) dan Shortlink (imy.li/s/).",
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "IDR"
+            },
+            "publisher": {
+              "@type": "Organization",
+              "name": "PT Galeri Langkah Bahagia Yuwana (galbay)",
+              "url": "https://vz.gay"
+            }
+          }
+        ]
+      }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('vz_theme') || 'system';
+          var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var isDark = saved === 'dark' || (saved === 'system' && prefersDark);
+          if (isDark) {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-[#FAFAFA] text-slate-900 dark:bg-[#0B0D11] dark:text-slate-100 antialiased selection:bg-blue-600 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

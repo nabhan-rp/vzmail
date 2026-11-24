@@ -1,0 +1,49 @@
+<?php
+/**
+ * FILE: cloudflare_imy_mail_links_relay.php.txt
+ * (Disimpan dengan ekstensi .php.txt sesuai aturan proyek)
+ *
+ * Opsional: Fallback Webhook Relay ringan untuk cPanel / Shared Hosting
+ * apabila pengguna ingin mem-forward webhook dari Cloudflare Email Worker
+ * atau sinkronisasi shortlink imy.li/s/$URL tanpa menyimpan mailbox permanen.
+ */
+
+header('Content-Type: application/json; charset=utf-8');
+header('X-VZ-Zero-Retention: true');
+
+$action = $_GET['action'] ?? 'status';
+
+function canonicalize_imy_address(string $rawEmail): array {
+    $trimmed = strtolower(trim($rawEmail));
+    $parts = explode('@', $trimmed, 2);
+    $local = $parts[0] ?? 'fadhil';
+    $domain = $parts[1] ?? 'imy.li';
+
+    $plusParts = explode('+', $local, 2);
+    $base = $plusParts[0];
+    $plusTag = $plusParts[1] ?? null;
+
+    $canonicalUser = preg_replace('/[^a-z0-9_-]/', '', str_replace('.', '', $base));
+    return [
+        'canonicalUser' => $canonicalUser ?: 'fadhil',
+        'canonicalEmail' => ($canonicalUser ?: 'fadhil') . '@' . $domain,
+        'plusTag' => $plusTag,
+        'dotNormalized' => strpos($base, '.') !== false,
+        'domain' => $domain,
+    ];
+}
+
+if ($action === 'resolve') {
+    $email = $_GET['email'] ?? 'fa.dhil+news@imy.li';
+    echo json_encode([
+        'ok' => true,
+        'resolved' => canonicalize_imy_address($email),
+    ]);
+    exit;
+}
+
+echo json_encode([
+    'ok' => true,
+    'service' => 'VZ Mail (mail.vz.gay) + VZ Links (links.vz.gay / *.imy.li) Ephemeral Relay',
+    'retention' => 'ZERO_SERVER_STORAGE_POP_AND_PURGE',
+]);

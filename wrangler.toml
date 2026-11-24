@@ -1,0 +1,39 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "vz-mail-and-links"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = "dist"
+
+# 2-in-1 Cloudflare Worker Route Configuration for:
+# - mail.vz.gay/*
+# - links.vz.gay/*
+# - imy.li/* (including imy.li/s/$URL shortlinks)
+# - *.imy.li/* ($USERNAME.imy.li static PSL-safe Link-in-Bio)
+#
+# When deploying as a unified Cloudflare Worker with Assets:
+# main = "cloudflare/worker-mail-links.ts"
+# routes = [
+#   { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
+#   { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
+#   { pattern = "imy.li/*", zone_name = "imy.li" },
+#   { pattern = "*.imy.li/*", zone_name = "imy.li" }
+# ]
+
+[vars]
+APP_DOMAIN = "mail.vz.gay"
+LINKS_DOMAIN = "links.vz.gay"
+PRIMARY_MAIL_DOMAIN = "imy.li"
+AUTH0_DOMAIN = "accounts.vz.gay"
+ACCOUNT_DASHBOARD_URL = "https://myaccount.vz.gay"
+SPONSOR_DOMAIN = "jajanserver.com"
+
+# Cloudflare Email Sending & Ephemeral Transit KV Bindings:
+# [[send_email]]
+# name = "SEND_EMAIL"
+#
+# [[kv_namespaces]]
+# binding = "MAIL_TRANSIT_KV"
+# id = "<YOUR_EPHEMERAL_MAIL_TRANSIT_KV_ID>"
+#
+# [[kv_namespaces]]
+# binding = "LINKS_KV"
+# id = "<YOUR_LINKS_SHORTENER_KV_ID>"

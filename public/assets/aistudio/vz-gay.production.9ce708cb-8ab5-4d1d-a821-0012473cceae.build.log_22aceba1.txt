@@ -1,0 +1,95 @@
+2026-11-23T06:14:39.054Z	Initializing build environment...
+2026-11-23T06:14:58.444Z	Success: Finished initializing build environment
+2026-11-23T06:15:00.191Z	Cloning repository...
+2026-11-23T06:15:01.948Z	No build output detected to cache. Skipping.
+2026-11-23T06:15:01.948Z	No dependencies detected to cache. Skipping.
+2026-11-23T06:15:01.951Z	Detected the following tools from environment: bun@1.4.4, nodejs@24.22.1
+2026-11-23T06:15:01.953Z	Installing project dependencies: bun install
+2026-11-23T06:15:02.116Z	bun install v1.4.4 (38afee6c8)
+2026-11-23T06:15:02.128Z	Resolving dependencies
+2026-11-23T06:15:04.054Z	Resolved, downloaded and extracted [878]
+2026-11-23T06:15:04.257Z	Saved lockfile
+2026-11-23T06:15:04.257Z	
+2026-11-23T06:15:04.257Z	+ @types/express@4.17.25 (v5.0.6 available)
+2026-11-23T06:15:04.257Z	+ @types/node@22.20.5 (v26.6.6 available)
+2026-11-23T06:15:04.257Z	+ @types/react@19.3.0
+2026-11-23T06:15:04.258Z	+ @types/react-dom@19.3.0
+2026-11-23T06:15:04.258Z	+ autoprefixer@10.7.0
+2026-11-23T06:15:04.258Z	+ esbuild@0.25.12 (v0.28.2 available)
+2026-11-23T06:15:04.258Z	+ tailwindcss@4.3.5
+2026-11-23T06:15:04.258Z	+ tsx@4.23.15
+2026-11-23T06:15:04.258Z	+ typescript@7.0.2
+2026-11-23T06:15:04.259Z	+ @google/genai@2.32.0 (v3.6.1 available)
+2026-11-23T06:15:04.259Z	+ @tailwindcss/vite@4.3.5
+2026-11-23T06:15:04.259Z	+ @vitejs/plugin-react@6.3.0
+2026-11-23T06:15:04.259Z	+ dotenv@17.4.2 (v18.0.10 available)
+2026-11-23T06:15:04.259Z	+ express@4.22.3 (v5.3.0 available)
+2026-11-23T06:15:04.260Z	+ lucide-react@0.546.0 (v1.77.0 available)
+2026-11-23T06:15:04.260Z	+ motion@12.43.0 (v14.14.0 available)
+2026-11-23T06:15:04.260Z	+ react@19.3.1
+2026-11-23T06:15:04.260Z	+ react-dom@19.3.1
+2026-11-23T06:15:04.260Z	+ vite@8.3.8
+2026-11-23T06:15:04.260Z	
+2026-11-23T06:15:04.260Z	179 packages installed [2.18s]
+2026-11-23T06:15:04.260Z	
+2026-11-23T06:15:04.260Z	Blocked 2 postinstalls. Run `bun pm untrusted` for details.
+2026-11-23T06:15:04.541Z	Executing user build command: npm run build
+2026-11-23T06:15:04.954Z	
+2026-11-23T06:15:04.954Z	> react-example@0.0.0 build
+2026-11-23T06:15:04.955Z	> vite build
+2026-11-23T06:15:04.955Z	
+2026-11-23T06:15:05.300Z	(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+2026-11-23T06:15:05.301Z	  - `__dirname` (vite.config.ts:22:40). Use `import.meta.dirname` instead
+2026-11-23T06:15:05.301Z	Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+2026-11-23T06:15:05.317Z	vite v8.3.8 building client environment for production...
+2026-11-23T06:15:05.333Z	transforming...
+2026-11-23T06:15:05.671Z	✓ 1673 modules transformed.
+2026-11-23T06:15:05.742Z	rendering chunks...
+2026-11-23T06:15:05.798Z	computing gzip size...
+2026-11-23T06:15:05.803Z	dist/index.html                   1.98 kB │ gzip:  0.87 kB
+2026-11-23T06:15:05.803Z	dist/assets/index-BPLtpLK9.css   35.52 kB │ gzip:  6.81 kB
+2026-11-23T06:15:05.803Z	dist/assets/index-BMjZ_tH3.js   292.37 kB │ gzip: 86.15 kB
+2026-11-23T06:15:05.803Z	
+2026-11-23T06:15:05.804Z	✓ built in 486ms
+2026-11-23T06:15:05.868Z	Success: Build command completed
+2026-11-23T06:15:06.541Z	Executing user deploy command: npx wrangler deploy
+2026-11-23T06:15:07.754Z	npm warn exec The following package was not found and will be installed: wrangler@4.166.0
+2026-11-23T06:15:18.151Z	npm warn deprecated node-domexception@1.0.0: Use your platform's native DOMException instead
+2026-11-23T06:15:24.268Z	
+2026-11-23T06:15:24.268Z	 ⛅️ wrangler 4.166.0
+2026-11-23T06:15:24.268Z	────────────────────
+2026-11-23T06:15:24.409Z	▲ [WARNING] It seems that you have run `wrangler deploy` on a Pages project, `wrangler pages deploy` should be used instead. Proceeding will likely produce unwanted results.
+2026-11-23T06:15:24.409Z	
+2026-11-23T06:15:24.409Z	
+2026-11-23T06:15:24.412Z	? Are you sure that you want to proceed?
+2026-11-23T06:15:24.412Z	🤖 Using fallback value in non-interactive context: yes
+2026-11-23T06:15:24.418Z	
+2026-11-23T06:15:24.418Z	Cloudflare collects anonymous telemetry about your usage of Wrangler. Learn more at https://github.com/cloudflare/workers-sdk/tree/main/packages/wrangler/telemetry.md
+2026-11-23T06:15:24.420Z	
+2026-11-23T06:15:24.426Z	✘ [ERROR] Missing entry-point to Worker script or to assets directory
+2026-11-23T06:15:24.426Z	
+2026-11-23T06:15:24.426Z	  
+2026-11-23T06:15:24.426Z	  If there is code to deploy, you can either:
+2026-11-23T06:15:24.426Z	  - Specify an entry-point to your Worker script via the command line (ex: `npx wrangler deploy src/index.ts`)
+2026-11-23T06:15:24.426Z	  - Or add the following to your "wrangler.toml" file:
+2026-11-23T06:15:24.426Z	  
+2026-11-23T06:15:24.427Z	  ```
+2026-11-23T06:15:24.427Z	  main = "src/index.ts"
+2026-11-23T06:15:24.427Z	  
+2026-11-23T06:15:24.427Z	  ```
+2026-11-23T06:15:24.427Z	  
+2026-11-23T06:15:24.427Z	  
+2026-11-23T06:15:24.427Z	  If are uploading a directory of assets, you can either:
+2026-11-23T06:15:24.427Z	  - Specify the path to the directory of assets via the command line: (ex: `npx wrangler deploy --assets=./dist`)
+2026-11-23T06:15:24.428Z	  - Or add the following to your "wrangler.toml" file:
+2026-11-23T06:15:24.428Z	  
+2026-11-23T06:15:24.430Z	  ```
+2026-11-23T06:15:24.430Z	  [assets]
+2026-11-23T06:15:24.430Z	  directory = "./dist"
+2026-11-23T06:15:24.430Z	  
+2026-11-23T06:15:24.431Z	  ```
+2026-11-23T06:15:24.431Z	  
+2026-11-23T06:15:24.431Z	
+2026-11-23T06:15:24.431Z	
+2026-11-23T06:15:24.432Z	🪵  Logs were written to "/opt/buildhome/.config/.wrangler/logs/wrangler-2026-11-23_06-15-24_021.log"
+2026-11-23T06:15:24.555Z	Failed: error occurred while running deploy command
