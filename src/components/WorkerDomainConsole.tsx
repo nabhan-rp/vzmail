@@ -7,10 +7,10 @@ import {
   Server,
   ShieldCheck,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import { getOrSeedDomains, saveDomainOption } from '../utils/localMailDb';
-import type { MailDomainOption } from '../utils/mailIdentity';
+import { sanitizeDomain, type MailDomainOption } from '../utils/mailIdentity';
 
 interface WorkerDomainConsoleProps {
   lang: Language;
@@ -19,73 +19,104 @@ interface WorkerDomainConsoleProps {
 
 const WORKER_DEPLOY_SNIPPET = `// cloudflare/worker-mail-links.ts (2-in-1 Worker: mail.vz.gay + links.vz.gay + *.imy.li)
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const host = url.hostname.toLowerCase();
 
-    // 1. Shortlink Redirector: imy.li/s/$URL
+    // 1. Ephemeral Relay & Shortlink API (/api/health, /api/mail/*, /api/links/*)
+    if (url.pathname.startsWith('/api/')) {
+      return handleApiRequest(request, url, env);
+    }
+
+    // 2. Validated HTTP 301 Shortlink Redirector: imy.li/s/$URL
     if (url.pathname.startsWith('/s/')) {
-      const slug = url.pathname.replace(/^\\/s\\//, '').split('/')[0];
-      const target = await env.LINKS_KV.get(\`short:\${slug}\`, 'text');
-      if (target) return Response.redirect(target, 301);
+      const slug = sanitizeSlug(url.pathname.replace(/^\\/s\\//, '').split('/')[0] || '');
+      const target = slug && env.LINKS_KV ? await env.LINKS_KV.get(\`short:\${slug}\`, 'text') : null;
+      const safeTarget = target ? sanitizeExternalUrl(target, { blockPrivateHosts: true }) : null;
+      if (safeTarget) return Response.redirect(safeTarget, 301);
     }
 
-    // 2. Wildcard Static Link-in-Bio: $USERNAME.imy.li (Zero Cookie Collision)
-    if (host.endsWith('.imy.li') && host !== 'www.imy.li') {
-      const resp = await env.ASSETS.fetch(request);
-      const headers = new Headers(resp.headers);
-      headers.delete('Set-Cookie');
-      return new Response(resp.body, { status: resp.status, headers });
-    }
-
-    return env.ASSETS.fetch(request);
+    // 3. Wildcard Static Link-in-Bio: $USERNAME.imy.li (Zero Cookie Collision + Strict CSP)
+    const isBioSubdomain = host.endsWith('.imy.li') && host !== 'www.imy.li' && host !== 'mail.imy.li';
+    const resp = await env.ASSETS.fetch(request);
+    return applyHtmlSecurityHeaders(resp, { isBioSubdomain, isHttps: url.protocol === 'https:' });
   },
 
-  // 3. Inbound Cloudflare Email Routing -> Ephemeral Pop-and-Purge Queue
-  async email(message, env) {
-    const [local, domain] = message.to.toLowerCase().split('@');
-    const [base, plusTag] = local.split('+');
-    const canonicalUser = base.replace(/\\./g, '');
-    const id = \`\${Date.now()}-\${Math.random().toString(36).slice(2, 8)}\`;
+  // 4. Inbound Cloudflare Email Routing -> Memory-Safe Bounded Stream -> Ephemeral KV Queue
+  async email(message, env, ctx) {
+    if (message.rawSize > 10 * 1024 * 1024) {
+      message.setReject('Message exceeds 10 MB ephemeral relay size limit.');
+      return;
+    }
+    const resolved = canonicalizeImyRecipient(message.to);
+    const id = \`cf-in-\${crypto.randomUUID()}\`;
+    const { text } = await readBoundedStreamText(message.raw, 256 * 1024);
 
-    await env.MAIL_TRANSIT_KV.put(
-      \`q:\${canonicalUser}:\${id}\`,
-      JSON.stringify({
-        id,
-        canonicalUser,
-        fromAddress: message.from,
-        toAddress: message.to,
-        plusTag: plusTag || null,
-        subject: message.headers.get('subject') || '(No Subject)',
-        bodyText: await new Response(message.raw).text(),
-        receivedAt: new Date().toISOString(),
-      }),
-      { expirationTtl: 72 * 3600 }
-    );
+    if (env.MAIL_TRANSIT_KV) {
+      await env.MAIL_TRANSIT_KV.put(
+        \`q:\${resolved.canonicalUser}:\${id}\`,
+        JSON.stringify({
+          id,
+          canonicalUser: resolved.canonicalUser,
+          fromAddress: message.from,
+          toAddress: message.to,
+          plusTag: resolved.plusTag,
+          dotNormalized: resolved.dotNormalized,
+          subject: message.headers.get('subject') || '(No Subject)',
+          bodyText: extractReadableBodyFromRawMime(text),
+          receivedAt: new Date().toISOString(),
+        }),
+        { expirationTtl: 72 * 3600 }
+      );
+    }
   }
 };`;
 
-const WRANGLER_ROUTES_SNIPPET = `name = "vz-mail-and-links"
+const WRANGLER_ROUTES_SNIPPET = `name = "vzmail"
 main = "cloudflare/worker-mail-links.ts"
-compatibility_date = "2025-01-01"
+compatibility_date = "2026-11-19"
+compatibility_flags = ["nodejs_compat"]
 
-routes = [
-  { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
-  { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
-  { pattern = "imy.li/*", zone_name = "imy.li" },
-  { pattern = "*.imy.li/*", zone_name = "imy.li" }
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = [
+  "/*",
+  "!/assets/*",
+  "!/favicon.svg",
+  "!/og-banner.jpg",
+  "!/robots.txt",
+  "!/sitemap.xml",
+  "!/cloudflare_imy_mail_links_relay.php.txt"
 ]
 
-[[send_email]]
-name = "SEND_EMAIL"
+[observability]
+enabled = true
+[observability.logs]
+enabled = true
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1
 
-[[kv_namespaces]]
-binding = "MAIL_TRANSIT_KV"
-id = "<EPHEMERAL_TRANSIT_KV_ID>"
-
-[[kv_namespaces]]
-binding = "LINKS_KV"
-id = "<SHORTLINKS_KV_ID>"`;
+# Uncomment after zones & bindings are created in Cloudflare Dashboard:
+# routes = [
+#   { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
+#   { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
+#   { pattern = "imy.li/*", zone_name = "imy.li" },
+#   { pattern = "*.imy.li/*", zone_name = "imy.li" }
+# ]
+#
+# [[send_email]]
+# name = "SEND_EMAIL"
+#
+# [[kv_namespaces]]
+# binding = "MAIL_TRANSIT_KV"
+# id = "<EPHEMERAL_TRANSIT_KV_ID>"
+#
+# [[kv_namespaces]]
+# binding = "LINKS_KV"
+# id = "<SHORTLINKS_KV_ID>"`;
 
 export function WorkerDomainConsole({
   lang,
@@ -94,6 +125,7 @@ export function WorkerDomainConsole({
   const [domains, setDomains] = useState<MailDomainOption[]>([]);
   const [newDomainInput, setNewDomainInput] = useState('');
   const [copiedMsg, setCopiedMsg] = useState<string | null>(null);
+  const timerRef = useRef<number | null>(null);
 
   const loadDomains = async () => {
     const list = await getOrSeedDomains();
@@ -102,11 +134,19 @@ export function WorkerDomainConsole({
 
   useEffect(() => {
     loadDomains();
+    return () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+      }
+    };
   }, []);
 
   const flashCopied = (text: string) => {
     setCopiedMsg(text);
-    window.setTimeout(() => setCopiedMsg(null), 3000);
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+    }
+    timerRef.current = window.setTimeout(() => setCopiedMsg(null), 3000);
   };
 
   const handleToggleDomainStatus = async (item: MailDomainOption) => {
@@ -122,12 +162,15 @@ export function WorkerDomainConsole({
 
   const handleAddFutureDomain = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleaned = newDomainInput
-      .trim()
-      .toLowerCase()
-      .replace(/^https?:\/\//, '')
-      .replace(/\/.*$/, '');
-    if (!cleaned || !cleaned.includes('.')) return;
+    const cleaned = sanitizeDomain(newDomainInput);
+    if (!cleaned) {
+      flashCopied(
+        lang === 'id'
+          ? 'Format domain tidak valid (contoh: domainbaru.pm).'
+          : 'Invalid domain format (e.g. newdomain.pm).'
+      );
+      return;
+    }
 
     const tld = '.' + cleaned.split('.').slice(-1)[0];
     const opt: MailDomainOption = {
@@ -351,7 +394,7 @@ export function WorkerDomainConsole({
                 </td>
                 <td className="py-2 px-4">*.imy.li</td>
                 <td className="py-2 px-4">
-                  vz-mail-and-links.workers.dev (Proxied Orange Cloud)
+                  vzmail.workers.dev (Proxied Orange Cloud)
                 </td>
                 <td className="py-2 pl-4 font-sans text-slate-500">
                   Wildcard SSL otomatis untuk $USERNAME.imy.li Bio
@@ -364,7 +407,7 @@ export function WorkerDomainConsole({
                 <td className="py-2 px-4">
                   mail.vz.gay/* · links.vz.gay/* · imy.li/s/*
                 </td>
-                <td className="py-2 px-4">vz-mail-and-links (2-in-1 Worker)</td>
+                <td className="py-2 px-4">vzmail (2-in-1 Worker + Assets)</td>
                 <td className="py-2 pl-4 font-sans text-slate-500">
                   Menyatukan VZ Mail, VZ Links &amp; Shortlinks dalam 1 deploy
                 </td>

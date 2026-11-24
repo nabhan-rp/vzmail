@@ -4,7 +4,7 @@ import {
   Mail,
   ShieldCheck,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import {
@@ -12,30 +12,58 @@ import {
   saveBioProfile,
   type ImyBioProfile,
 } from '../utils/localMailDb';
+import { isValidEmailAddress, sanitizeExternalUrl } from '../utils/mailSecurity';
 import type { ActiveHostView } from './MailLinksTopBar';
 
 interface ImyBioPublicViewProps {
   lang: Language;
   session: SsoSession;
+  overrideUser?: string | null;
   onSelectHost: (host: ActiveHostView) => void;
 }
 
 export function ImyBioPublicView({
   lang,
   session,
+  overrideUser,
   onSelectHost,
 }: ImyBioPublicViewProps) {
-  const user = session.isAuthenticated ? session.username : 'fadhil';
+  const user =
+    overrideUser || (session.isAuthenticated ? session.username : 'fadhil');
   const domain = session.primaryDomain || 'imy.li';
   const [profile, setProfile] = useState<ImyBioProfile | null>(null);
   const [clickedNotice, setClickedNotice] = useState<string | null>(null);
+  const timerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    getOrSeedBioProfile(user).then(setProfile);
+    let cancelled = false;
+    getOrSeedBioProfile(user)
+      .then((loaded) => {
+        if (!cancelled) setProfile(loaded);
+      })
+      .catch(() => {
+        // Handled by loading fallback
+      });
+    return () => {
+      cancelled = true;
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+      }
+    };
   }, [user]);
 
-  const handleLinkClick = async (linkId: string, url: string) => {
+  const handleLinkClick = async (linkId: string, rawUrl: string) => {
     if (!profile) return;
+    const safeUrl = sanitizeExternalUrl(rawUrl, { allowMailto: true });
+    if (!safeUrl) {
+      setClickedNotice(
+        lang === 'id'
+          ? 'Tautan diblokir karena skema URL tidak aman.'
+          : 'Blocked unsafe link URL scheme.'
+      );
+      return;
+    }
+
     const updated: ImyBioProfile = {
       ...profile,
       links: profile.links.map((l) =>
@@ -44,8 +72,17 @@ export function ImyBioPublicView({
     };
     await saveBioProfile(updated);
     setProfile(updated);
-    setClickedNotice(url);
-    window.setTimeout(() => setClickedNotice(null), 3000);
+    setClickedNotice(safeUrl);
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+    }
+    timerRef.current = window.setTimeout(() => setClickedNotice(null), 3500);
+
+    if (safeUrl.startsWith('mailto:')) {
+      window.location.href = safeUrl;
+    } else {
+      window.open(safeUrl, '_blank', 'noopener,noreferrer');
+    }
   };
 
   if (!profile) {
@@ -55,6 +92,10 @@ export function ImyBioPublicView({
       </div>
     );
   }
+
+  const safePublicEmail = isValidEmailAddress(profile.publicEmailAlias)
+    ? profile.publicEmailAlias.trim().toLowerCase()
+    : `${user}@${domain}`;
 
   return (
     <div className="max-w-[960px] mx-auto px-4 sm:px-6 py-10 space-y-6">
@@ -132,12 +173,12 @@ export function ImyBioPublicView({
                 </span>
               </div>
               <div className="text-xs font-mono text-slate-500">
-                {profile.publicEmailAlias}
+                {safePublicEmail}
               </div>
             </div>
 
             <a
-              href={`mailto:${profile.publicEmailAlias}`}
+              href={`mailto:${safePublicEmail}`}
               className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg text-center whitespace-nowrap shrink-0"
             >
               {lang === 'id' ? 'Kirim Email' : 'Send Email'}
@@ -161,7 +202,7 @@ export function ImyBioPublicView({
                 <div className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
                   {item.subtitle}
                 </div>
-                <div className="text-[11px] font-mono text-slate-400 mt-1 tabular-nums">
+                <div className="text-[11px] font-mono text-slate-400 mt-1 tabular-nums truncate">
                   {item.url} · {item.clicks} clicks
                 </div>
               </div>
@@ -171,8 +212,8 @@ export function ImyBioPublicView({
         </div>
 
         {clickedNotice && (
-          <div className="text-xs font-mono text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/50 rounded-lg px-3 py-2">
-            Verified safe redirect recorded -&gt; {clickedNotice}
+          <div className="text-xs font-mono text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/50 rounded-lg px-3 py-2 break-all">
+            Verified safe redirect -&gt; {clickedNotice}
           </div>
         )}
 

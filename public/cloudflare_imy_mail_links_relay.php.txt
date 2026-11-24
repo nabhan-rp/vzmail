@@ -8,25 +8,32 @@
  * atau sinkronisasi shortlink imy.li/s/$URL tanpa menyimpan mailbox permanen.
  */
 
+declare(strict_types=1);
+
 header('Content-Type: application/json; charset=utf-8');
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header('Cache-Control: no-store');
 header('X-VZ-Zero-Retention: true');
 
-$action = $_GET['action'] ?? 'status';
+$action = isset($_GET['action']) && is_string($_GET['action']) ? $_GET['action'] : 'status';
 
 function canonicalize_imy_address(string $rawEmail): array {
-    $trimmed = strtolower(trim($rawEmail));
+    $trimmed = strtolower(trim(substr($rawEmail, 0, 254)));
     $parts = explode('@', $trimmed, 2);
     $local = $parts[0] ?? 'fadhil';
-    $domain = $parts[1] ?? 'imy.li';
+    $domain = preg_replace('/[^a-z0-9.-]/', '', $parts[1] ?? 'imy.li') ?: 'imy.li';
 
     $plusParts = explode('+', $local, 2);
     $base = $plusParts[0];
-    $plusTag = $plusParts[1] ?? null;
+    $plusTag = isset($plusParts[1]) ? (preg_replace('/[^a-z0-9._-]/', '', $plusParts[1]) ?: null) : null;
 
     $canonicalUser = preg_replace('/[^a-z0-9_-]/', '', str_replace('.', '', $base));
+    $safeUser = $canonicalUser !== '' ? substr($canonicalUser, 0, 64) : 'fadhil';
+
     return [
-        'canonicalUser' => $canonicalUser ?: 'fadhil',
-        'canonicalEmail' => ($canonicalUser ?: 'fadhil') . '@' . $domain,
+        'canonicalUser' => $safeUser,
+        'canonicalEmail' => $safeUser . '@' . $domain,
         'plusTag' => $plusTag,
         'dotNormalized' => strpos($base, '.') !== false,
         'domain' => $domain,
@@ -34,11 +41,11 @@ function canonicalize_imy_address(string $rawEmail): array {
 }
 
 if ($action === 'resolve') {
-    $email = $_GET['email'] ?? 'fa.dhil+news@imy.li';
+    $email = isset($_GET['email']) && is_string($_GET['email']) ? $_GET['email'] : 'fa.dhil+news@imy.li';
     echo json_encode([
         'ok' => true,
         'resolved' => canonicalize_imy_address($email),
-    ]);
+    ], JSON_UNESCAPED_SLASHES);
     exit;
 }
 
@@ -46,4 +53,4 @@ echo json_encode([
     'ok' => true,
     'service' => 'VZ Mail (mail.vz.gay) + VZ Links (links.vz.gay / *.imy.li) Ephemeral Relay',
     'retention' => 'ZERO_SERVER_STORAGE_POP_AND_PURGE',
-]);
+], JSON_UNESCAPED_SLASHES);

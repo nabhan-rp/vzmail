@@ -1,20 +1,52 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { CrossServiceOfferBar } from './components/CrossServiceOfferBar';
-import { ImyBioPublicView } from './components/ImyBioPublicView';
-import { LinksLandingGate } from './components/LinksLandingGate';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { MailLandingGate } from './components/MailLandingGate';
 import {
   MailLinksTopBar,
   type ActiveHostView,
 } from './components/MailLinksTopBar';
-import { UniversalSsoModal } from './components/UniversalSsoModal';
-import { VaultBackupModal } from './components/VaultBackupModal';
-import { VzLinksWorkspace } from './components/VzLinksWorkspace';
-import { VzMailWorkspace } from './components/VzMailWorkspace';
-import { WorkerDomainConsole } from './components/WorkerDomainConsole';
 import { useLanguage } from './hooks/useLanguage';
 import { useSsoSession } from './hooks/useSsoSession';
 import { useTheme } from './hooks/useTheme';
+import { sanitizeHandle } from './utils/mailIdentity';
+
+// Lazy-load heavy workspaces & modals to keep initial landing page JS minimal
+const VzMailWorkspace = lazy(() =>
+  import('./components/VzMailWorkspace').then((m) => ({
+    default: m.VzMailWorkspace,
+  }))
+);
+const VzLinksWorkspace = lazy(() =>
+  import('./components/VzLinksWorkspace').then((m) => ({
+    default: m.VzLinksWorkspace,
+  }))
+);
+const LinksLandingGate = lazy(() =>
+  import('./components/LinksLandingGate').then((m) => ({
+    default: m.LinksLandingGate,
+  }))
+);
+const ImyBioPublicView = lazy(() =>
+  import('./components/ImyBioPublicView').then((m) => ({
+    default: m.ImyBioPublicView,
+  }))
+);
+const WorkerDomainConsole = lazy(() =>
+  import('./components/WorkerDomainConsole').then((m) => ({
+    default: m.WorkerDomainConsole,
+  }))
+);
+const UniversalSsoModal = lazy(() =>
+  import('./components/UniversalSsoModal').then((m) => ({
+    default: m.UniversalSsoModal,
+  }))
+);
+const VaultBackupModal = lazy(() =>
+  import('./components/VaultBackupModal').then((m) => ({
+    default: m.VaultBackupModal,
+  }))
+);
 
 function detectInitialHostView(): ActiveHostView {
   if (typeof window === 'undefined') return 'mail.vz.gay';
@@ -23,10 +55,17 @@ function detectInitialHostView(): ActiveHostView {
   const hostMode = params.get('host_mode');
   const pathname = window.location.pathname.toLowerCase();
 
-  if (hostMode === 'bio' || (host.endsWith('.imy.li') && host !== 'www.imy.li')) {
+  if (
+    hostMode === 'bio' ||
+    (host.endsWith('.imy.li') && host !== 'www.imy.li' && host !== 'mail.imy.li')
+  ) {
     return 'bio_public';
   }
-  if (host === 'links.vz.gay' || hostMode === 'links' || pathname.startsWith('/links')) {
+  if (
+    host === 'links.vz.gay' ||
+    hostMode === 'links' ||
+    pathname.startsWith('/links')
+  ) {
     return 'links.vz.gay';
   }
   if (pathname.startsWith('/s/') || hostMode === 'shortlinks') {
@@ -36,6 +75,32 @@ function detectInitialHostView(): ActiveHostView {
     return 'worker_console';
   }
   return 'mail.vz.gay';
+}
+
+function detectBioSubdomainUser(): string | null {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.search);
+  const queryBioUser = params.get('bio_user');
+  if (queryBioUser && queryBioUser.trim()) {
+    return sanitizeHandle(queryBioUser);
+  }
+  const host = window.location.hostname.toLowerCase();
+  if (host.endsWith('.imy.li') && host !== 'www.imy.li' && host !== 'mail.imy.li') {
+    const sub = host.slice(0, -'.imy.li'.length);
+    if (sub && !sub.includes('.')) {
+      return sanitizeHandle(sub);
+    }
+  }
+  return null;
+}
+
+function WorkspaceFallback() {
+  return (
+    <div className="max-w-[1280px] mx-auto px-4 sm:px-6 py-10 space-y-4">
+      <div className="h-10 w-64 rounded-lg bg-slate-200 dark:bg-[#191E28] animate-pulse" />
+      <div className="h-64 w-full rounded-xl bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] animate-pulse" />
+    </div>
+  );
 }
 
 export default function App() {
@@ -56,6 +121,7 @@ export default function App() {
   const [activeHost, setActiveHost] = useState<ActiveHostView>(() =>
     detectInitialHostView()
   );
+  const urlBioUser = useMemo(() => detectBioSubdomainUser(), []);
   const [ssoOpen, setSsoOpen] = useState(false);
   const [vaultOpen, setVaultOpen] = useState(false);
   const [composeCounter, setComposeCounter] = useState(0);
@@ -63,7 +129,12 @@ export default function App() {
 
   // Keep document title synchronized with the active domain view
   useEffect(() => {
-    const user = session.isAuthenticated ? session.username : 'username';
+    const user =
+      activeHost === 'bio_public' && urlBioUser
+        ? urlBioUser
+        : session.isAuthenticated
+          ? session.username
+          : 'username';
     const domain = session.primaryDomain || 'imy.li';
     if (activeHost === 'links.vz.gay') {
       document.title = `VZ Links (links.vz.gay) — ${user}.${domain} & ${domain}/s/`;
@@ -76,196 +147,215 @@ export default function App() {
     } else {
       document.title = `VZ Mail (mail.vz.gay) — Email Lokal Privat @${domain}`;
     }
-  }, [activeHost, session.isAuthenticated, session.username, session.primaryDomain]);
+  }, [
+    activeHost,
+    urlBioUser,
+    session.isAuthenticated,
+    session.username,
+    session.primaryDomain,
+  ]);
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#FAFAFA] text-slate-900 dark:bg-[#0B0D11] dark:text-slate-100">
-      <MailLinksTopBar
-        lang={lang}
-        activeHost={activeHost}
-        onSelectHost={setActiveHost}
-        session={session}
-        onOpenSso={() => setSsoOpen(true)}
-        onOpenCompose={() => setComposeCounter((c) => c + 1)}
-      />
+    <ErrorBoundary>
+      <div className="min-h-screen flex flex-col bg-[#FAFAFA] text-slate-900 dark:bg-[#0B0D11] dark:text-slate-100">
+        <MailLinksTopBar
+          lang={lang}
+          activeHost={activeHost}
+          onSelectHost={setActiveHost}
+          session={session}
+          onOpenSso={() => setSsoOpen(true)}
+          onOpenCompose={() => setComposeCounter((c) => c + 1)}
+        />
 
-      <CrossServiceOfferBar
-        lang={lang}
-        username={session.username || 'fadhil'}
-        domain={session.primaryDomain || 'imy.li'}
-        crossOffer={crossOffer}
-        onAcceptLinksOffer={() => activateLinks(false)}
-        onAcceptMailOffer={() => activateMail(false)}
-        onDismiss={dismissCrossOffer}
-        onSelectHost={setActiveHost}
-      />
+        <CrossServiceOfferBar
+          lang={lang}
+          username={session.username || 'fadhil'}
+          domain={session.primaryDomain || 'imy.li'}
+          crossOffer={crossOffer}
+          onAcceptLinksOffer={() => activateLinks(false)}
+          onAcceptMailOffer={() => activateMail(false)}
+          onDismiss={dismissCrossOffer}
+          onSelectHost={setActiveHost}
+        />
 
-      <main className="flex-1">
-        {activeHost === 'mail.vz.gay' &&
-          (session.isAuthenticated && session.mailActivated ? (
-            <VzMailWorkspace
+        <main className="flex-1">
+          <Suspense fallback={<WorkspaceFallback />}>
+            {activeHost === 'mail.vz.gay' &&
+              (session.isAuthenticated && session.mailActivated ? (
+                <VzMailWorkspace
+                  lang={lang}
+                  onChangeLang={setLang}
+                  theme={theme}
+                  onChangeTheme={setTheme}
+                  session={session}
+                  composeRequested={composeCounter}
+                  onSelectHost={setActiveHost}
+                  onOpenVault={() => setVaultOpen(true)}
+                  onOpenSso={() => setSsoOpen(true)}
+                  onDeactivateMail={deactivateMail}
+                  refreshTrigger={mailRefreshCounter}
+                />
+              ) : (
+                <MailLandingGate
+                  lang={lang}
+                  session={session}
+                  onActivateMail={() => {
+                    if (!session.isAuthenticated) {
+                      setSsoOpen(true);
+                      return;
+                    }
+                    activateMail(true);
+                  }}
+                  onOpenSso={() => setSsoOpen(true)}
+                  onSelectHost={setActiveHost}
+                />
+              ))}
+
+            {activeHost === 'links.vz.gay' &&
+              (session.isAuthenticated && session.linksActivated ? (
+                <VzLinksWorkspace
+                  lang={lang}
+                  session={session}
+                  initialSubTab="bio"
+                  onSelectHost={setActiveHost}
+                  onActivateMailFromLinks={() => activateMail(false)}
+                  onDeactivateLinks={deactivateLinks}
+                  onOpenSso={() => setSsoOpen(true)}
+                />
+              ) : (
+                <LinksLandingGate
+                  lang={lang}
+                  session={session}
+                  onActivateLinks={() => {
+                    if (!session.isAuthenticated) {
+                      setSsoOpen(true);
+                      return;
+                    }
+                    activateLinks(true);
+                  }}
+                  onOpenSso={() => setSsoOpen(true)}
+                  onSelectHost={setActiveHost}
+                />
+              ))}
+
+            {activeHost === 'shortlinks' &&
+              (session.isAuthenticated && session.linksActivated ? (
+                <VzLinksWorkspace
+                  lang={lang}
+                  session={session}
+                  initialSubTab="shortlinks"
+                  onSelectHost={setActiveHost}
+                  onActivateMailFromLinks={() => activateMail(false)}
+                  onDeactivateLinks={deactivateLinks}
+                  onOpenSso={() => setSsoOpen(true)}
+                />
+              ) : (
+                <LinksLandingGate
+                  lang={lang}
+                  session={session}
+                  onActivateLinks={() => {
+                    if (!session.isAuthenticated) {
+                      setSsoOpen(true);
+                      return;
+                    }
+                    activateLinks(true);
+                  }}
+                  onOpenSso={() => setSsoOpen(true)}
+                  onSelectHost={setActiveHost}
+                />
+              ))}
+
+            {activeHost === 'bio_public' && (
+              <ImyBioPublicView
+                lang={lang}
+                session={session}
+                overrideUser={urlBioUser}
+                onSelectHost={setActiveHost}
+              />
+            )}
+
+            {activeHost === 'worker_console' && (
+              <WorkerDomainConsole
+                lang={lang}
+                username={session.username || 'fadhil'}
+              />
+            )}
+          </Suspense>
+        </main>
+
+        <footer className="border-t border-slate-200 dark:border-[#232732] bg-white dark:bg-[#0D1016]">
+          <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-5 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
+            <div>
+              <span>© 2026 PT Galeri Langkah Bahagia Yuwana (galbay)</span>
+              <span aria-hidden="true"> · </span>
+              <span className="font-mono">
+                mail.vz.gay + links.vz.gay + *.imy.li
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-4">
+              <a
+                href="https://vz.gay"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-slate-900 dark:hover:text-white transition-colors"
+              >
+                vz.gay Portal
+              </a>
+              <a
+                href="https://myaccount.vz.gay"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-slate-900 dark:hover:text-white transition-colors"
+              >
+                myaccount.vz.gay
+              </a>
+              <button
+                type="button"
+                onClick={() => setLang(lang === 'id' ? 'en' : 'id')}
+                className="font-mono hover:text-slate-900 dark:hover:text-white cursor-pointer"
+              >
+                {lang === 'id' ? 'Switch to EN' : 'Ganti ke ID'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                className="hover:text-slate-900 dark:hover:text-white cursor-pointer"
+              >
+                {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+              </button>
+            </div>
+          </div>
+        </footer>
+
+        {ssoOpen && (
+          <Suspense fallback={null}>
+            <UniversalSsoModal
+              isOpen={ssoOpen}
               lang={lang}
-              onChangeLang={setLang}
-              theme={theme}
-              onChangeTheme={setTheme}
               session={session}
-              composeRequested={composeCounter}
-              onSelectHost={setActiveHost}
-              onOpenVault={() => setVaultOpen(true)}
-              onOpenSso={() => setSsoOpen(true)}
+              onSignIn={signIn}
+              onSignOut={signOut}
+              onActivateMail={() => activateMail(true)}
               onDeactivateMail={deactivateMail}
-              refreshTrigger={mailRefreshCounter}
-            />
-          ) : (
-            <MailLandingGate
-              lang={lang}
-              session={session}
-              onActivateMail={() => {
-                if (!session.isAuthenticated) {
-                  setSsoOpen(true);
-                  return;
-                }
-                activateMail(true);
-              }}
-              onOpenSso={() => setSsoOpen(true)}
-              onSelectHost={setActiveHost}
-            />
-          ))}
-
-        {activeHost === 'links.vz.gay' &&
-          (session.isAuthenticated && session.linksActivated ? (
-            <VzLinksWorkspace
-              lang={lang}
-              session={session}
-              initialSubTab="bio"
-              onSelectHost={setActiveHost}
-              onActivateMailFromLinks={() => activateMail(false)}
+              onActivateLinks={() => activateLinks(true)}
               onDeactivateLinks={deactivateLinks}
-              onOpenSso={() => setSsoOpen(true)}
+              onClose={() => setSsoOpen(false)}
             />
-          ) : (
-            <LinksLandingGate
-              lang={lang}
-              session={session}
-              onActivateLinks={() => {
-                if (!session.isAuthenticated) {
-                  setSsoOpen(true);
-                  return;
-                }
-                activateLinks(true);
-              }}
-              onOpenSso={() => setSsoOpen(true)}
-              onSelectHost={setActiveHost}
-            />
-          ))}
-
-        {activeHost === 'shortlinks' &&
-          (session.isAuthenticated && session.linksActivated ? (
-            <VzLinksWorkspace
-              lang={lang}
-              session={session}
-              initialSubTab="shortlinks"
-              onSelectHost={setActiveHost}
-              onActivateMailFromLinks={() => activateMail(false)}
-              onDeactivateLinks={deactivateLinks}
-              onOpenSso={() => setSsoOpen(true)}
-            />
-          ) : (
-            <LinksLandingGate
-              lang={lang}
-              session={session}
-              onActivateLinks={() => {
-                if (!session.isAuthenticated) {
-                  setSsoOpen(true);
-                  return;
-                }
-                activateLinks(true);
-              }}
-              onOpenSso={() => setSsoOpen(true)}
-              onSelectHost={setActiveHost}
-            />
-          ))}
-
-        {activeHost === 'bio_public' && (
-          <ImyBioPublicView
-            lang={lang}
-            session={session}
-            onSelectHost={setActiveHost}
-          />
+          </Suspense>
         )}
 
-        {activeHost === 'worker_console' && (
-          <WorkerDomainConsole
-            lang={lang}
-            username={session.username || 'fadhil'}
-          />
+        {vaultOpen && (
+          <Suspense fallback={null}>
+            <VaultBackupModal
+              isOpen={vaultOpen}
+              lang={lang}
+              username={session.username || 'fadhil'}
+              onClose={() => setVaultOpen(false)}
+              onImported={() => setMailRefreshCounter((c) => c + 1)}
+            />
+          </Suspense>
         )}
-      </main>
-
-      <footer className="border-t border-slate-200 dark:border-[#232732] bg-white dark:bg-[#0D1016]">
-        <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-5 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
-          <div>
-            <span>© 2026 PT Galeri Langkah Bahagia Yuwana (galbay)</span>
-            <span aria-hidden="true"> · </span>
-            <span className="font-mono">
-              mail.vz.gay + links.vz.gay + *.imy.li
-            </span>
-          </div>
-          <div className="flex flex-wrap items-center gap-4">
-            <a
-              href="https://vz.gay"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hover:text-slate-900 dark:hover:text-white transition-colors"
-            >
-              vz.gay Portal
-            </a>
-            <a
-              href="https://myaccount.vz.gay"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hover:text-slate-900 dark:hover:text-white transition-colors"
-            >
-              myaccount.vz.gay
-            </a>
-            <button
-              type="button"
-              onClick={() => setLang(lang === 'id' ? 'en' : 'id')}
-              className="font-mono hover:text-slate-900 dark:hover:text-white cursor-pointer"
-            >
-              {lang === 'id' ? 'Switch to EN' : 'Ganti ke ID'}
-            </button>
-            <button
-              type="button"
-              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-              className="hover:text-slate-900 dark:hover:text-white cursor-pointer"
-            >
-              {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-            </button>
-          </div>
-        </div>
-      </footer>
-
-      <UniversalSsoModal
-        isOpen={ssoOpen}
-        lang={lang}
-        session={session}
-        onSignIn={signIn}
-        onSignOut={signOut}
-        onActivateMail={() => activateMail(true)}
-        onDeactivateMail={deactivateMail}
-        onActivateLinks={() => activateLinks(true)}
-        onDeactivateLinks={deactivateLinks}
-        onClose={() => setSsoOpen(false)}
-      />
-
-      <VaultBackupModal
-        isOpen={vaultOpen}
-        lang={lang}
-        username={session.username || 'fadhil'}
-        onClose={() => setVaultOpen(false)}
-        onImported={() => setMailRefreshCounter((c) => c + 1)}
-      />
-    </div>
+      </div>
+    </ErrorBoundary>
   );
 }

@@ -24,7 +24,7 @@
       property="og:description"
       content="Email percakapan berbasis IndexedDB perangkat lokal dengan Cloudflare Email Routing, alias + dan ., serta halaman bio $USERNAME.imy.li dan shortlink imy.li/s/."
     />
-    <meta property="og:image" content="https://vz.gay/og-banner.jpg" />
+    <meta property="og:image" content="https://mail.vz.gay/og-banner.jpg" />
     <meta
       property="og:image:alt"
       content="VZ Mail (mail.vz.gay) &amp; VZ Links (links.vz.gay) oleh PT Galeri Langkah Bahagia Yuwana (galbay)"
@@ -35,7 +35,7 @@
       name="twitter:description"
       content="Email privat tanpa penyimpanan server (Zero Retention) + Link-in-Bio $USERNAME.imy.li + Shortlink imy.li/s/ dalam 1 Cloudflare Worker."
     />
-    <meta name="twitter:image" content="https://vz.gay/og-banner.jpg" />
+    <meta name="twitter:image" content="https://mail.vz.gay/og-banner.jpg" />
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -66,9 +66,22 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap"
-      rel="stylesheet"
+      rel="preload"
+      as="style"
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap"
     />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap"
+      rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
+    />
+    <noscript>
+      <link
+        href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap"
+        rel="stylesheet"
+      />
+    </noscript>
     <script>
       (function () {
         try {

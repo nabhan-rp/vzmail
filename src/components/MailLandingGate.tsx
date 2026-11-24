@@ -7,7 +7,7 @@ import {
   Mail,
   ShieldCheck,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import {
@@ -36,6 +36,10 @@ export function MailLandingGate({
   const [testInput, setTestInput] = useState(
     `${user.slice(0, 2)}.${user.slice(2) || 'id'}+github@${domain}`
   );
+
+  useEffect(() => {
+    setTestInput(`${user.slice(0, 2)}.${user.slice(2) || 'id'}+github@${domain}`);
+  }, [user, domain]);
 
   const resolved = resolveCanonicalEmail(testInput, [domain, 'vz.gay']);
   const aliasExamples = generateAliasExamples(user, domain);

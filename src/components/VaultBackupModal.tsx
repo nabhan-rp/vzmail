@@ -7,7 +7,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Language } from '../data/i18n';
 import {
   getMessagesForUser,
@@ -47,6 +47,19 @@ export function VaultBackupModal({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setPassphrase('');
+      setImportPassphrase('');
+      return;
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -112,11 +125,11 @@ export function VaultBackupModal({
   const handleExportEncryptedEnc = async (e: React.FormEvent) => {
     e.preventDefault();
     resetMessages();
-    if (passphrase.trim().length < 6) {
+    if (passphrase.trim().length < 8) {
       setErrorMessage(
         lang === 'id'
-          ? 'Masukkan kata sandi enkripsi minimal 6 karakter.'
-          : 'Please enter an encryption passphrase of at least 6 characters.'
+          ? 'Masukkan kata sandi enkripsi minimal 8 karakter.'
+          : 'Please enter an encryption passphrase of at least 8 characters.'
       );
       return;
     }
@@ -162,6 +175,15 @@ export function VaultBackupModal({
     resetMessages();
     const file = e.target.files?.[0];
     if (!file) return;
+    if (file.size > 25 * 1024 * 1024) {
+      setErrorMessage(
+        lang === 'id'
+          ? 'Ukuran berkas terlalu besar (maksimum 25 MB).'
+          : 'File exceeds the 25 MB browser import limit.'
+      );
+      e.target.value = '';
+      return;
+    }
     setBusy(true);
 
     try {
@@ -179,7 +201,8 @@ export function VaultBackupModal({
         }
         const payload = await decryptVaultFromEnc(
           text,
-          importPassphrase.trim()
+          importPassphrase.trim(),
+          username
         );
         if (payload.messages && payload.messages.length > 0) {
           await saveMessagesBatch(payload.messages);
@@ -236,7 +259,15 @@ export function VaultBackupModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Local Vault Backup"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+    >
       <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl max-w-2xl w-full p-6 space-y-5 max-h-[90vh] overflow-y-auto">
         <div className="flex items-start justify-between gap-4 border-b border-slate-200 dark:border-[#232732] pb-4">
           <div className="space-y-1">
@@ -320,8 +351,8 @@ export function VaultBackupModal({
             </div>
             <p className="text-xs text-slate-500 leading-relaxed">
               {lang === 'id'
-                ? 'Enkripsi seluruh email lokal + profil bio + shortlink menggunakan Web Crypto API (PBKDF2 100k + AES-256-GCM).'
-                : 'Encrypt all local emails + bio profile + shortlinks using browser Web Crypto API (PBKDF2 100k + AES-256-GCM).'}
+                ? 'Enkripsi seluruh email lokal + profil bio + shortlink menggunakan Web Crypto API (PBKDF2 310k + AES-256-GCM).'
+                : 'Encrypt all local emails + bio profile + shortlinks using browser Web Crypto API (PBKDF2 310k + AES-256-GCM).'}
             </p>
             <input
               type="password"

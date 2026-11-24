@@ -1,4 +1,5 @@
 User-agent: *
 Allow: /
+Disallow: /api/
 
-Sitemap: https://vz.gay/sitemap.xml
+Sitemap: https://mail.vz.gay/sitemap.xml

@@ -4,6 +4,11 @@ import {
   sanitizeHandle,
   type MailDomainOption,
 } from './mailIdentity';
+import {
+  generateSecureId,
+  sanitizeExternalUrl,
+  sanitizeSlug,
+} from './mailSecurity';
 
 export type MailFolder =
   | 'inbox'
@@ -88,29 +93,71 @@ export interface ImyShortlink {
 const DB_NAME = 'vz_mail_links_local_db_v1';
 const DB_VERSION = 1;
 
-function openLocalDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains('messages')) {
-        const msgStore = db.createObjectStore('messages', { keyPath: 'id' });
-        msgStore.createIndex('by_owner', 'ownerUser', { unique: false });
-      }
-      if (!db.objectStoreNames.contains('bio_profiles')) {
-        db.createObjectStore('bio_profiles', { keyPath: 'username' });
-      }
-      if (!db.objectStoreNames.contains('shortlinks')) {
-        const slStore = db.createObjectStore('shortlinks', { keyPath: 'slug' });
-        slStore.createIndex('by_owner', 'ownerUser', { unique: false });
-      }
-      if (!db.objectStoreNames.contains('domains')) {
-        db.createObjectStore('domains', { keyPath: 'domain' });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+// Singleton cached DB promise to avoid leaking IDBDatabase connections on every call
+let cachedDbPromise: Promise<IDBDatabase | null> | null = null;
+
+// Graceful in-memory fallback when IndexedDB is unavailable (e.g. strict private browsing / sandboxed iframe)
+const memoryFallback = {
+  messages: new Map<string, LocalMailMessage>(),
+  bioProfiles: new Map<string, ImyBioProfile>(),
+  shortlinks: new Map<string, ImyShortlink>(),
+  domains: new Map<string, MailDomainOption>(),
+};
+
+function openLocalDb(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined') {
+    return Promise.resolve(null);
+  }
+  if (cachedDbPromise) {
+    return cachedDbPromise;
+  }
+
+  cachedDbPromise = new Promise<IDBDatabase | null>((resolve) => {
+    try {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains('messages')) {
+          const msgStore = db.createObjectStore('messages', { keyPath: 'id' });
+          msgStore.createIndex('by_owner', 'ownerUser', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('bio_profiles')) {
+          db.createObjectStore('bio_profiles', { keyPath: 'username' });
+        }
+        if (!db.objectStoreNames.contains('shortlinks')) {
+          const slStore = db.createObjectStore('shortlinks', { keyPath: 'slug' });
+          slStore.createIndex('by_owner', 'ownerUser', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('domains')) {
+          db.createObjectStore('domains', { keyPath: 'domain' });
+        }
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        db.onversionchange = () => {
+          db.close();
+          cachedDbPromise = null;
+        };
+        db.onclose = () => {
+          cachedDbPromise = null;
+        };
+        resolve(db);
+      };
+      req.onerror = () => {
+        cachedDbPromise = null;
+        resolve(null);
+      };
+      req.onblocked = () => {
+        cachedDbPromise = null;
+        resolve(null);
+      };
+    } catch {
+      cachedDbPromise = null;
+      resolve(null);
+    }
   });
+
+  return cachedDbPromise;
 }
 
 export function buildDefaultSeedMessages(
@@ -171,7 +218,7 @@ export function buildDefaultSeedMessages(
       deliveredToAlias: `${user}+github@${domain}`,
       plusTag: 'github',
       dotNormalized: false,
-      subject: `[cloudflare/workers-sdk] Release v4.8.0 — Email Routing & send_email bindings`,
+      subject: `[cloudflare/workers-sdk] Release v4 — Email Routing & send_email bindings`,
       bodyText: `Email ini dikirim ke alamat alias plus Anda (${user}+github@${domain}) dan secara otomatis dinormalisasi ke kotak masuk utama ${primaryEmail} dengan label filter +github.\n\nHighlights:\n- Native Cloudflare Email Routing worker handler email(message, env, ctx)\n- Outbound send_email binding without VPS SMTP servers\n- Wildcard route *.imy.li and imy.li/s/* multi-service dispatch`,
       timestamp: '2026-11-24T02:40:00.000Z',
       read: false,
@@ -290,7 +337,7 @@ export function buildDefaultShortlinks(rawUsername: string): ImyShortlink[] {
       safeBrowsingVerified: true,
     },
     {
-      slug: 'vz-mail',
+      slug: `${user}-mail`,
       ownerUser: user,
       title: 'Peluncur VZ Mail (mail.vz.gay)',
       targetUrl: 'https://mail.vz.gay',
@@ -299,7 +346,7 @@ export function buildDefaultShortlinks(rawUsername: string): ImyShortlink[] {
       safeBrowsingVerified: true,
     },
     {
-      slug: 'myaccount',
+      slug: `${user}-account`,
       ownerUser: user,
       title: 'Dasbor SSO & Aktivasi Layanan (myaccount.vz.gay)',
       targetUrl: 'https://myaccount.vz.gay',
@@ -313,6 +360,12 @@ export function buildDefaultShortlinks(rawUsername: string): ImyShortlink[] {
 export async function getMessagesForUser(rawUsername: string): Promise<LocalMailMessage[]> {
   const user = sanitizeHandle(rawUsername);
   const db = await openLocalDb();
+  if (!db) {
+    return Array.from(memoryFallback.messages.values())
+      .filter((m) => m.ownerUser === user)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction('messages', 'readonly');
     const store = tx.objectStore('messages');
@@ -344,6 +397,10 @@ export async function ensureUserMessagesSeeded(
 
 export async function saveMessage(msg: LocalMailMessage): Promise<void> {
   const db = await openLocalDb();
+  if (!db) {
+    memoryFallback.messages.set(msg.id, msg);
+    return;
+  }
   return new Promise((resolve, reject) => {
     const tx = db.transaction('messages', 'readwrite');
     tx.objectStore('messages').put(msg);
@@ -353,7 +410,14 @@ export async function saveMessage(msg: LocalMailMessage): Promise<void> {
 }
 
 export async function saveMessagesBatch(messages: LocalMailMessage[]): Promise<void> {
+  if (messages.length === 0) return;
   const db = await openLocalDb();
+  if (!db) {
+    for (const msg of messages) {
+      memoryFallback.messages.set(msg.id, msg);
+    }
+    return;
+  }
   return new Promise((resolve, reject) => {
     const tx = db.transaction('messages', 'readwrite');
     const store = tx.objectStore('messages');
@@ -365,8 +429,18 @@ export async function saveMessagesBatch(messages: LocalMailMessage[]): Promise<v
   });
 }
 
+export async function markMessagesAsRead(messages: LocalMailMessage[]): Promise<void> {
+  const unread = messages.filter((m) => !m.read);
+  if (unread.length === 0) return;
+  await saveMessagesBatch(unread.map((m) => ({ ...m, read: true })));
+}
+
 export async function deleteMessageFromLocalDb(id: string): Promise<void> {
   const db = await openLocalDb();
+  if (!db) {
+    memoryFallback.messages.delete(id);
+    return;
+  }
   return new Promise((resolve, reject) => {
     const tx = db.transaction('messages', 'readwrite');
     tx.objectStore('messages').delete(id);
@@ -378,6 +452,12 @@ export async function deleteMessageFromLocalDb(id: string): Promise<void> {
 export async function clearAllUserMessages(rawUsername: string): Promise<void> {
   const messages = await getMessagesForUser(rawUsername);
   const db = await openLocalDb();
+  if (!db) {
+    for (const m of messages) {
+      memoryFallback.messages.delete(m.id);
+    }
+    return;
+  }
   return new Promise((resolve, reject) => {
     const tx = db.transaction('messages', 'readwrite');
     const store = tx.objectStore('messages');
@@ -389,16 +469,37 @@ export async function clearAllUserMessages(rawUsername: string): Promise<void> {
   });
 }
 
+function sanitizeBioProfile(profile: ImyBioProfile): ImyBioProfile {
+  return {
+    ...profile,
+    username: sanitizeHandle(profile.username),
+    links: (profile.links || [])
+      .map((link) => {
+        const safeUrl = sanitizeExternalUrl(link.url, { allowMailto: true });
+        return safeUrl ? { ...link, url: safeUrl } : null;
+      })
+      .filter((item): item is BioLinkCardItem => item !== null),
+  };
+}
+
 export async function getOrSeedBioProfile(rawUsername: string): Promise<ImyBioProfile> {
   const user = sanitizeHandle(rawUsername);
   const db = await openLocalDb();
+  if (!db) {
+    const existing = memoryFallback.bioProfiles.get(user);
+    if (existing) return existing;
+    const seeded = buildDefaultBioProfile(user);
+    memoryFallback.bioProfiles.set(user, seeded);
+    return seeded;
+  }
+
   const existing = await new Promise<ImyBioProfile | undefined>((resolve, reject) => {
     const tx = db.transaction('bio_profiles', 'readonly');
     const req = tx.objectStore('bio_profiles').get(user);
     req.onsuccess = () => resolve(req.result as ImyBioProfile | undefined);
     req.onerror = () => reject(req.error);
   });
-  if (existing) return existing;
+  if (existing) return sanitizeBioProfile(existing);
 
   const seeded = buildDefaultBioProfile(user);
   await saveBioProfile(seeded);
@@ -406,10 +507,15 @@ export async function getOrSeedBioProfile(rawUsername: string): Promise<ImyBioPr
 }
 
 export async function saveBioProfile(profile: ImyBioProfile): Promise<void> {
+  const sanitized = sanitizeBioProfile(profile);
   const db = await openLocalDb();
+  if (!db) {
+    memoryFallback.bioProfiles.set(sanitized.username, sanitized);
+    return;
+  }
   return new Promise((resolve, reject) => {
     const tx = db.transaction('bio_profiles', 'readwrite');
-    tx.objectStore('bio_profiles').put(profile);
+    tx.objectStore('bio_profiles').put(sanitized);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -418,9 +524,28 @@ export async function saveBioProfile(profile: ImyBioProfile): Promise<void> {
 export async function getOrSeedShortlinks(rawUsername: string): Promise<ImyShortlink[]> {
   const user = sanitizeHandle(rawUsername);
   const db = await openLocalDb();
+
+  if (!db) {
+    const existing = Array.from(memoryFallback.shortlinks.values()).filter(
+      (s) => s.ownerUser === user
+    );
+    if (existing.length > 0) {
+      return existing.sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+    }
+    const seeded = buildDefaultShortlinks(user);
+    for (const item of seeded) {
+      memoryFallback.shortlinks.set(item.slug, item);
+    }
+    return seeded;
+  }
+
+  // Strictly scope shortlinks to the active SSO user via the `by_owner` index
   const existing = await new Promise<ImyShortlink[]>((resolve, reject) => {
     const tx = db.transaction('shortlinks', 'readonly');
-    const req = tx.objectStore('shortlinks').getAll();
+    const idx = tx.objectStore('shortlinks').index('by_owner');
+    const req = idx.getAll(IDBKeyRange.only(user));
     req.onsuccess = () => resolve((req.result as ImyShortlink[]) || []);
     req.onerror = () => reject(req.error);
   });
@@ -432,9 +557,8 @@ export async function getOrSeedShortlinks(rawUsername: string): Promise<ImyShort
   }
 
   const seeded = buildDefaultShortlinks(user);
-  const dbWrite = await openLocalDb();
   await new Promise<void>((resolve, reject) => {
-    const tx = dbWrite.transaction('shortlinks', 'readwrite');
+    const tx = db.transaction('shortlinks', 'readwrite');
     const store = tx.objectStore('shortlinks');
     for (const item of seeded) {
       store.put(item);
@@ -446,10 +570,29 @@ export async function getOrSeedShortlinks(rawUsername: string): Promise<ImyShort
 }
 
 export async function saveShortlink(item: ImyShortlink): Promise<void> {
+  const safeSlug = sanitizeSlug(item.slug);
+  const safeTarget = sanitizeExternalUrl(item.targetUrl, {
+    allowMailto: false,
+    blockPrivateHosts: true,
+  });
+  if (!safeSlug || !safeTarget) {
+    throw new Error('Slug atau URL shortlink tidak valid.');
+  }
+  const cleanItem: ImyShortlink = {
+    ...item,
+    slug: safeSlug,
+    ownerUser: sanitizeHandle(item.ownerUser),
+    targetUrl: safeTarget,
+  };
+
   const db = await openLocalDb();
+  if (!db) {
+    memoryFallback.shortlinks.set(cleanItem.slug, cleanItem);
+    return;
+  }
   return new Promise((resolve, reject) => {
     const tx = db.transaction('shortlinks', 'readwrite');
-    tx.objectStore('shortlinks').put(item);
+    tx.objectStore('shortlinks').put(cleanItem);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -457,6 +600,10 @@ export async function saveShortlink(item: ImyShortlink): Promise<void> {
 
 export async function deleteShortlink(slug: string): Promise<void> {
   const db = await openLocalDb();
+  if (!db) {
+    memoryFallback.shortlinks.delete(slug);
+    return;
+  }
   return new Promise((resolve, reject) => {
     const tx = db.transaction('shortlinks', 'readwrite');
     tx.objectStore('shortlinks').delete(slug);
@@ -467,6 +614,17 @@ export async function deleteShortlink(slug: string): Promise<void> {
 
 export async function getOrSeedDomains(): Promise<MailDomainOption[]> {
   const db = await openLocalDb();
+  if (!db) {
+    if (memoryFallback.domains.size === 0) {
+      for (const d of INITIAL_MAIL_DOMAINS) {
+        memoryFallback.domains.set(d.domain, d);
+      }
+    }
+    return Array.from(memoryFallback.domains.values()).sort((a, b) =>
+      a.isPrimaryDefault === b.isPrimaryDefault ? 0 : a.isPrimaryDefault ? -1 : 1
+    );
+  }
+
   const existing = await new Promise<MailDomainOption[]>((resolve, reject) => {
     const tx = db.transaction('domains', 'readonly');
     const req = tx.objectStore('domains').getAll();
@@ -494,6 +652,10 @@ export async function getOrSeedDomains(): Promise<MailDomainOption[]> {
 
 export async function saveDomainOption(domainOpt: MailDomainOption): Promise<void> {
   const db = await openLocalDb();
+  if (!db) {
+    memoryFallback.domains.set(domainOpt.domain, domainOpt);
+    return;
+  }
   return new Promise((resolve, reject) => {
     const tx = db.transaction('domains', 'readwrite');
     tx.objectStore('domains').put(domainOpt);
@@ -514,11 +676,11 @@ export function normalizeInboundPacketToLocalMessage(
     receivedAt: string;
     ephemeralQueueReceipt?: string;
   },
-  activeDomains: string[] = ['imy.li']
+  activeDomains: readonly string[] = ['imy.li']
 ): LocalMailMessage {
   const resolved = resolveCanonicalEmail(packet.toAddress, activeDomains);
   return {
-    id: packet.id,
+    id: packet.id || generateSecureId('msg-in'),
     rfcMessageId: packet.rfcMessageId || `<${packet.id}@imy.li>`,
     ownerUser: resolved.canonicalUsername,
     threadId: packet.fromAddress.toLowerCase(),
@@ -546,8 +708,7 @@ export function normalizeInboundPacketToLocalMessage(
     verifiedSpfDkim: true,
     dmarcPolicy: 'pass (p=reject)',
     ephemeralQueueReceipt:
-      packet.ephemeralQueueReceipt ||
-      `PURGED-CF-${Math.random().toString(36).slice(2, 10).toUpperCase()}`,
+      packet.ephemeralQueueReceipt || generateSecureId('PURGED-CF').toUpperCase(),
     chatBridgeChannel: null,
     attachments: [],
   };

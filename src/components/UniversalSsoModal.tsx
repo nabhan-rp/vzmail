@@ -8,7 +8,7 @@ import {
   UserCheck,
   X,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import { sanitizeHandle } from '../utils/mailIdentity';
@@ -51,6 +51,17 @@ export function UniversalSsoModal({
   const [optInMail, setOptInMail] = useState(false);
   const [optInLinks, setOptInLinks] = useState(false);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    setUsernameInput(session.username || 'fadhil');
+    setBirthDateInput(session.birthDate || '2001-05-14');
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, session.username, session.birthDate, onClose]);
+
   if (!isOpen) return null;
 
   const cleanPreview = sanitizeHandle(usernameInput || 'fadhil');
@@ -66,7 +77,15 @@ export function UniversalSsoModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Universal SSO"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+    >
       <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl max-w-lg w-full p-6 space-y-5 max-h-[90vh] overflow-y-auto">
         <div className="flex items-start justify-between gap-4 border-b border-slate-200 dark:border-[#232732] pb-4">
           <div className="space-y-1">

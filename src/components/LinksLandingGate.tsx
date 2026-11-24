@@ -7,7 +7,7 @@ import {
   Lock,
   ShieldCheck,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import { sanitizeHandle } from '../utils/mailIdentity';
@@ -32,6 +32,10 @@ export function LinksLandingGate({
   const domain = session.primaryDomain || 'imy.li';
   const [previewHandle, setPreviewHandle] = useState(user);
   const [previewSlug, setPreviewSlug] = useState('portfolio');
+
+  useEffect(() => {
+    setPreviewHandle(user);
+  }, [user]);
 
   const cleanHandle = sanitizeHandle(previewHandle || user);
   const cleanSlug =

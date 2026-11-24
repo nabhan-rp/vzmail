@@ -10,7 +10,7 @@ import {
   ShieldCheck,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import {
@@ -23,6 +23,12 @@ import {
   type ImyBioProfile,
   type ImyShortlink,
 } from '../utils/localMailDb';
+import {
+  generateRandomSlug,
+  generateSecureId,
+  sanitizeExternalUrl,
+  sanitizeSlug,
+} from '../utils/mailSecurity';
 import type { ActiveHostView } from './MailLinksTopBar';
 
 interface VzLinksWorkspaceProps {
@@ -51,6 +57,8 @@ export function VzLinksWorkspace({
   const [profile, setProfile] = useState<ImyBioProfile | null>(null);
   const [shortlinks, setShortlinks] = useState<ImyShortlink[]>([]);
   const [savedBanner, setSavedBanner] = useState<string | null>(null);
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const bannerTimerRef = useRef<number | null>(null);
 
   // Add Bio Link form
   const [newLinkTitle, setNewLinkTitle] = useState('');
@@ -78,14 +86,45 @@ export function VzLinksWorkspace({
   };
 
   useEffect(() => {
-    loadLinksData();
+    let cancelled = false;
+    Promise.all([getOrSeedBioProfile(user), getOrSeedShortlinks(user)])
+      .then(([p, sl]) => {
+        if (!cancelled) {
+          setProfile(p);
+          setShortlinks(sl);
+        }
+      })
+      .catch(() => {
+        // Ignore transient storage error
+      });
+    return () => {
+      cancelled = true;
+      if (bannerTimerRef.current !== null) {
+        window.clearTimeout(bannerTimerRef.current);
+      }
+    };
   }, [user]);
 
   const flashBanner = (msg: string) => {
+    setErrorBanner(null);
     setSavedBanner(msg);
-    window.setTimeout(() => {
+    if (bannerTimerRef.current !== null) {
+      window.clearTimeout(bannerTimerRef.current);
+    }
+    bannerTimerRef.current = window.setTimeout(() => {
       setSavedBanner((curr) => (curr === msg ? null : curr));
     }, 3500);
+  };
+
+  const flashError = (msg: string) => {
+    setSavedBanner(null);
+    setErrorBanner(msg);
+    if (bannerTimerRef.current !== null) {
+      window.clearTimeout(bannerTimerRef.current);
+    }
+    bannerTimerRef.current = window.setTimeout(() => {
+      setErrorBanner((curr) => (curr === msg ? null : curr));
+    }, 4500);
   };
 
   const handleSaveProfileMeta = async (e: React.FormEvent) => {
@@ -107,19 +146,23 @@ export function VzLinksWorkspace({
   const handleAddBioLink = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!profile || !newLinkTitle.trim() || !newLinkUrl.trim()) return;
-    const normalizedUrl =
-      newLinkUrl.trim().startsWith('http://') ||
-      newLinkUrl.trim().startsWith('https://') ||
-      newLinkUrl.trim().startsWith('mailto:')
-        ? newLinkUrl.trim()
-        : `https://${newLinkUrl.trim()}`;
+    const normalizedUrl = sanitizeExternalUrl(newLinkUrl, { allowMailto: true });
+    if (!normalizedUrl) {
+      flashError(
+        lang === 'id'
+          ? 'URL tautan tidak valid atau menggunakan skema yang tidak diizinkan (gunakan https:// atau mailto:).'
+          : 'Invalid or unsafe URL scheme (only https://, http://, and mailto: are permitted).'
+      );
+      return;
+    }
 
     const item: BioLinkCardItem = {
-      id: `link-${Date.now()}`,
-      title: newLinkTitle.trim(),
+      id: generateSecureId('link'),
+      title: newLinkTitle.trim().slice(0, 120),
       url: normalizedUrl,
       subtitle:
-        newLinkSubtitle.trim() || `Tautan terverifikasi di ${user}.${domain}`,
+        newLinkSubtitle.trim().slice(0, 200) ||
+        `Tautan terverifikasi di ${user}.${domain}`,
       category: newLinkCategory,
       clicks: 0,
       enabled: true,
@@ -156,24 +199,36 @@ export function VzLinksWorkspace({
   const handleCreateShortlink = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTargetUrl.trim()) return;
-    const cleanSlug = (
-      newSlug.trim() || Math.random().toString(36).slice(2, 7)
-    )
-      .toLowerCase()
-      .replace(/[^a-z0-9-_]/g, '');
+    const cleanSlug = sanitizeSlug(newSlug.trim() || generateRandomSlug(6));
 
-    if (!cleanSlug) return;
+    if (!cleanSlug) {
+      flashError(
+        lang === 'id'
+          ? 'Slug hanya boleh berisi huruf kecil, angka, tanda hubung (-), atau garis bawah (_).'
+          : 'Slug may only contain lowercase letters, numbers, hyphens, or underscores.'
+      );
+      return;
+    }
 
-    const normalizedTarget =
-      newTargetUrl.trim().startsWith('http://') ||
-      newTargetUrl.trim().startsWith('https://')
-        ? newTargetUrl.trim()
-        : `https://${newTargetUrl.trim()}`;
+    const normalizedTarget = sanitizeExternalUrl(newTargetUrl, {
+      allowMailto: false,
+      blockPrivateHosts: true,
+    });
+    if (!normalizedTarget) {
+      flashError(
+        lang === 'id'
+          ? 'URL tujuan shortlink tidak valid atau mengarah ke skema/host yang diblokir.'
+          : 'Invalid target URL or blocked scheme/private host.'
+      );
+      return;
+    }
 
     const record: ImyShortlink = {
       slug: cleanSlug,
       ownerUser: user,
-      title: newShortTitle.trim() || `Shortlink ${domain}/s/${cleanSlug}`,
+      title:
+        newShortTitle.trim().slice(0, 120) ||
+        `Shortlink ${domain}/s/${cleanSlug}`,
       targetUrl: normalizedTarget,
       clicks: 0,
       createdAt: new Date().toISOString(),
@@ -181,6 +236,13 @@ export function VzLinksWorkspace({
     };
 
     await saveShortlink(record);
+    // Best-effort edge KV sync when Worker LINKS_KV is configured
+    fetch('/api/links/shortlinks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug: cleanSlug, targetUrl: normalizedTarget }),
+    }).catch(() => {});
+
     setNewSlug('');
     setNewShortTitle('');
     setNewTargetUrl('');
@@ -205,6 +267,9 @@ export function VzLinksWorkspace({
 
   const handleDeleteShortlink = async (slug: string) => {
     await deleteShortlink(slug);
+    fetch(`/api/links/shortlinks/${encodeURIComponent(slug)}`, {
+      method: 'DELETE',
+    }).catch(() => {});
     await loadLinksData();
   };
 
@@ -221,6 +286,11 @@ export function VzLinksWorkspace({
         <div className="bg-slate-900 dark:bg-blue-950 text-white border border-slate-700 dark:border-blue-800 rounded-lg px-4 py-2.5 text-xs flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>{savedBanner}</span>
+        </div>
+      )}
+      {errorBanner && (
+        <div className="bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-200 border border-rose-200 dark:border-rose-800 rounded-lg px-4 py-2.5 text-xs">
+          {errorBanner}
         </div>
       )}
 

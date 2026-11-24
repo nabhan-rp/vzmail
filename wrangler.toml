@@ -1,16 +1,39 @@
 #:schema node_modules/wrangler/config-schema.json
-name = "vz-mail-and-links"
-compatibility_date = "2025-01-01"
-pages_build_output_dir = "dist"
+name = "vzmail"
+main = "cloudflare/worker-mail-links.ts"
+compatibility_date = "2026-11-19"
+compatibility_flags = ["nodejs_compat"]
 
-# 2-in-1 Cloudflare Worker Route Configuration for:
-# - mail.vz.gay/*
-# - links.vz.gay/*
-# - imy.li/* (including imy.li/s/$URL shortlinks)
-# - *.imy.li/* ($USERNAME.imy.li static PSL-safe Link-in-Bio)
-#
-# When deploying as a unified Cloudflare Worker with Assets:
-# main = "cloudflare/worker-mail-links.ts"
+# Static SPA assets built by `npm run build` (`vite build` -> `./dist`)
+# Hashed bundles under /assets/* bypass the Worker and serve directly from Cloudflare's edge CDN.
+# Navigation routes, /api/*, /s/* shortlinks, and *.imy.li subdomains execute the Worker first.
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = [
+  "/*",
+  "!/assets/*",
+  "!/favicon.svg",
+  "!/og-banner.jpg",
+  "!/robots.txt",
+  "!/sitemap.xml",
+  "!/cloudflare_imy_mail_links_relay.php.txt"
+]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1
+
+# 2-in-1 Cloudflare Worker Custom Routes (uncomment once zones are attached in Cloudflare):
 # routes = [
 #   { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
 #   { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
@@ -25,15 +48,23 @@ PRIMARY_MAIL_DOMAIN = "imy.li"
 AUTH0_DOMAIN = "accounts.vz.gay"
 ACCOUNT_DASHBOARD_URL = "https://myaccount.vz.gay"
 SPONSOR_DOMAIN = "jajanserver.com"
+DAILY_OUTBOUND_LIMIT = "25"
 
-# Cloudflare Email Sending & Ephemeral Transit KV Bindings:
+# Optional Production Bindings — uncomment after provisioning resources in Cloudflare Dashboard:
+#
+# 1. Cloudflare Email Sending (requires domain onboarded under Compute > Email Service):
 # [[send_email]]
 # name = "SEND_EMAIL"
 #
+# 2. Ephemeral Transit Buffer KV (Zero permanent mailbox retention; auto-TTL + Pop-and-Purge):
 # [[kv_namespaces]]
 # binding = "MAIL_TRANSIT_KV"
 # id = "<YOUR_EPHEMERAL_MAIL_TRANSIT_KV_ID>"
 #
+# 3. VZ Links Shortener & Static Bio KV:
 # [[kv_namespaces]]
 # binding = "LINKS_KV"
 # id = "<YOUR_LINKS_SHORTENER_KV_ID>"
+#
+# 4. Optional Relay Auth Secret (set via CLI, NEVER commit):
+#    npx wrangler secret put RELAY_AUTH_TOKEN

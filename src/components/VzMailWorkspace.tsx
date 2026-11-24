@@ -21,13 +21,14 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import type { ThemePreference } from '../hooks/useTheme';
 import {
   deleteMessageFromLocalDb,
   ensureUserMessagesSeeded,
+  markMessagesAsRead,
   normalizeInboundPacketToLocalMessage,
   saveMessage,
   saveMessagesBatch,
@@ -35,9 +36,11 @@ import {
   type MailFolder,
 } from '../utils/localMailDb';
 import {
+  DEFAULT_SUPPORTED_DOMAINS,
   generateAliasExamples,
   resolveCanonicalEmail,
 } from '../utils/mailIdentity';
+import { generateSecureId } from '../utils/mailSecurity';
 import {
   serializeToEml,
   triggerBrowserDownload,
@@ -70,6 +73,40 @@ interface EphemeralEdgePacket {
   subject: string;
   bodyText: string;
   receivedAt: string;
+}
+
+const SESSION_FALLBACK_KEY_PREFIX = 'vz_ephemeral_transit_fallback_v1:';
+
+function readLocalFallbackQueue(user: string): EphemeralEdgePacket[] {
+  try {
+    const raw = sessionStorage.getItem(`${SESSION_FALLBACK_KEY_PREFIX}${user}`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as EphemeralEdgePacket[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalFallbackQueue(user: string, packets: EphemeralEdgePacket[]): void {
+  try {
+    if (packets.length === 0) {
+      sessionStorage.removeItem(`${SESSION_FALLBACK_KEY_PREFIX}${user}`);
+    } else {
+      sessionStorage.setItem(
+        `${SESSION_FALLBACK_KEY_PREFIX}${user}`,
+        JSON.stringify(packets.slice(0, 50))
+      );
+    }
+  } catch {
+    // Ignore sessionStorage restrictions
+  }
+}
+
+function enqueueLocalFallbackPacket(packet: EphemeralEdgePacket): void {
+  const existing = readLocalFallbackQueue(packet.canonicalUser);
+  if (existing.some((p) => p.id === packet.id)) return;
+  writeLocalFallbackQueue(packet.canonicalUser, [packet, ...existing]);
 }
 
 export function VzMailWorkspace({
@@ -142,12 +179,48 @@ export function VzMailWorkspace({
     `Halo ${user},\n\nPesan ini dikirim ke alamat alias Anda untuk menguji Cloudflare Email Routing -> Ephemeral Transit Queue -> Pop-and-Purge ke IndexedDB perangkat lokal.`
   );
 
-  const showToast = (msg: string) => {
+  const toastTimerRef = useRef<number | null>(null);
+
+  const showToast = useCallback((msg: string) => {
     setToastNotice(msg);
-    window.setTimeout(() => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
       setToastNotice((curr) => (curr === msg ? null : curr));
-    }, 4000);
-  };
+    }, 4500);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Keep user-dependent defaults synchronized when SSO handle or primary domain changes
+  useEffect(() => {
+    setComposeFromAlias(primaryEmail);
+    setSimToAlias(`${user.slice(0, 2)}.${user.slice(2) || 'id'}+promo@${domain}`);
+    setSimSubject(`Konfirmasi Kolaborasi via Alias Titik & Plus (${primaryEmail})`);
+    setSimBody(
+      `Halo ${user},\n\nPesan ini dikirim ke alamat alias Anda untuk menguji Cloudflare Email Routing -> Ephemeral Transit Queue -> Pop-and-Purge ke IndexedDB perangkat lokal.`
+    );
+  }, [user, domain, primaryEmail]);
+
+  // Escape key closes Compose & Simulator modals cleanly
+  useEffect(() => {
+    if (!composeOpen && !simulatorOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setComposeOpen(false);
+        setSimulatorOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [composeOpen, simulatorOpen]);
 
   useEffect(() => {
     try {
@@ -164,67 +237,146 @@ export function VzMailWorkspace({
     }
   }, [composeRequested, primaryEmail]);
 
-  const loadLocalMessages = async () => {
+  const loadLocalMessages = useCallback(async () => {
     setLoadingLocal(true);
     try {
       const list = await ensureUserMessagesSeeded(user, domain);
       setMessages(list);
       if (list.length > 0) {
-        setSelectedThreadId((prev) => prev || list[0].threadId);
-        setSelectedMessageId((prev) => prev || list[0].id);
+        setSelectedThreadId((prev) =>
+          prev && list.some((m) => m.threadId === prev) ? prev : list[0].threadId
+        );
+        setSelectedMessageId((prev) =>
+          prev && list.some((m) => m.id === prev) ? prev : list[0].id
+        );
       }
     } finally {
       setLoadingLocal(false);
     }
-  };
+  }, [user, domain]);
 
-  const checkEdgeTransitQueue = async () => {
-    try {
-      const res = await fetch(
-        `/api/mail/queue?username=${encodeURIComponent(user)}`
-      );
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.ok) {
-        setEdgePackets(data.packets || []);
-        if (data.outboundQuota) {
-          setQuotaUsed(data.outboundQuota.usedToday ?? 1);
-          setQuotaLimit(data.outboundQuota.dailyLimit ?? 25);
+  const checkEdgeTransitQueue = useCallback(
+    async (signal?: AbortSignal) => {
+      const localPending = readLocalFallbackQueue(user);
+      try {
+        const res = await fetch(
+          `/api/mail/queue?username=${encodeURIComponent(user)}`,
+          { signal }
+        );
+        if (!res.ok) {
+          setEdgePackets(localPending);
+          return;
         }
+        const data = await res.json();
+        if (data.ok) {
+          const remotePackets: EphemeralEdgePacket[] = Array.isArray(data.packets)
+            ? data.packets
+            : [];
+          const mergedMap = new Map<string, EphemeralEdgePacket>();
+          for (const pkt of [...remotePackets, ...localPending]) {
+            mergedMap.set(pkt.id, pkt);
+          }
+          setEdgePackets(Array.from(mergedMap.values()));
+          if (data.outboundQuota) {
+            setQuotaUsed(data.outboundQuota.usedToday ?? 0);
+            setQuotaLimit(data.outboundQuota.dailyLimit ?? 25);
+          }
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        // Offline mode graceful fallback
+        setEdgePackets(localPending);
       }
-    } catch {
-      // Offline mode graceful fallback
-    }
-  };
+    },
+    [user]
+  );
 
   useEffect(() => {
-    loadLocalMessages();
-    fetch('/api/mail/seed-transit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: user }),
-    })
-      .then(() => checkEdgeTransitQueue())
-      .catch(() => checkEdgeTransitQueue());
-  }, [user, domain, refreshTrigger]);
+    const controller = new AbortController();
+    let cancelled = false;
 
-  // Pull pending packets from Cloudflare Edge Queue into local IndexedDB, then ACK to purge server queue
+    const init = async () => {
+      setLoadingLocal(true);
+      try {
+        const list = await ensureUserMessagesSeeded(user, domain);
+        if (cancelled) return;
+        setMessages(list);
+        if (list.length > 0) {
+          setSelectedThreadId((prev) =>
+            prev && list.some((m) => m.threadId === prev) ? prev : list[0].threadId
+          );
+          setSelectedMessageId((prev) =>
+            prev && list.some((m) => m.id === prev) ? prev : list[0].id
+          );
+        }
+      } finally {
+        if (!cancelled) setLoadingLocal(false);
+      }
+
+      try {
+        const seedRes = await fetch('/api/mail/seed-transit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: user }),
+          signal: controller.signal,
+        });
+        if (seedRes.ok) {
+          const seedData = await seedRes.json();
+          const seededFlagKey = `vz_seeded_local_transit_v1:${user}`;
+          if (
+            seedData.ok &&
+            seedData.seedPacket &&
+            !sessionStorage.getItem(seededFlagKey)
+          ) {
+            enqueueLocalFallbackPacket(seedData.seedPacket as EphemeralEdgePacket);
+            sessionStorage.setItem(seededFlagKey, '1');
+          }
+        }
+      } catch {
+        // Ignore offline/abort errors
+      }
+
+      if (!cancelled) {
+        await checkEdgeTransitQueue(controller.signal);
+      }
+    };
+
+    init();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [user, domain, refreshTrigger, checkEdgeTransitQueue]);
+
+  // Pull pending packets from Cloudflare Edge Queue:
+  // 1. Commit durably to local IndexedDB FIRST (zero data-loss guarantee)
+  // 2. ACK server to permanently purge from Edge KV & clear session fallback buffer
+  // 3. Stamp authoritative purge receipt onto committed local messages
   const handlePopAndPurgeEdgeQueue = async () => {
     setSyncingEdge(true);
     try {
-      const res = await fetch(
-        `/api/mail/queue?username=${encodeURIComponent(user)}`
-      );
-      if (!res.ok) {
-        showToast(
-          lang === 'id'
-            ? 'Gagal menghubungi relay antrean edge.'
-            : 'Failed to reach edge transit queue.'
+      const localPending = readLocalFallbackQueue(user);
+      let remotePackets: EphemeralEdgePacket[] = [];
+
+      try {
+        const res = await fetch(
+          `/api/mail/queue?username=${encodeURIComponent(user)}`
         );
-        return;
+        if (res.ok) {
+          const data = await res.json();
+          if (data.ok && Array.isArray(data.packets)) {
+            remotePackets = data.packets;
+          }
+        }
+      } catch {
+        // Proceed with localPending if offline
       }
-      const data = await res.json();
-      const packets: EphemeralEdgePacket[] = data.packets || [];
+
+      const mergedMap = new Map<string, EphemeralEdgePacket>();
+      for (const pkt of [...remotePackets, ...localPending]) {
+        mergedMap.set(pkt.id, pkt);
+      }
+      const packets = Array.from(mergedMap.values());
 
       if (packets.length === 0) {
         setEdgePackets([]);
@@ -236,29 +388,48 @@ export function VzMailWorkspace({
         return;
       }
 
-      // 1. Convert and save to local device IndexedDB
-      const ackRes = await fetch('/api/mail/ack', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: user,
-          packetIds: packets.map((p) => p.id),
-        }),
-      });
-      const ackData = await ackRes.json();
-      const receipt = ackData.receiptCode || `PURGED-CF-${Date.now()}`;
-
+      // STEP 1: Commit to local device IndexedDB BEFORE purging server queue!
+      const provisionalReceipt = `COMMITTED-LOCAL-${Date.now().toString(36).toUpperCase()}`;
       const localMsgs = packets.map((pkt) =>
         normalizeInboundPacketToLocalMessage(
           {
             ...pkt,
-            ephemeralQueueReceipt: receipt,
+            ephemeralQueueReceipt: provisionalReceipt,
           },
-          [domain, 'vz.gay', 'mail.vz.gay', 'imy.pw']
+          [domain, ...DEFAULT_SUPPORTED_DOMAINS]
         )
       );
-
       await saveMessagesBatch(localMsgs);
+
+      // STEP 2: Only after local IndexedDB write succeeded, ACK to purge server queue
+      let receipt = provisionalReceipt;
+      try {
+        const ackRes = await fetch('/api/mail/ack', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: user,
+            packetIds: packets.map((p) => p.id),
+          }),
+        });
+        if (ackRes.ok) {
+          const ackData = await ackRes.json();
+          if (ackData.receiptCode) {
+            receipt = ackData.receiptCode;
+          }
+        }
+      } catch {
+        // Local messages are already safely persisted
+      }
+
+      // STEP 3: Clear fallback buffer & stamp authoritative purge receipt
+      writeLocalFallbackQueue(user, []);
+      if (receipt !== provisionalReceipt) {
+        await saveMessagesBatch(
+          localMsgs.map((m) => ({ ...m, ephemeralQueueReceipt: receipt }))
+        );
+      }
+
       setLastPurgeReceipt(receipt);
       setEdgePackets([]);
       await loadLocalMessages();
@@ -270,8 +441,14 @@ export function VzMailWorkspace({
 
       showToast(
         lang === 'id'
-          ? `${localMsgs.length} email ditarik ke IndexedDB lokal & dihapus permanen dari server (${receipt}).`
+          ? `${localMsgs.length} email tersimpan di IndexedDB lokal & dihapus permanen dari server (${receipt}).`
           : `${localMsgs.length} email(s) saved to local IndexedDB & permanently purged from edge (${receipt}).`
+      );
+    } catch {
+      showToast(
+        lang === 'id'
+          ? 'Gagal menyimpan pesan ke IndexedDB lokal. Pesan tetap aman di antrean edge.'
+          : 'Failed to commit messages to local IndexedDB. Packets remain safely queued on edge.'
       );
     } finally {
       setSyncingEdge(false);
@@ -293,17 +470,34 @@ export function VzMailWorkspace({
         }),
       });
       const data = await res.json();
-      if (data.ok) {
-        setSimulatorOpen(false);
-        await checkEdgeTransitQueue();
+      if (!res.ok || !data.ok) {
         showToast(
-          lang === 'id'
-            ? `Paket masuk ke ${simToAlias} ditangkap oleh Edge Queue. Klik "Tarik & Purge" untuk menyimpan ke perangkat lokal!`
-            : `Inbound packet to ${simToAlias} queued at Edge Relay. Click "Pull & Purge" to commit to local device!`
+          data.error ||
+            (lang === 'id'
+              ? 'Gagal mensimulasikan email masuk.'
+              : 'Failed to simulate inbound email.')
         );
+        return;
       }
+
+      // If Worker runs without KV bound yet, buffer the returned packet in browser session fallback
+      if (!data.kvBound && data.queuedPacket) {
+        enqueueLocalFallbackPacket(data.queuedPacket as EphemeralEdgePacket);
+      }
+
+      setSimulatorOpen(false);
+      await checkEdgeTransitQueue();
+      showToast(
+        lang === 'id'
+          ? `Paket masuk ke ${simToAlias} ditangkap oleh Edge Queue. Klik "Tarik & Purge" untuk menyimpan ke perangkat lokal!`
+          : `Inbound packet to ${simToAlias} queued at Edge Relay. Click "Pull & Purge" to commit to local device!`
+      );
     } catch {
-      showToast('Gagal mensimulasikan email masuk.');
+      showToast(
+        lang === 'id'
+          ? 'Gagal mensimulasikan email masuk.'
+          : 'Failed to simulate inbound email.'
+      );
     }
   };
 
@@ -329,9 +523,13 @@ export function VzMailWorkspace({
         return;
       }
 
+      if (!data.kvBound && data.loopbackPacket) {
+        enqueueLocalFallbackPacket(data.loopbackPacket as EphemeralEdgePacket);
+      }
+
       const newLocalSent: LocalMailMessage = {
-        id: `msg-sent-${Date.now()}`,
-        rfcMessageId: data.rfcMessageId || `<sent-${Date.now()}@${domain}>`,
+        id: generateSecureId('msg-sent'),
+        rfcMessageId: data.rfcMessageId || `<${generateSecureId('sent')}@${domain}>`,
         ownerUser: user,
         threadId: composeTo.trim().toLowerCase(),
         folder: 'sent',
@@ -374,8 +572,14 @@ export function VzMailWorkspace({
 
       showToast(
         lang === 'id'
-          ? 'Email dikirim via Cloudflare Email Sending & disimpan di IndexedDB perangkat lokal Anda.'
-          : 'Email dispatched via Cloudflare Email Sending & saved in your local device IndexedDB.'
+          ? `Email diproses (${data.liveEmailDispatched ? 'Cloudflare Email Sending aktif' : 'Mode Simulasi Relay'}) & disimpan di IndexedDB perangkat lokal.`
+          : `Email processed (${data.liveEmailDispatched ? 'Live Cloudflare Email Sending' : 'Relay Simulation Mode'}) & saved in local device IndexedDB.`
+      );
+    } catch {
+      showToast(
+        lang === 'id'
+          ? 'Gagal terhubung ke relay pengiriman email.'
+          : 'Failed to reach outbound email relay.'
       );
     } finally {
       setComposeSending(false);
@@ -384,17 +588,17 @@ export function VzMailWorkspace({
 
   const handleSaveDraft = async () => {
     const draftMsg: LocalMailMessage = {
-      id: `msg-draft-${Date.now()}`,
-      rfcMessageId: `<draft-${Date.now()}@${domain}>`,
+      id: generateSecureId('msg-draft'),
+      rfcMessageId: `<${generateSecureId('draft')}@${domain}>`,
       ownerUser: user,
-      threadId: (composeTo.trim() || 'draft@imy.li').toLowerCase(),
+      threadId: (composeTo.trim() || `draft@${domain}`).toLowerCase(),
       folder: 'drafts',
       direction: 'outbound',
       from: { name: user, address: composeFromAlias || primaryEmail },
       to: [
         {
           name: (composeTo.trim() || 'draft').split('@')[0],
-          address: (composeTo.trim() || 'draft@imy.li').toLowerCase(),
+          address: (composeTo.trim() || `draft@${domain}`).toLowerCase(),
         },
       ],
       cc: [],
@@ -449,10 +653,23 @@ export function VzMailWorkspace({
         }),
       });
       const data = await res.json();
+      if (!res.ok || !data.ok) {
+        showToast(
+          data.error ||
+            (lang === 'id'
+              ? 'Gagal mengirim balasan cepat.'
+              : 'Failed to send quick reply.')
+        );
+        return;
+      }
+
+      if (!data.kvBound && data.loopbackPacket) {
+        enqueueLocalFallbackPacket(data.loopbackPacket as EphemeralEdgePacket);
+      }
 
       const replyMsg: LocalMailMessage = {
-        id: `msg-bubble-${Date.now()}`,
-        rfcMessageId: data.rfcMessageId || `<bubble-${Date.now()}@${domain}>`,
+        id: generateSecureId('msg-bubble'),
+        rfcMessageId: data.rfcMessageId || `<${generateSecureId('bubble')}@${domain}>`,
         ownerUser: user,
         threadId: selectedThreadId,
         folder: 'sent',
@@ -487,8 +704,35 @@ export function VzMailWorkspace({
       setQuickReplyText('');
       await loadLocalMessages();
       await checkEdgeTransitQueue();
+    } catch {
+      showToast(
+        lang === 'id'
+          ? 'Gagal mengirim balasan karena kendala jaringan.'
+          : 'Failed to send reply due to network error.'
+      );
     } finally {
       setSendingQuickReply(false);
+    }
+  };
+
+  const handleSelectThread = async (threadId: string, threadMessages: LocalMailMessage[]) => {
+    setSelectedThreadId(threadId);
+    const unread = threadMessages.filter((m) => !m.read);
+    if (unread.length > 0) {
+      await markMessagesAsRead(unread);
+      setMessages((prev) =>
+        prev.map((m) => (m.threadId === threadId ? { ...m, read: true } : m))
+      );
+    }
+  };
+
+  const handleSelectClassicMessage = async (msg: LocalMailMessage) => {
+    setSelectedMessageId(msg.id);
+    if (!msg.read) {
+      await markMessagesAsRead([msg]);
+      setMessages((prev) =>
+        prev.map((m) => (m.id === msg.id ? { ...m, read: true } : m))
+      );
     }
   };
 
@@ -671,9 +915,9 @@ export function VzMailWorkspace({
     );
   }, [filteredMessages, selectedMessageId]);
 
-  // Estimate local IndexedDB byte size
+  // Estimate local IndexedDB byte size without allocating Blob objects
   const localBytesUsed = useMemo(() => {
-    const jsonSize = new Blob([JSON.stringify(messages)]).size;
+    const jsonSize = new TextEncoder().encode(JSON.stringify(messages)).byteLength;
     return (jsonSize / 1024).toFixed(1);
   }, [messages]);
 
@@ -1125,7 +1369,9 @@ export function VzMailWorkspace({
                         <button
                           key={thread.threadId}
                           type="button"
-                          onClick={() => setSelectedThreadId(thread.threadId)}
+                          onClick={() =>
+                            handleSelectThread(thread.threadId, thread.messages)
+                          }
                           className={`w-full text-left p-3.5 transition-colors cursor-pointer ${
                             isSelected
                               ? 'bg-blue-50/70 dark:bg-[#192132]'
@@ -1467,7 +1713,7 @@ export function VzMailWorkspace({
                         return (
                           <tr
                             key={msg.id}
-                            onClick={() => setSelectedMessageId(msg.id)}
+                            onClick={() => handleSelectClassicMessage(msg)}
                             className={`h-10 transition-colors cursor-pointer ${
                               isSelected
                                 ? 'bg-blue-50/80 dark:bg-[#192132]'
@@ -1621,7 +1867,15 @@ export function VzMailWorkspace({
 
       {/* Outbound Compose Modal */}
       {composeOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Compose Outbound Email"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setComposeOpen(false);
+          }}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+        >
           <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl max-w-xl w-full p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#232732] pb-3">
               <div>
@@ -1754,7 +2008,15 @@ export function VzMailWorkspace({
 
       {/* Inbound Email Routing & Alias Simulator Modal */}
       {simulatorOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Simulate Inbound Email"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setSimulatorOpen(false);
+          }}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+        >
           <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl max-w-xl w-full p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#232732] pb-3">
               <div>

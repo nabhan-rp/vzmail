@@ -1,8 +1,1 @@
-{
-  "name": "Remix vz.gay -\u003e VZ Mail",
-  "description": "Portal navigasi utama dan direktori layanan ekosistem SaaS multi-fitur vz.gay dengan dukungan edge Cloudflare dan SSO Auth0.",
-  "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
-}
+{"name":"Remix Remix vz.gay -\u003e VZ Mail","description":"Portal navigasi utama dan direktori layanan ekosistem SaaS multi-fitur vz.gay dengan dukungan edge Cloudflare dan SSO Auth0.","requestFramePermissions":[],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}

@@ -28,6 +28,13 @@ export interface ResolvedEmailIdentity {
   isSupportedDomain: boolean;
 }
 
+export const DEFAULT_SUPPORTED_DOMAINS = [
+  'imy.li',
+  'vz.gay',
+  'mail.vz.gay',
+  'imy.pw',
+] as const;
+
 export const INITIAL_MAIL_DOMAINS: MailDomainOption[] = [
   {
     domain: 'imy.li',
@@ -87,12 +94,39 @@ export const INITIAL_MAIL_DOMAINS: MailDomainOption[] = [
   },
 ];
 
+/**
+ * Normalizes a handle to lowercase DNS-safe alphanumeric characters (max 63 chars).
+ */
 export function sanitizeHandle(raw: string): string {
   const cleaned = raw
     .toLowerCase()
     .trim()
-    .replace(/[^a-z0-9]/g, '');
+    .replace(/[^a-z0-9]/g, '')
+    .slice(0, 63);
   return cleaned || 'fadhil';
+}
+
+/**
+ * Validates a domain name (e.g. imy.li, brand.pm).
+ */
+export function sanitizeDomain(raw: string): string | null {
+  const cleaned = raw
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/.*$/, '')
+    .replace(/:\d+$/, '');
+
+  if (
+    !cleaned ||
+    cleaned.length > 253 ||
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(
+      cleaned
+    )
+  ) {
+    return null;
+  }
+  return cleaned;
 }
 
 /**
@@ -106,9 +140,9 @@ export function sanitizeHandle(raw: string): string {
  */
 export function resolveCanonicalEmail(
   rawEmail: string,
-  activeDomains: string[] = ['imy.li']
+  activeDomains: readonly string[] = ['imy.li']
 ): ResolvedEmailIdentity {
-  const trimmed = rawEmail.trim().toLowerCase();
+  const trimmed = rawEmail.trim().toLowerCase().slice(0, 254);
   const atIndex = trimmed.lastIndexOf('@');
 
   if (atIndex <= 0 || atIndex === trimmed.length - 1) {
@@ -135,32 +169,41 @@ export function resolveCanonicalEmail(
   const plusIndex = localPart.indexOf('+');
   const baseUsername = plusIndex >= 0 ? localPart.slice(0, plusIndex) : localPart;
   const plusTagRaw = plusIndex >= 0 ? localPart.slice(plusIndex + 1) : null;
-  const plusTag = plusTagRaw ? plusTagRaw.replace(/[^a-z0-9._-]/g, '') : null;
+  const plusTag = plusTagRaw
+    ? plusTagRaw.replace(/[^a-z0-9._-]/g, '').slice(0, 48)
+    : null;
 
   const dotMatches = baseUsername.match(/\./g);
   const dotCount = dotMatches ? dotMatches.length : 0;
 
-  const canonicalUsername = baseUsername.replace(/\./g, '').replace(/[^a-z0-9_-]/g, '');
+  const canonicalUsername = baseUsername
+    .replace(/\./g, '')
+    .replace(/[^a-z0-9_-]/g, '')
+    .slice(0, 63);
   const isValidLocal =
     canonicalUsername.length >= 2 &&
     !baseUsername.startsWith('.') &&
     !baseUsername.endsWith('.') &&
     !baseUsername.includes('..');
 
+  const safeDomain = sanitizeDomain(domain);
   const normalizedDomainList = activeDomains.map((d) => d.toLowerCase());
-  const isSupportedDomain = normalizedDomainList.includes(domain);
+  const isSupportedDomain = Boolean(
+    safeDomain && normalizedDomainList.includes(safeDomain)
+  );
   const effectiveUser = canonicalUsername || 'fadhil';
+  const effectiveDomain = safeDomain || 'imy.li';
 
   return {
     rawInput: rawEmail,
-    isValid: isValidLocal && domain.includes('.'),
+    isValid: Boolean(isValidLocal && safeDomain),
     localPart,
     baseUsername,
     canonicalUsername: effectiveUser,
     plusTag: plusTag && plusTag.length > 0 ? plusTag : null,
     dotCount,
-    domain,
-    canonicalEmail: `${effectiveUser}@${domain}`,
+    domain: effectiveDomain,
+    canonicalEmail: `${effectiveUser}@${effectiveDomain}`,
     pairedBioDomain: `${effectiveUser}.imy.li`,
     shortlinkPrefix: 'imy.li/s/',
     isSupportedDomain,
@@ -171,7 +214,10 @@ export function resolveCanonicalEmail(
  * Generates sample Gmail-style `.` and `+` aliases for a canonical handle
  * so the user can copy or test them directly.
  */
-export function generateAliasExamples(username: string, domain = 'imy.li'): {
+export function generateAliasExamples(
+  username: string,
+  domain = 'imy.li'
+): {
   label: { id: string; en: string };
   address: string;
   rule: string;
