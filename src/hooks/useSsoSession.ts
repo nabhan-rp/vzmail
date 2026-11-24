@@ -1,5 +1,6 @@
 import { useAuth0 } from '@auth0/auth0-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { resolveAuth0Config } from '../utils/auth0Config';
 import { sanitizeHandle } from '../utils/mailIdentity';
 
 export type CrossServiceOffer =
@@ -123,8 +124,9 @@ export function useSsoSession() {
     logout: auth0Logout,
   } = useAuth0();
 
-  const auth0Domain =
-    import.meta.env.VITE_AUTH0_DOMAIN || 'galbay.eu.auth0.com';
+  const auth0Config = useMemo(() => resolveAuth0Config(), []);
+  const auth0Domain = auth0Config.domain;
+  const localSessionStorageKey = `${LOCAL_SESSION_KEY}_${auth0Config.service}`;
 
   const [prefsMap, setPrefsMap] = useState<Record<string, UserModulePrefs>>(() =>
     readAllPrefs()
@@ -133,7 +135,7 @@ export function useSsoSession() {
   const [localSession, setLocalSession] = useState<SsoSession>(() => {
     if (typeof window === 'undefined') return SIGNED_OUT_SESSION;
     try {
-      const raw = window.localStorage.getItem(LOCAL_SESSION_KEY);
+      const raw = window.localStorage.getItem(localSessionStorageKey);
       if (raw) {
         const parsed = JSON.parse(raw) as Partial<SsoSession>;
         if (parsed.isAuthenticated && parsed.authProvider === 'local') {
@@ -173,16 +175,16 @@ export function useSsoSession() {
     try {
       if (localSession.isAuthenticated && localSession.authProvider === 'local') {
         window.localStorage.setItem(
-          LOCAL_SESSION_KEY,
+          localSessionStorageKey,
           JSON.stringify(localSession)
         );
       } else {
-        window.localStorage.removeItem(LOCAL_SESSION_KEY);
+        window.localStorage.removeItem(localSessionStorageKey);
       }
     } catch {
       // Ignore storage errors
     }
-  }, [localSession]);
+  }, [localSession, localSessionStorageKey]);
 
   const auth0Key = useMemo(() => {
     if (!auth0Authenticated || !auth0User) return null;
@@ -269,12 +271,11 @@ export function useSsoSession() {
     if (auth0Authenticated) {
       void auth0Logout({
         logoutParams: {
-          returnTo:
-            typeof window !== 'undefined' ? window.location.origin : undefined,
+          returnTo: auth0Config.logoutReturnTo || undefined,
         },
       });
     }
-  }, [auth0Authenticated, auth0Logout]);
+  }, [auth0Authenticated, auth0Logout, auth0Config.logoutReturnTo]);
 
   const updateActivePrefs = useCallback(
     (updater: (prev: UserModulePrefs) => UserModulePrefs) => {
@@ -351,6 +352,9 @@ export function useSsoSession() {
     isLoading,
     authError: authError ?? null,
     auth0Domain,
+    auth0ClientId: auth0Config.clientId,
+    auth0AppName: auth0Config.appName,
+    auth0Service: auth0Config.service,
     age,
     isVerifiedAdult21,
     crossOffer,

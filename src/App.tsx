@@ -111,6 +111,8 @@ export default function App() {
     isLoading: authLoading,
     authError,
     auth0Domain,
+    auth0AppName,
+    auth0ClientId,
     crossOffer,
     loginWithAuth0,
     signupWithAuth0,
@@ -126,6 +128,23 @@ export default function App() {
   const [activeHost, setActiveHost] = useState<ActiveHostView>(() =>
     detectInitialHostView()
   );
+
+  // On dedicated production domains (mail.vz.gay vs links.vz.gay), navigate across origins
+  // so each service uses its own isolated Auth0 SPA Client ID and origin storage.
+  const handleSelectHost = (nextHost: ActiveHostView) => {
+    if (typeof window !== 'undefined') {
+      const currentHostname = window.location.hostname.toLowerCase();
+      if (currentHostname === 'mail.vz.gay' && nextHost === 'links.vz.gay') {
+        window.location.href = 'https://links.vz.gay';
+        return;
+      }
+      if (currentHostname === 'links.vz.gay' && nextHost === 'mail.vz.gay') {
+        window.location.href = 'https://mail.vz.gay';
+        return;
+      }
+    }
+    setActiveHost(nextHost);
+  };
   const urlBioUser = useMemo(() => detectBioSubdomainUser(), []);
   const [ssoOpen, setSsoOpen] = useState(false);
   const [vaultOpen, setVaultOpen] = useState(false);
@@ -166,7 +185,7 @@ export default function App() {
         <MailLinksTopBar
           lang={lang}
           activeHost={activeHost}
-          onSelectHost={setActiveHost}
+          onSelectHost={handleSelectHost}
           session={session}
           onOpenSso={() => setSsoOpen(true)}
           onOpenCompose={() => setComposeCounter((c) => c + 1)}
@@ -180,7 +199,7 @@ export default function App() {
           onAcceptLinksOffer={() => activateLinks(false)}
           onAcceptMailOffer={() => activateMail(false)}
           onDismiss={dismissCrossOffer}
-          onSelectHost={setActiveHost}
+          onSelectHost={handleSelectHost}
         />
 
         {authError && (
@@ -356,6 +375,8 @@ export default function App() {
               isLoading={authLoading}
               authError={authError}
               auth0Domain={auth0Domain}
+              auth0AppName={auth0AppName}
+              auth0ClientId={auth0ClientId}
               onLoginWithAuth0={loginWithAuth0}
               onSignupWithAuth0={signupWithAuth0}
               onSignIn={signIn}

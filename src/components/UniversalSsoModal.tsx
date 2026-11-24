@@ -23,6 +23,8 @@ interface UniversalSsoModalProps {
   isLoading?: boolean;
   authError?: Error | null;
   auth0Domain?: string;
+  auth0AppName?: string;
+  auth0ClientId?: string;
   onLoginWithAuth0: () => void;
   onSignupWithAuth0: () => void;
   onSignIn: (
@@ -44,7 +46,9 @@ export function UniversalSsoModal({
   session,
   isLoading = false,
   authError = null,
-  auth0Domain = 'galbay.eu.auth0.com',
+  auth0Domain = 'accounts.vz.gay',
+  auth0AppName = 'VZ Mail',
+  auth0ClientId = '',
   onLoginWithAuth0,
   onSignupWithAuth0,
   onSignIn,
@@ -106,7 +110,10 @@ export function UniversalSsoModal({
           <div className="space-y-1">
             <div className="flex items-center gap-1.5 text-xs font-mono text-blue-600 dark:text-blue-400">
               <ShieldCheck className="w-4 h-4" />
-              <span>{auth0Domain} · Auth0 Universal SSO</span>
+              <span>
+                {auth0Domain} · {auth0AppName} SSO
+                {auth0ClientId ? ` (${auth0ClientId.slice(0, 8)}…)` : ''}
+              </span>
             </div>
             <h2 className="text-lg font-bold text-slate-900 dark:text-white font-display">
               {session.isAuthenticated
