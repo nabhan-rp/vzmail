@@ -97,27 +97,27 @@ export function MailLandingGate({
                     : `One SSO account works across all vz.gay services. Choosing to create a ${user}@${domain} mailbox is completely optional (just like registering a Microsoft account without creating an Outlook inbox).`}
                 </p>
 
-                <div className="flex flex-wrap items-center gap-3 pt-1">
+                <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2.5 sm:gap-3 pt-1">
                   <button
                     type="button"
                     onClick={onActivateMail}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <Mail className="w-4 h-4" />
-                    <span>
+                    <Mail className="w-4 h-4 shrink-0" />
+                    <span className="truncate">
                       {lang === 'id'
                         ? `Aktifkan Kotak Surat ${user}@${domain}`
                         : `Activate ${user}@${domain} Mailbox`}
                     </span>
-                    <ArrowRight className="w-4 h-4" />
+                    <ArrowRight className="w-4 h-4 shrink-0" />
                   </button>
 
                   <button
                     type="button"
                     onClick={() => onSelectHost('links.vz.gay')}
-                    className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232936] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232936] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <span>
+                    <span className="truncate">
                       {lang === 'id'
                         ? `Buka VZ Links (${user}.${domain})`
                         : `Explore VZ Links (${user}.${domain})`}
@@ -127,7 +127,7 @@ export function MailLandingGate({
                   <button
                     type="button"
                     onClick={onOpenSso}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="min-h-[44px] inline-flex items-center justify-center sm:justify-start gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <span>myaccount.vz.gay</span>
                     <ExternalLink className="w-3.5 h-3.5" />
@@ -141,23 +141,23 @@ export function MailLandingGate({
                     ? 'Masuk dengan akun SSO Universal accounts.vz.gay terlebih dahulu. Setelah masuk, Anda dapat memilih untuk mengaktifkan email atau tidak.'
                     : 'Sign in with your universal accounts.vz.gay SSO account first. Once signed in, you can choose whether or not to activate an email mailbox.'}
                 </p>
-                <div className="flex flex-wrap items-center gap-3">
+                <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2.5 sm:gap-3">
                   <button
                     type="button"
                     onClick={onOpenSso}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <span>
                       {lang === 'id'
                         ? 'Masuk via SSO accounts.vz.gay'
                         : 'Sign In via accounts.vz.gay SSO'}
                     </span>
-                    <ArrowRight className="w-4 h-4" />
+                    <ArrowRight className="w-4 h-4 shrink-0" />
                   </button>
                   <button
                     type="button"
                     onClick={() => onSelectHost('links.vz.gay')}
-                    className="px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg hover:bg-slate-200 dark:hover:bg-[#232936] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg hover:bg-slate-200 dark:hover:bg-[#232936] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     {lang === 'id'
                       ? 'Lihat Landing Page links.vz.gay'
@@ -207,27 +207,27 @@ export function MailLandingGate({
             />
 
             <div className="p-4 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-2 text-xs font-mono tabular-nums">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-500">Canonical Inbox:</span>
-                <span className="font-semibold text-blue-600 dark:text-blue-400">
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <span className="text-slate-500 shrink-0">Canonical Inbox:</span>
+                <span className="font-semibold text-blue-600 dark:text-blue-400 truncate">
                   {resolved.canonicalEmail}
                 </span>
               </div>
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-500">Plus Filter Tag:</span>
-                <span className="text-slate-800 dark:text-slate-200">
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <span className="text-slate-500 shrink-0">Plus Filter Tag:</span>
+                <span className="text-slate-800 dark:text-slate-200 truncate">
                   {resolved.plusTag ? `+${resolved.plusTag}` : 'none (primary)'}
                 </span>
               </div>
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-500">Dots Stripped:</span>
-                <span className="text-slate-800 dark:text-slate-200">
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <span className="text-slate-500 shrink-0">Dots Stripped:</span>
+                <span className="text-slate-800 dark:text-slate-200 truncate">
                   {resolved.dotCount} dot(s) normalized
                 </span>
               </div>
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-500">Paired Link-in-Bio:</span>
-                <span className="text-emerald-600 dark:text-emerald-400">
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <span className="text-slate-500 shrink-0">Paired Link-in-Bio:</span>
+                <span className="text-emerald-600 dark:text-emerald-400 truncate">
                   https://{resolved.pairedBioDomain}
                 </span>
               </div>

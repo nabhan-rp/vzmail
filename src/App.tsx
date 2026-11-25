@@ -6,6 +6,7 @@ import {
   MailLinksTopBar,
   type ActiveHostView,
 } from './components/MailLinksTopBar';
+import { MobileBottomNav } from './components/MobileBottomNav';
 import { useLanguage } from './hooks/useLanguage';
 import { usePwaInstall } from './hooks/usePwaInstall';
 import { useSsoSession } from './hooks/useSsoSession';
@@ -116,6 +117,7 @@ export default function App() {
     session,
     isLoading: authLoading,
     authError,
+    isPreviewHost,
     auth0Domain,
     auth0AppName,
     auth0ClientId,
@@ -198,6 +200,9 @@ export default function App() {
       <div className="min-h-screen flex flex-col bg-[#FAFAFA] text-slate-900 dark:bg-[#0B0D11] dark:text-slate-100">
         <MailLinksTopBar
           lang={lang}
+          onChangeLang={setLang}
+          theme={theme}
+          onChangeTheme={setTheme}
           activeHost={activeHost}
           onSelectHost={handleSelectHost}
           session={session}
@@ -245,7 +250,7 @@ export default function App() {
                   onChangeTheme={setTheme}
                   session={session}
                   composeRequested={composeCounter}
-                  onSelectHost={setActiveHost}
+                  onSelectHost={handleSelectHost}
                   onOpenVault={() => setVaultOpen(true)}
                   onOpenSso={() => setSsoOpen(true)}
                   onDeactivateMail={deactivateMail}
@@ -263,7 +268,7 @@ export default function App() {
                     activateMail(true);
                   }}
                   onOpenSso={() => setSsoOpen(true)}
-                  onSelectHost={setActiveHost}
+                  onSelectHost={handleSelectHost}
                 />
               ))}
 
@@ -273,7 +278,7 @@ export default function App() {
                   lang={lang}
                   session={session}
                   initialSubTab="bio"
-                  onSelectHost={setActiveHost}
+                  onSelectHost={handleSelectHost}
                   onActivateMailFromLinks={() => activateMail(false)}
                   onDeactivateLinks={deactivateLinks}
                   onOpenSso={() => setSsoOpen(true)}
@@ -290,7 +295,7 @@ export default function App() {
                     activateLinks(true);
                   }}
                   onOpenSso={() => setSsoOpen(true)}
-                  onSelectHost={setActiveHost}
+                  onSelectHost={handleSelectHost}
                 />
               ))}
 
@@ -300,7 +305,7 @@ export default function App() {
                   lang={lang}
                   session={session}
                   initialSubTab="shortlinks"
-                  onSelectHost={setActiveHost}
+                  onSelectHost={handleSelectHost}
                   onActivateMailFromLinks={() => activateMail(false)}
                   onDeactivateLinks={deactivateLinks}
                   onOpenSso={() => setSsoOpen(true)}
@@ -317,7 +322,7 @@ export default function App() {
                     activateLinks(true);
                   }}
                   onOpenSso={() => setSsoOpen(true)}
-                  onSelectHost={setActiveHost}
+                  onSelectHost={handleSelectHost}
                 />
               ))}
 
@@ -326,7 +331,7 @@ export default function App() {
                 lang={lang}
                 session={session}
                 overrideUser={urlBioUser}
-                onSelectHost={setActiveHost}
+                onSelectHost={handleSelectHost}
               />
             )}
 
@@ -339,7 +344,7 @@ export default function App() {
           </Suspense>
         </main>
 
-        <footer className="border-t border-slate-200 dark:border-[#232732] bg-white dark:bg-[#0D1016]">
+        <footer className="border-t border-slate-200 dark:border-[#232732] bg-white dark:bg-[#0D1016] pb-16 md:pb-0">
           <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-5 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
             <div>
               <span>© 2026 PT Galeri Langkah Bahagia Yuwana (galbay)</span>
@@ -390,6 +395,12 @@ export default function App() {
           </div>
         </footer>
 
+        <MobileBottomNav
+          lang={lang}
+          activeHost={activeHost}
+          onSelectHost={handleSelectHost}
+        />
+
         {ssoOpen && (
           <Suspense fallback={null}>
             <UniversalSsoModal
@@ -398,6 +409,7 @@ export default function App() {
               session={session}
               isLoading={authLoading}
               authError={authError}
+              isPreviewHost={isPreviewHost}
               auth0Domain={auth0Domain}
               auth0AppName={auth0AppName}
               auth0ClientId={auth0ClientId}

@@ -1,10 +1,12 @@
 import {
   Archive,
+  ArrowLeft,
   CheckCircle2,
   Download,
   ExternalLink,
   FileText,
   FolderArchive,
+  FolderOpen,
   HardDrive,
   Inbox,
   Link2,
@@ -143,6 +145,8 @@ export function VzMailWorkspace({
 
   const [selectedThreadId, setSelectedThreadId] = useState<string>('');
   const [selectedMessageId, setSelectedMessageId] = useState<string>('');
+  const [mobileFoldersOpen, setMobileFoldersOpen] = useState(false);
+  const [mobileShowDetail, setMobileShowDetail] = useState(false);
   const [expandedHeaderIds, setExpandedHeaderIds] = useState<Record<string, boolean>>({});
   const [quickReplyText, setQuickReplyText] = useState('');
   const [sendingQuickReply, setSendingQuickReply] = useState(false);
@@ -209,18 +213,34 @@ export function VzMailWorkspace({
     );
   }, [user, domain, primaryEmail]);
 
-  // Escape key closes Compose & Simulator modals cleanly
+  // Escape key closes Compose, Simulator, and mobile Folders drawer cleanly
   useEffect(() => {
-    if (!composeOpen && !simulatorOpen) return;
+    if (!composeOpen && !simulatorOpen && !mobileFoldersOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setComposeOpen(false);
         setSimulatorOpen(false);
+        setMobileFoldersOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [composeOpen, simulatorOpen]);
+  }, [composeOpen, simulatorOpen, mobileFoldersOpen]);
+
+  // Lock body scroll and close mobile Folders drawer when resizing to desktop
+  useEffect(() => {
+    if (!mobileFoldersOpen) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onResize = () => {
+      if (window.innerWidth >= 1024) setMobileFoldersOpen(false);
+    };
+    window.addEventListener('resize', onResize);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener('resize', onResize);
+    };
+  }, [mobileFoldersOpen]);
 
   useEffect(() => {
     try {
@@ -717,6 +737,7 @@ export function VzMailWorkspace({
 
   const handleSelectThread = async (threadId: string, threadMessages: LocalMailMessage[]) => {
     setSelectedThreadId(threadId);
+    setMobileShowDetail(true);
     const unread = threadMessages.filter((m) => !m.read);
     if (unread.length > 0) {
       await markMessagesAsRead(unread);
@@ -728,6 +749,7 @@ export function VzMailWorkspace({
 
   const handleSelectClassicMessage = async (msg: LocalMailMessage) => {
     setSelectedMessageId(msg.id);
+    setMobileShowDetail(true);
     if (!msg.read) {
       await markMessagesAsRead([msg]);
       setMessages((prev) =>
@@ -931,19 +953,284 @@ export function VzMailWorkspace({
     [simToAlias, domain]
   );
 
+  const folderItems = useMemo(
+    () =>
+      [
+        {
+          id: 'inbox' as const,
+          label: lang === 'id' ? 'Kotak Masuk' : 'Inbox',
+          icon: Inbox,
+          count: folderCounts.inbox,
+        },
+        {
+          id: 'plus_aliases' as const,
+          label:
+            lang === 'id' ? 'Alias (+Tag & Titik)' : 'Aliases (+Tag & Dot)',
+          icon: Tag,
+          count: folderCounts.plus_aliases,
+        },
+        {
+          id: 'starred' as const,
+          label: lang === 'id' ? 'Berbintang' : 'Starred',
+          icon: Star,
+          count: folderCounts.starred,
+        },
+        {
+          id: 'sent' as const,
+          label: lang === 'id' ? 'Terkirim Lokal' : 'Local Sent',
+          icon: Send,
+          count: folderCounts.sent,
+        },
+        {
+          id: 'drafts' as const,
+          label: lang === 'id' ? 'Draf Lokal' : 'Local Drafts',
+          icon: FileText,
+          count: folderCounts.drafts,
+        },
+        {
+          id: 'archive' as const,
+          label: lang === 'id' ? 'Arsip Perangkat' : 'Device Archive',
+          icon: Archive,
+          count: folderCounts.archive,
+        },
+        {
+          id: 'trash' as const,
+          label: lang === 'id' ? 'Sampah' : 'Trash',
+          icon: Trash2,
+          count: folderCounts.trash,
+        },
+      ],
+    [lang, folderCounts]
+  );
+
+  const activeFolderMeta =
+    folderItems.find((f) => f.id === activeFolder) || folderItems[0];
+
+  const renderSidebarContent = (onCloseDrawer?: () => void) => (
+    <div className="space-y-5">
+      <button
+        type="button"
+        onClick={() => {
+          onCloseDrawer?.();
+          setComposeFromAlias(primaryEmail);
+          setComposeOpen(true);
+        }}
+        className="w-full min-h-[44px] py-2.5 px-4 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer"
+      >
+        <Send className="w-3.5 h-3.5" />
+        <span>
+          {lang === 'id' ? '+ Tulis Email Baru' : '+ Compose New Email'}
+        </span>
+      </button>
+
+      {/* Folders List */}
+      <nav aria-label="Mailbox Folders" className="space-y-1">
+        {folderItems.map((folder) => {
+          const Icon = folder.icon;
+          const isSelected = activeFolder === folder.id;
+          return (
+            <button
+              key={folder.id}
+              type="button"
+              onClick={() => {
+                setActiveFolder(folder.id);
+                setSelectedPlusTag(null);
+                setMobileShowDetail(false);
+                if (folder.id !== 'inbox' && viewMode === 'conversational') {
+                  setViewMode('classic');
+                }
+                onCloseDrawer?.();
+              }}
+              className={`w-full min-h-[40px] flex items-center justify-between px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer ${
+                isSelected
+                  ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 font-semibold'
+                  : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#1B202B]'
+              }`}
+            >
+              <span className="flex items-center gap-2.5 truncate">
+                <Icon className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">{folder.label}</span>
+              </span>
+              <span className="font-mono tabular-nums text-[11px] text-slate-500 dark:text-slate-400">
+                {folder.count}
+              </span>
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* Discovered +Plus Alias Filter */}
+      {discoveredPlusTags.length > 0 && (
+        <div className="pt-3 border-t border-slate-200 dark:border-[#232732] space-y-2">
+          <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+            {lang === 'id'
+              ? 'Filter Subaddressing (+Tag):'
+              : 'Plus Subaddress Filters (+Tag):'}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedPlusTag(null);
+                onCloseDrawer?.();
+              }}
+              className={`min-h-[32px] px-2.5 py-1 text-[11px] font-mono rounded transition-colors cursor-pointer ${
+                selectedPlusTag === null
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-100 dark:bg-[#1B202B] text-slate-600 dark:text-slate-300'
+              }`}
+            >
+              All
+            </button>
+            {discoveredPlusTags.map((tag) => (
+              <button
+                key={tag}
+                type="button"
+                onClick={() => {
+                  setSelectedPlusTag((curr) => (curr === tag ? null : tag));
+                  onCloseDrawer?.();
+                }}
+                className={`min-h-[32px] px-2.5 py-1 text-[11px] font-mono rounded transition-colors cursor-pointer ${
+                  selectedPlusTag === tag
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-100 dark:bg-[#1B202B] text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                +{tag}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Primary @imy.li Identity & Paired VZ Links Card */}
+      <div className="pt-4 border-t border-slate-200 dark:border-[#232732] space-y-2.5 text-xs">
+        <div className="font-semibold text-slate-900 dark:text-white flex items-center justify-between">
+          <span>{lang === 'id' ? 'Identitas Aktif' : 'Active Identity'}</span>
+          <span className="font-mono text-[11px] text-emerald-600 dark:text-emerald-400">
+            @{domain}
+          </span>
+        </div>
+
+        <div className="p-3 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1.5 font-mono text-[11px]">
+          <div className="text-slate-900 dark:text-white font-semibold truncate">
+            {primaryEmail}
+          </div>
+          <div className="text-slate-500 dark:text-slate-400 flex items-center justify-between gap-2">
+            <span>Alias + &amp; .:</span>
+            <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+              {lang === 'id' ? 'Gratis (Aktif)' : 'Free (Active)'}
+            </span>
+          </div>
+          <div className="text-slate-500 dark:text-slate-400 flex items-center justify-between gap-2">
+            <span>Paired Bio:</span>
+            <button
+              type="button"
+              onClick={() => {
+                onCloseDrawer?.();
+                onSelectHost('bio_public');
+              }}
+              className="text-blue-600 dark:text-blue-400 hover:underline truncate cursor-pointer"
+            >
+              {user}.{domain}
+            </button>
+          </div>
+          <div className="text-slate-500 dark:text-slate-400 flex items-center justify-between gap-2">
+            <span>Shortlinks:</span>
+            <button
+              type="button"
+              onClick={() => {
+                onCloseDrawer?.();
+                onSelectHost('shortlinks');
+              }}
+              className="text-blue-600 dark:text-blue-400 hover:underline truncate cursor-pointer"
+            >
+              {domain}/s/*
+            </button>
+          </div>
+          <div className="text-slate-500 dark:text-slate-400 flex items-center justify-between gap-2 tabular-nums">
+            <span>Kuota Kirim:</span>
+            <span>
+              {quotaUsed} / {quotaLimit} hari ini
+            </span>
+          </div>
+        </div>
+
+        {/* Locked Additional Mailbox / Custom Alias Without + or . (Coming Soon Paid Package) */}
+        <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-[#0E1117] border border-dashed border-slate-300 dark:border-[#282E3D] space-y-1">
+          <div className="flex items-center justify-between text-[11px] font-medium text-slate-700 dark:text-slate-300">
+            <span className="flex items-center gap-1.5">
+              <Lock className="w-3 h-3 text-amber-500 shrink-0" />
+              <span>
+                {lang === 'id'
+                  ? '+ Tambah Mailbox & Alias Tanpa +/.'
+                  : '+ Add Mailbox & Custom Alias (No +/.)'}
+              </span>
+            </span>
+          </div>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+            {lang === 'id'
+              ? 'Alias dengan + dan . adalah fasilitas gratis. Paket Berbayar (Coming Soon) khusus untuk tambah mailbox atau alias bebas tanpa + / . di 1 akun SSO.'
+              : 'Aliases with + and . are free. The Paid Package (Coming Soon) is strictly for adding extra mailboxes or standalone aliases without + / . in 1 SSO account.'}
+          </p>
+        </div>
+      </div>
+
+      {/* Local Device IndexedDB & Zero Server Retention Telemetry */}
+      <div className="pt-4 border-t border-slate-200 dark:border-[#232732] space-y-2 text-xs">
+        <div className="flex items-center justify-between text-slate-700 dark:text-slate-300 font-medium">
+          <span className="flex items-center gap-1.5">
+            <HardDrive className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+            <span>IndexedDB Lokal</span>
+          </span>
+          <span className="font-mono tabular-nums">{localBytesUsed} KB</span>
+        </div>
+        <div className="text-[11px] text-slate-500 dark:text-slate-400 space-y-1 font-mono tabular-nums">
+          <div>Server Mailbox: 0 KB (Zero Retention)</div>
+          <div className="truncate" title={lastPurgeReceipt}>
+            Last ACK: {lastPurgeReceipt}
+          </div>
+        </div>
+        <div className="pt-1 flex items-center justify-between text-[11px]">
+          <button
+            type="button"
+            onClick={() => {
+              onCloseDrawer?.();
+              onOpenSso();
+            }}
+            className="text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+          >
+            myaccount.vz.gay
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onCloseDrawer?.();
+              onDeactivateMail();
+            }}
+            className="text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer"
+          >
+            {lang === 'id' ? 'Nonaktifkan Mail' : 'Disable Mail'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
-    <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-6 space-y-4">
+    <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-4 sm:py-6 space-y-4">
       {/* Toast Notification */}
       {toastNotice && (
         <div className="bg-slate-900 dark:bg-blue-950 text-white border border-slate-700 dark:border-blue-800 rounded-lg px-4 py-2.5 text-xs flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span>{toastNotice}</span>
+            <span className="break-words">{toastNotice}</span>
           </div>
           <button
             type="button"
             onClick={() => setToastNotice(null)}
-            className="text-slate-400 hover:text-white cursor-pointer"
+            aria-label="Dismiss notification"
+            className="w-8 h-8 inline-flex items-center justify-center text-slate-400 hover:text-white shrink-0 cursor-pointer"
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -951,14 +1238,46 @@ export function VzMailWorkspace({
       )}
 
       {/* Workspace Control Toolbar */}
-      <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-3 sm:px-4 flex flex-wrap items-center justify-between gap-3">
-        {/* Left: Conversational vs Classic Segmented Switcher */}
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#0B0D11] rounded-lg border border-slate-200/70 dark:border-[#232732]">
+      <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-3 sm:px-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+        {/* Top / Left Row: Mobile Folders + Compose, View Switcher, Search */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Mobile / Tablet Folders Drawer Trigger + Quick Compose (< lg) */}
+          <div className="flex items-center gap-2 w-full sm:w-auto lg:hidden">
             <button
               type="button"
-              onClick={() => setViewMode('conversational')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              onClick={() => setMobileFoldersOpen(true)}
+              className="flex-1 sm:flex-none min-h-[44px] inline-flex items-center justify-between sm:justify-start gap-2 px-3 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232A38] border border-slate-200 dark:border-[#2A303D] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <span className="inline-flex items-center gap-2">
+                <FolderOpen className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                <span>{activeFolderMeta.label}</span>
+              </span>
+              <span className="font-mono tabular-nums text-[11px] text-slate-500 dark:text-slate-400">
+                {activeFolderMeta.count}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setComposeFromAlias(primaryEmail);
+                setComposeOpen(true);
+              }}
+              className="min-h-[44px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>{lang === 'id' ? 'Tulis' : 'Compose'}</span>
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#0B0D11] rounded-lg border border-slate-200/70 dark:border-[#232732] w-full sm:w-auto">
+            <button
+              type="button"
+              onClick={() => {
+                setViewMode('conversational');
+                setMobileShowDetail(false);
+              }}
+              className={`flex-1 sm:flex-none min-h-[38px] inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 viewMode === 'conversational'
                   ? 'bg-white dark:bg-[#191E28] text-slate-900 dark:text-white shadow-xs'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -971,8 +1290,11 @@ export function VzMailWorkspace({
             </button>
             <button
               type="button"
-              onClick={() => setViewMode('classic')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              onClick={() => {
+                setViewMode('classic');
+                setMobileShowDetail(false);
+              }}
+              className={`flex-1 sm:flex-none min-h-[38px] inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 viewMode === 'classic'
                   ? 'bg-white dark:bg-[#191E28] text-slate-900 dark:text-white shadow-xs'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -984,7 +1306,7 @@ export function VzMailWorkspace({
           </div>
 
           {/* Search input */}
-          <div className="relative w-48 sm:w-64">
+          <div className="relative w-full sm:w-56">
             <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="search"
@@ -995,7 +1317,7 @@ export function VzMailWorkspace({
                   ? 'Cari subjek, pengirim, +tag...'
                   : 'Search subject, sender, +tag...'
               }
-              className="w-full pl-8 pr-3 py-1.5 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:border-blue-600"
+              className="w-full min-h-[40px] pl-8 pr-3 py-1.5 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:border-blue-600"
             />
           </div>
         </div>
@@ -1006,7 +1328,7 @@ export function VzMailWorkspace({
             type="button"
             onClick={handlePopAndPurgeEdgeQueue}
             disabled={syncingEdge}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               edgePackets.length > 0
                 ? 'bg-amber-600 hover:bg-amber-700 text-white'
                 : 'bg-slate-100 dark:bg-[#1B202B] text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-[#232A38]'
@@ -1018,39 +1340,39 @@ export function VzMailWorkspace({
             <span className="tabular-nums">
               {edgePackets.length > 0
                 ? lang === 'id'
-                  ? `Tarik & Purge Edge (${edgePackets.length} Antrean)`
-                  : `Pull & Purge Edge (${edgePackets.length} Queued)`
+                  ? `Tarik & Purge Edge (${edgePackets.length})`
+                  : `Pull & Purge (${edgePackets.length})`
                 : lang === 'id'
-                  ? 'Edge Queue: 0 di Server'
-                  : 'Edge Queue: 0 on Server'}
+                  ? 'Edge Queue: 0'
+                  : 'Edge Queue: 0'}
             </span>
           </button>
 
           <button
             type="button"
             onClick={() => setSimulatorOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232A38] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232A38] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <MailPlus className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
             <span>
-              {lang === 'id' ? 'Uji Email Masuk (+/.)' : 'Test Inbound (+/.)'}
+              {lang === 'id' ? 'Uji Masuk (+/.)' : 'Test Inbound (+/.)'}
             </span>
           </button>
 
           <button
             type="button"
             onClick={onOpenVault}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232A38] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232A38] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <FolderArchive className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-            <span>Vault (.eml/.mbox/.enc)</span>
+            <span>Vault</span>
           </button>
 
-          <div className="flex items-center gap-1 pl-1 border-l border-slate-200 dark:border-[#232732]">
+          <div className="hidden sm:flex items-center gap-1 pl-1 border-l border-slate-200 dark:border-[#232732]">
             <button
               type="button"
               onClick={() => onChangeLang(lang === 'id' ? 'en' : 'id')}
-              className="px-2 py-1 text-xs font-mono text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded cursor-pointer"
+              className="min-h-[36px] px-2 py-1 text-xs font-mono text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded cursor-pointer"
             >
               {lang.toUpperCase()}
             </button>
@@ -1059,7 +1381,7 @@ export function VzMailWorkspace({
               onClick={() =>
                 onChangeTheme(theme === 'dark' ? 'light' : 'dark')
               }
-              className="px-2 py-1 text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded cursor-pointer"
+              className="min-h-[36px] px-2 py-1 text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded cursor-pointer"
             >
               {theme === 'dark' ? 'Light' : 'Dark'}
             </button>
@@ -1067,250 +1389,48 @@ export function VzMailWorkspace({
         </div>
       </div>
 
-      {/* Main 1440px Workspace Grid: Sidebar (260px) + Viewport */}
+      {/* Mobile / Tablet Slide-Over Folders & Identity Drawer (< lg) */}
+      {mobileFoldersOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={lang === 'id' ? 'Folder & Identitas Mail' : 'Mail Folders & Identity'}
+          className="fixed inset-0 z-50 lg:hidden flex"
+        >
+          <div
+            onClick={() => setMobileFoldersOpen(false)}
+            className="fixed inset-0 bg-black/55 backdrop-blur-xs"
+            aria-hidden="true"
+          />
+          <aside className="relative z-10 w-[300px] max-w-[86vw] h-full bg-white dark:bg-[#13161C] border-r border-slate-200 dark:border-[#232732] shadow-2xl flex flex-col">
+            <div className="h-14 px-4 border-b border-slate-200 dark:border-[#232732] flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <FolderOpen className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                <span className="text-sm font-bold text-slate-900 dark:text-white font-display truncate">
+                  {lang === 'id' ? 'Folder & Identitas' : 'Folders & Identity'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileFoldersOpen(false)}
+                aria-label={lang === 'id' ? 'Tutup panel folder' : 'Close folders drawer'}
+                className="w-11 h-11 inline-flex items-center justify-center rounded-lg text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-[#1B202B] cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              {renderSidebarContent(() => setMobileFoldersOpen(false))}
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {/* Main 1440px Workspace Grid: Desktop Sidebar (260px) + Viewport */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-        {/* Left Sidebar (3 cols on lg) */}
-        <aside className="lg:col-span-3 bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-4 space-y-5">
-          <button
-            type="button"
-            onClick={() => {
-              setComposeFromAlias(primaryEmail);
-              setComposeOpen(true);
-            }}
-            className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer"
-          >
-            <Send className="w-3.5 h-3.5" />
-            <span>
-              {lang === 'id'
-                ? '+ Tulis Email Baru'
-                : '+ Compose New Email'}
-            </span>
-          </button>
-
-          {/* Folders List */}
-          <nav aria-label="Mailbox Folders" className="space-y-1">
-            {(
-              [
-                {
-                  id: 'inbox',
-                  label: lang === 'id' ? 'Kotak Masuk' : 'Inbox',
-                  icon: Inbox,
-                  count: folderCounts.inbox,
-                },
-                {
-                  id: 'plus_aliases',
-                  label:
-                    lang === 'id'
-                      ? 'Alias (+Tag & Titik)'
-                      : 'Aliases (+Tag & Dot)',
-                  icon: Tag,
-                  count: folderCounts.plus_aliases,
-                },
-                {
-                  id: 'starred',
-                  label: lang === 'id' ? 'Berbintang' : 'Starred',
-                  icon: Star,
-                  count: folderCounts.starred,
-                },
-                {
-                  id: 'sent',
-                  label: lang === 'id' ? 'Terkirim Lokal' : 'Local Sent',
-                  icon: Send,
-                  count: folderCounts.sent,
-                },
-                {
-                  id: 'drafts',
-                  label: lang === 'id' ? 'Draf Lokal' : 'Local Drafts',
-                  icon: FileText,
-                  count: folderCounts.drafts,
-                },
-                {
-                  id: 'archive',
-                  label: lang === 'id' ? 'Arsip Perangkat' : 'Device Archive',
-                  icon: Archive,
-                  count: folderCounts.archive,
-                },
-                {
-                  id: 'trash',
-                  label: lang === 'id' ? 'Sampah' : 'Trash',
-                  icon: Trash2,
-                  count: folderCounts.trash,
-                },
-              ] as const
-            ).map((folder) => {
-              const Icon = folder.icon;
-              const isSelected = activeFolder === folder.id;
-              return (
-                <button
-                  key={folder.id}
-                  type="button"
-                  onClick={() => {
-                    setActiveFolder(folder.id);
-                    setSelectedPlusTag(null);
-                    if (
-                      folder.id !== 'inbox' &&
-                      viewMode === 'conversational'
-                    ) {
-                      setViewMode('classic');
-                    }
-                  }}
-                  className={`w-full flex items-center justify-between px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer ${
-                    isSelected
-                      ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 font-semibold'
-                      : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#1B202B]'
-                  }`}
-                >
-                  <span className="flex items-center gap-2.5 truncate">
-                    <Icon className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate">{folder.label}</span>
-                  </span>
-                  <span className="font-mono tabular-nums text-[11px] text-slate-500 dark:text-slate-400">
-                    {folder.count}
-                  </span>
-                </button>
-              );
-            })}
-          </nav>
-
-          {/* Discovered +Plus Alias Filter */}
-          {discoveredPlusTags.length > 0 && (
-            <div className="pt-3 border-t border-slate-200 dark:border-[#232732] space-y-2">
-              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                {lang === 'id'
-                  ? 'Filter Subaddressing (+Tag):'
-                  : 'Plus Subaddress Filters (+Tag):'}
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setSelectedPlusTag(null)}
-                  className={`px-2 py-1 text-[11px] font-mono rounded transition-colors cursor-pointer ${
-                    selectedPlusTag === null
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-slate-100 dark:bg-[#1B202B] text-slate-600 dark:text-slate-300'
-                  }`}
-                >
-                  All
-                </button>
-                {discoveredPlusTags.map((tag) => (
-                  <button
-                    key={tag}
-                    type="button"
-                    onClick={() =>
-                      setSelectedPlusTag((curr) => (curr === tag ? null : tag))
-                    }
-                    className={`px-2 py-1 text-[11px] font-mono rounded transition-colors cursor-pointer ${
-                      selectedPlusTag === tag
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-slate-100 dark:bg-[#1B202B] text-slate-600 dark:text-slate-300'
-                    }`}
-                  >
-                    +{tag}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Primary @imy.li Identity & Paired VZ Links Card */}
-          <div className="pt-4 border-t border-slate-200 dark:border-[#232732] space-y-2.5 text-xs">
-            <div className="font-semibold text-slate-900 dark:text-white flex items-center justify-between">
-              <span>{lang === 'id' ? 'Identitas Aktif' : 'Active Identity'}</span>
-              <span className="font-mono text-[11px] text-emerald-600 dark:text-emerald-400">
-                @{domain}
-              </span>
-            </div>
-
-            <div className="p-3 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1.5 font-mono text-[11px]">
-              <div className="text-slate-900 dark:text-white font-semibold truncate">
-                {primaryEmail}
-              </div>
-              <div className="text-slate-500 dark:text-slate-400 flex items-center justify-between">
-                <span>Alias + &amp; .:</span>
-                <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
-                  {lang === 'id' ? 'Gratis (Aktif)' : 'Free (Active)'}
-                </span>
-              </div>
-              <div className="text-slate-500 dark:text-slate-400 flex items-center justify-between">
-                <span>Paired Bio:</span>
-                <button
-                  type="button"
-                  onClick={() => onSelectHost('bio_public')}
-                  className="text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
-                >
-                  {user}.{domain}
-                </button>
-              </div>
-              <div className="text-slate-500 dark:text-slate-400 flex items-center justify-between">
-                <span>Shortlinks:</span>
-                <button
-                  type="button"
-                  onClick={() => onSelectHost('shortlinks')}
-                  className="text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
-                >
-                  {domain}/s/*
-                </button>
-              </div>
-              <div className="text-slate-500 dark:text-slate-400 flex items-center justify-between tabular-nums">
-                <span>Kuota Kirim:</span>
-                <span>
-                  {quotaUsed} / {quotaLimit} hari ini
-                </span>
-              </div>
-            </div>
-
-            {/* Locked Additional Mailbox / Custom Alias Without + or . (Coming Soon Paid Package) */}
-            <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-[#0E1117] border border-dashed border-slate-300 dark:border-[#282E3D] space-y-1">
-              <div className="flex items-center justify-between text-[11px] font-medium text-slate-700 dark:text-slate-300">
-                <span className="flex items-center gap-1.5">
-                  <Lock className="w-3 h-3 text-amber-500" />
-                  <span>
-                    {lang === 'id'
-                      ? '+ Tambah Mailbox & Alias Tanpa +/.'
-                      : '+ Add Mailbox & Custom Alias (No +/.)'}
-                  </span>
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
-                {lang === 'id'
-                  ? 'Alias dengan + dan . adalah fasilitas gratis. Paket Berbayar (Coming Soon) khusus untuk tambah mailbox atau alias bebas tanpa + / . di 1 akun SSO.'
-                  : 'Aliases with + and . are free. The Paid Package (Coming Soon) is strictly for adding extra mailboxes or standalone aliases without + / . in 1 SSO account.'}
-              </p>
-            </div>
-          </div>
-
-          {/* Local Device IndexedDB & Zero Server Retention Telemetry */}
-          <div className="pt-4 border-t border-slate-200 dark:border-[#232732] space-y-2 text-xs">
-            <div className="flex items-center justify-between text-slate-700 dark:text-slate-300 font-medium">
-              <span className="flex items-center gap-1.5">
-                <HardDrive className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                <span>IndexedDB Lokal</span>
-              </span>
-              <span className="font-mono tabular-nums">{localBytesUsed} KB</span>
-            </div>
-            <div className="text-[11px] text-slate-500 dark:text-slate-400 space-y-1 font-mono tabular-nums">
-              <div>Server Mailbox: 0 KB (Zero Retention)</div>
-              <div className="truncate" title={lastPurgeReceipt}>
-                Last ACK: {lastPurgeReceipt}
-              </div>
-            </div>
-            <div className="pt-1 flex items-center justify-between text-[11px]">
-              <button
-                type="button"
-                onClick={onOpenSso}
-                className="text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
-              >
-                myaccount.vz.gay
-              </button>
-              <button
-                type="button"
-                onClick={onDeactivateMail}
-                className="text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer"
-              >
-                {lang === 'id' ? 'Nonaktifkan Mail' : 'Disable Mail'}
-              </button>
-            </div>
-          </div>
+        {/* Left Sidebar (Desktop lg+ only) */}
+        <aside className="hidden lg:block lg:col-span-3 bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-4">
+          {renderSidebarContent()}
         </aside>
 
         {/* Main Content Viewport (9 cols on lg) */}
@@ -1323,9 +1443,13 @@ export function VzMailWorkspace({
             </div>
           ) : viewMode === 'conversational' ? (
             /* MODE A: CONVERSATIONAL BUBBLE VIEW (WhatsApp-style local threads) */
-            <div className="grid grid-cols-1 md:grid-cols-12 flex-1 min-h-[640px]">
+            <div className="grid grid-cols-1 md:grid-cols-12 flex-1 min-h-[540px] md:min-h-[640px]">
               {/* Left Thread Correspondent Column (4 cols) */}
-              <div className="md:col-span-4 border-b md:border-b-0 md:border-r border-slate-200 dark:border-[#232732] flex flex-col">
+              <div
+                className={`${
+                  mobileShowDetail ? 'hidden md:flex' : 'flex'
+                } md:col-span-4 border-b md:border-b-0 md:border-r border-slate-200 dark:border-[#232732] flex-col`}
+              >
                 <div className="px-4 py-3 border-b border-slate-200 dark:border-[#232732] flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
                   <span className="font-semibold text-slate-900 dark:text-white">
                     {lang === 'id'
@@ -1347,7 +1471,7 @@ export function VzMailWorkspace({
                     <button
                       type="button"
                       onClick={() => setSimulatorOpen(true)}
-                      className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-md cursor-pointer"
+                      className="min-h-[40px] px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-md cursor-pointer"
                     >
                       {lang === 'id'
                         ? 'Simulasikan Email Masuk'
@@ -1418,31 +1542,46 @@ export function VzMailWorkspace({
               </div>
 
               {/* Right Chat Bubble Stream (8 cols) */}
-              <div className="md:col-span-8 flex flex-col justify-between bg-[#FAFAFA] dark:bg-[#0E1117]">
+              <div
+                className={`${
+                  mobileShowDetail ? 'flex' : 'hidden md:flex'
+                } md:col-span-8 flex-col justify-between bg-[#FAFAFA] dark:bg-[#0E1117]`}
+              >
                 {activeThread ? (
                   <>
                     {/* Thread Header */}
-                    <div className="px-5 py-3.5 bg-white dark:bg-[#13161C] border-b border-slate-200 dark:border-[#232732] flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <div className="text-sm font-bold text-slate-900 dark:text-white font-display">
-                          {activeThread.peerName}
-                        </div>
-                        <div className="text-xs text-slate-500 dark:text-slate-400 font-mono flex flex-wrap items-center gap-1.5">
-                          <span>{activeThread.peerAddress}</span>
-                          <span aria-hidden="true">·</span>
-                          <span>Local IndexedDB</span>
-                          {activeThread.latestMessage.chatBridgeChannel && (
-                            <>
-                              <span aria-hidden="true">·</span>
-                              <span className="text-blue-600 dark:text-blue-400">
-                                Bridged: {activeThread.latestMessage.chatBridgeChannel}
-                              </span>
-                            </>
-                          )}
+                    <div className="px-4 sm:px-5 py-3 bg-white dark:bg-[#13161C] border-b border-slate-200 dark:border-[#232732] flex flex-wrap items-center justify-between gap-2.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => setMobileShowDetail(false)}
+                          aria-label={lang === 'id' ? 'Kembali ke daftar utas' : 'Back to threads'}
+                          className="md:hidden min-h-[44px] inline-flex items-center gap-1 px-2.5 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg shrink-0 cursor-pointer"
+                        >
+                          <ArrowLeft className="w-4 h-4" />
+                          <span>{lang === 'id' ? 'Utas' : 'Threads'}</span>
+                        </button>
+                        <div className="min-w-0">
+                          <div className="text-sm font-bold text-slate-900 dark:text-white font-display truncate">
+                            {activeThread.peerName}
+                          </div>
+                          <div className="text-xs text-slate-500 dark:text-slate-400 font-mono flex flex-wrap items-center gap-1.5">
+                            <span className="truncate">{activeThread.peerAddress}</span>
+                            <span aria-hidden="true" className="hidden sm:inline">·</span>
+                            <span className="hidden sm:inline">Local IndexedDB</span>
+                            {activeThread.latestMessage.chatBridgeChannel && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="text-blue-600 dark:text-blue-400">
+                                  Bridged: {activeThread.latestMessage.chatBridgeChannel}
+                                </span>
+                              </>
+                            )}
+                          </div>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 shrink-0">
                         <button
                           type="button"
                           onClick={() => {
@@ -1452,7 +1591,7 @@ export function VzMailWorkspace({
                             );
                             setComposeOpen(true);
                           }}
-                          className="px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#242B3A] rounded-lg transition-colors cursor-pointer"
+                          className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#242B3A] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                         >
                           {lang === 'id' ? 'Editor Penuh' : 'Full Composer'}
                         </button>
@@ -1633,7 +1772,7 @@ export function VzMailWorkspace({
                     {/* Fast Bottom Chat-Bubble Reply Composer */}
                     <form
                       onSubmit={handleQuickBubbleReply}
-                      className="p-3.5 bg-white dark:bg-[#13161C] border-t border-slate-200 dark:border-[#232732] flex items-center gap-2.5"
+                      className="p-3 sm:p-3.5 bg-white dark:bg-[#13161C] border-t border-slate-200 dark:border-[#232732] flex items-center gap-2"
                     >
                       <input
                         type="text"
@@ -1641,15 +1780,15 @@ export function VzMailWorkspace({
                         onChange={(e) => setQuickReplyText(e.target.value)}
                         placeholder={
                           lang === 'id'
-                            ? `Balas cepat ke ${activeThread.peerAddress} sebagai ${primaryEmail}...`
-                            : `Quick reply to ${activeThread.peerAddress} as ${primaryEmail}...`
+                            ? `Balas cepat ke ${activeThread.peerAddress}...`
+                            : `Quick reply to ${activeThread.peerAddress}...`
                         }
-                        className="flex-1 px-3.5 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:border-blue-600"
+                        className="flex-1 min-w-0 min-h-[44px] px-3.5 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:border-blue-600"
                       />
                       <button
                         type="submit"
                         disabled={sendingQuickReply || !quickReplyText.trim()}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        className="min-h-[44px] inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Send className="w-3.5 h-3.5" />
                         <span>{lang === 'id' ? 'Kirim' : 'Send'}</span>
@@ -1668,7 +1807,95 @@ export function VzMailWorkspace({
           ) : (
             /* MODE B: CLASSIC HIGH-DENSITY TABULAR INBOX VIEW */
             <div className="flex-1 flex flex-col">
-              <div className="overflow-x-auto border-b border-slate-200 dark:border-[#232732]">
+              {/* Mobile Card List (< md) */}
+              <div
+                className={`md:hidden ${
+                  mobileShowDetail ? 'hidden' : 'block'
+                } divide-y divide-slate-200 dark:divide-[#232732] border-b border-slate-200 dark:border-[#232732]`}
+              >
+                {filteredMessages.length === 0 ? (
+                  <div className="py-10 px-4 text-center text-xs text-slate-500">
+                    {lang === 'id'
+                      ? 'Tidak ada pesan pada folder ini di IndexedDB lokal.'
+                      : 'No messages in this folder in local IndexedDB.'}
+                  </div>
+                ) : (
+                  filteredMessages.map((msg) => {
+                    const isSelected = activeClassicMessage?.id === msg.id;
+                    const dateStr = new Date(msg.timestamp).toLocaleString(
+                      lang === 'id' ? 'id-ID' : 'en-US',
+                      {
+                        month: 'short',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      }
+                    );
+                    return (
+                      <div
+                        key={msg.id}
+                        onClick={() => handleSelectClassicMessage(msg)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            handleSelectClassicMessage(msg);
+                          }
+                        }}
+                        className={`p-3.5 flex items-start gap-2.5 transition-colors cursor-pointer ${
+                          isSelected
+                            ? 'bg-blue-50/80 dark:bg-[#192132]'
+                            : 'hover:bg-slate-50 dark:hover:bg-[#171B24]'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          aria-label="Star message"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleToggleStar(msg);
+                          }}
+                          className="w-10 h-10 -ml-2 -mt-1 inline-flex items-center justify-center rounded-lg shrink-0 cursor-pointer"
+                        >
+                          <Star
+                            className={`w-4 h-4 ${
+                              msg.starred
+                                ? 'fill-amber-400 text-amber-400'
+                                : 'text-slate-400'
+                            }`}
+                          />
+                        </button>
+                        <div className="flex-1 min-w-0 space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                              {msg.direction === 'inbound'
+                                ? msg.from.name
+                                : `To: ${msg.to[0]?.address || ''}`}
+                            </span>
+                            <span className="text-[11px] font-mono tabular-nums text-slate-500 shrink-0">
+                              {dateStr}
+                            </span>
+                          </div>
+                          <div className="text-xs font-semibold text-slate-800 dark:text-slate-100 truncate">
+                            {msg.subject}
+                          </div>
+                          <div className="text-xs text-slate-500 dark:text-slate-400 line-clamp-2">
+                            {msg.bodyText}
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate">
+                            to: {msg.deliveredToAlias}
+                            {msg.plusTag ? ` (+${msg.plusTag})` : ''}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* Desktop High-Density Table (md+) */}
+              <div className="hidden md:block overflow-x-auto border-b border-slate-200 dark:border-[#232732]">
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-slate-200 dark:border-[#232732] bg-[#FAFAFA] dark:bg-[#0F131A] text-slate-500 dark:text-slate-400">
@@ -1765,19 +1992,34 @@ export function VzMailWorkspace({
 
               {/* Classic Split Reading Pane */}
               {activeClassicMessage && (
-                <div className="p-6 space-y-4 flex-1 bg-[#FAFAFA] dark:bg-[#0E1117]">
+                <div
+                  className={`${
+                    mobileShowDetail ? 'block' : 'hidden md:block'
+                  } p-4 sm:p-6 space-y-4 flex-1 bg-[#FAFAFA] dark:bg-[#0E1117]`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setMobileShowDetail(false)}
+                    className="md:hidden min-h-[44px] inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-lg cursor-pointer"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                    <span>
+                      {lang === 'id' ? 'Kembali ke Daftar Email' : 'Back to Message List'}
+                    </span>
+                  </button>
+
                   <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 dark:border-[#232732] pb-4">
-                    <div className="space-y-1">
-                      <h3 className="text-base font-bold text-slate-900 dark:text-white font-display">
+                    <div className="space-y-1 min-w-0">
+                      <h3 className="text-base font-bold text-slate-900 dark:text-white font-display break-words">
                         {activeClassicMessage.subject}
                       </h3>
                       <div className="text-xs font-mono text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-1.5 tabular-nums">
-                        <span>
+                        <span className="break-all">
                           From: {activeClassicMessage.from.name} &lt;
                           {activeClassicMessage.from.address}&gt;
                         </span>
                         <span aria-hidden="true">·</span>
-                        <span>
+                        <span className="break-all">
                           Delivered-To: {activeClassicMessage.deliveredToAlias}
                         </span>
                         <span aria-hidden="true">·</span>
@@ -1803,7 +2045,7 @@ export function VzMailWorkspace({
                           );
                           setComposeOpen(true);
                         }}
-                        className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-md cursor-pointer"
+                        className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-md cursor-pointer"
                       >
                         {lang === 'id' ? 'Balas' : 'Reply'}
                       </button>
@@ -1816,7 +2058,7 @@ export function VzMailWorkspace({
                             'message/rfc822'
                           )
                         }
-                        className="px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
+                        className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
                       >
                         .eml
                       </button>
@@ -1825,7 +2067,7 @@ export function VzMailWorkspace({
                         onClick={() =>
                           handleMoveFolder(activeClassicMessage, 'archive')
                         }
-                        className="px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
+                        className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
                       >
                         {lang === 'id' ? 'Arsipkan' : 'Archive'}
                       </button>
@@ -1835,7 +2077,7 @@ export function VzMailWorkspace({
                           onClick={() =>
                             handlePermanentLocalDelete(activeClassicMessage.id)
                           }
-                          className="px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-md cursor-pointer"
+                          className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-md cursor-pointer"
                         >
                           {lang === 'id'
                             ? 'Hapus Permanen Lokal'
@@ -1847,7 +2089,7 @@ export function VzMailWorkspace({
                           onClick={() =>
                             handleMoveFolder(activeClassicMessage, 'trash')
                           }
-                          className="px-3 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
+                          className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
                         >
                           {lang === 'id' ? 'Sampah' : 'Trash'}
                         </button>
@@ -1876,9 +2118,9 @@ export function VzMailWorkspace({
           }}
           className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
         >
-          <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl max-w-xl w-full p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#232732] pb-3">
-              <div>
+          <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl max-w-xl w-full max-h-[90vh] overflow-y-auto p-5 sm:p-6 space-y-4">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-200 dark:border-[#232732] pb-3">
+              <div className="min-w-0">
                 <h3 className="text-base font-bold text-slate-900 dark:text-white font-display">
                   {lang === 'id'
                     ? 'Tulis Email Baru (Cloudflare Email Sending)'
@@ -1892,9 +2134,10 @@ export function VzMailWorkspace({
               <button
                 type="button"
                 onClick={() => setComposeOpen(false)}
-                className="text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                aria-label="Close composer"
+                className="w-11 h-11 -mr-2 -mt-2 inline-flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-white shrink-0 cursor-pointer"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
 
@@ -1969,26 +2212,26 @@ export function VzMailWorkspace({
                 />
               </div>
 
-              <div className="pt-2 flex items-center justify-between gap-3">
+              <div className="pt-2 flex flex-wrap items-center justify-between gap-2.5">
                 <button
                   type="button"
                   onClick={handleSaveDraft}
-                  className="px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg hover:bg-slate-200 cursor-pointer"
+                  className="min-h-[42px] px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg hover:bg-slate-200 cursor-pointer"
                 >
                   {lang === 'id' ? 'Simpan Draf Lokal' : 'Save Local Draft'}
                 </button>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 ml-auto">
                   <button
                     type="button"
                     onClick={() => setComposeOpen(false)}
-                    className="px-3.5 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 cursor-pointer"
+                    className="min-h-[42px] px-3.5 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 cursor-pointer"
                   >
                     {lang === 'id' ? 'Batal' : 'Cancel'}
                   </button>
                   <button
                     type="submit"
                     disabled={composeSending}
-                    className="inline-flex items-center gap-1.5 px-5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg cursor-pointer"
+                    className="min-h-[42px] inline-flex items-center gap-1.5 px-5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg cursor-pointer"
                   >
                     <Send className="w-3.5 h-3.5" />
                     <span>
@@ -2017,9 +2260,9 @@ export function VzMailWorkspace({
           }}
           className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
         >
-          <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl max-w-xl w-full p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#232732] pb-3">
-              <div>
+          <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl max-w-xl w-full max-h-[90vh] overflow-y-auto p-5 sm:p-6 space-y-4">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-200 dark:border-[#232732] pb-3">
+              <div className="min-w-0">
                 <h3 className="text-base font-bold text-slate-900 dark:text-white font-display">
                   {lang === 'id'
                     ? 'Simulasi Paket Masuk Cloudflare Email Routing (+ & . Alias)'
@@ -2034,9 +2277,10 @@ export function VzMailWorkspace({
               <button
                 type="button"
                 onClick={() => setSimulatorOpen(false)}
-                className="text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                aria-label="Close simulator"
+                className="w-11 h-11 -mr-2 -mt-2 inline-flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-white shrink-0 cursor-pointer"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
 
@@ -2060,13 +2304,13 @@ export function VzMailWorkspace({
                       key={ex.address}
                       type="button"
                       onClick={() => setSimToAlias(ex.address)}
-                      className="px-2 py-0.5 text-[11px] font-mono bg-slate-100 dark:bg-[#1B202B] text-slate-700 dark:text-slate-300 rounded cursor-pointer"
+                      className="px-2 py-1 text-[11px] font-mono bg-slate-100 dark:bg-[#1B202B] text-slate-700 dark:text-slate-300 rounded cursor-pointer"
                     >
                       {ex.address}
                     </button>
                   ))}
                 </div>
-                <div className="mt-2 p-2.5 rounded bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] text-[11px] font-mono text-slate-600 dark:text-slate-300">
+                <div className="mt-2 p-2.5 rounded bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] text-[11px] font-mono text-slate-600 dark:text-slate-300 break-words">
                   Canonical Target:{' '}
                   <strong className="text-blue-600 dark:text-blue-400">
                     {simResolved.canonicalEmail}
@@ -2076,7 +2320,7 @@ export function VzMailWorkspace({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
                     Nama Pengirim:
@@ -2086,7 +2330,7 @@ export function VzMailWorkspace({
                     required
                     value={simFromName}
                     onChange={(e) => setSimFromName(e.target.value)}
-                    className="w-full px-3 py-1.5 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
+                    className="w-full px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
                   />
                 </div>
                 <div>
@@ -2098,7 +2342,7 @@ export function VzMailWorkspace({
                     required
                     value={simFromAddr}
                     onChange={(e) => setSimFromAddr(e.target.value)}
-                    className="w-full px-3 py-1.5 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
+                    className="w-full px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
                   />
                 </div>
               </div>

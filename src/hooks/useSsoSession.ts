@@ -349,8 +349,9 @@ export function useSsoSession() {
 
   return {
     session,
-    isLoading,
-    authError: authError ?? null,
+    isLoading: auth0Config.isPreviewHost ? false : isLoading,
+    authError: auth0Config.isPreviewHost ? null : (authError ?? null),
+    isPreviewHost: auth0Config.isPreviewHost,
     auth0Domain,
     auth0ClientId: auth0Config.clientId,
     auth0AppName: auth0Config.appName,

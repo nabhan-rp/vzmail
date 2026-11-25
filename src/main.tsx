@@ -33,18 +33,34 @@ if (typeof window !== 'undefined') {
     appleTitleMeta.setAttribute('content', appTitle);
   }
 
-  // Register Multi-OS PWA Service Worker
-  if ('serviceWorker' in navigator && !window.location.search.includes('no-sw')) {
-    window.addEventListener('load', () => {
+  // Register Multi-OS PWA Service Worker only on production HTTPS origins (skip dev & AI Studio preview iframes)
+  if ('serviceWorker' in navigator) {
+    const shouldRegisterSw =
+      !import.meta.env.DEV &&
+      !auth0Config.isPreviewHost &&
+      window.location.protocol === 'https:' &&
+      !window.location.search.includes('no-sw');
+
+    if (shouldRegisterSw) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker
+          .register('/sw.js', { scope: '/' })
+          .catch((err) => {
+            console.warn('[PWA] ServiceWorker registration failed:', err);
+          });
+      });
+    } else {
       navigator.serviceWorker
-        .register('/sw.js', { scope: '/' })
-        .then((reg) => {
-          console.log('[PWA] ServiceWorker registered with scope:', reg.scope);
+        .getRegistrations()
+        .then((registrations) => {
+          for (const reg of registrations) {
+            void reg.unregister();
+          }
         })
-        .catch((err) => {
-          console.warn('[PWA] ServiceWorker registration failed:', err);
+        .catch(() => {
+          // Ignore iframe/storage restrictions
         });
-    });
+    }
   }
 }
 
@@ -53,6 +69,7 @@ createRoot(document.getElementById('root')!).render(
     <Auth0Provider
       domain={auth0Config.domain}
       clientId={auth0Config.clientId}
+      skipRedirectCallback={auth0Config.isPreviewHost}
       authorizationParams={{
         redirect_uri: auth0Config.redirectUri,
       }}

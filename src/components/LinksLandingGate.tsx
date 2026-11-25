@@ -98,27 +98,27 @@ export function LinksLandingGate({
                     : `If you activate VZ Links first, you will also be prompted with the option to configure your paired ${user}@${domain} email mailbox on VZ Mail.`}
                 </p>
 
-                <div className="flex flex-wrap items-center gap-3 pt-1">
+                <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2.5 sm:gap-3 pt-1">
                   <button
                     type="button"
                     onClick={onActivateLinks}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <Link2 className="w-4 h-4" />
-                    <span>
+                    <Link2 className="w-4 h-4 shrink-0" />
+                    <span className="truncate">
                       {lang === 'id'
                         ? `Aktifkan ${user}.${domain} & Shortlink`
                         : `Activate ${user}.${domain} & Shortlinks`}
                     </span>
-                    <ArrowRight className="w-4 h-4" />
+                    <ArrowRight className="w-4 h-4 shrink-0" />
                   </button>
 
                   <button
                     type="button"
                     onClick={() => onSelectHost('mail.vz.gay')}
-                    className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232936] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232936] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <span>
+                    <span className="truncate">
                       {lang === 'id'
                         ? `Buka VZ Mail (${user}@${domain})`
                         : `Explore VZ Mail (${user}@${domain})`}
@@ -128,7 +128,7 @@ export function LinksLandingGate({
                   <button
                     type="button"
                     onClick={onOpenSso}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="min-h-[44px] inline-flex items-center justify-center sm:justify-start gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <span>myaccount.vz.gay</span>
                     <ExternalLink className="w-3.5 h-3.5" />
@@ -142,23 +142,23 @@ export function LinksLandingGate({
                     ? 'Masuk dengan akun SSO accounts.vz.gay untuk mengklaim subdomain Link-in-Bio dan membuat shortlink.'
                     : 'Sign in with your accounts.vz.gay SSO identity to claim your Link-in-Bio subdomain and create shortlinks.'}
                 </p>
-                <div className="flex flex-wrap items-center gap-3">
+                <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2.5 sm:gap-3">
                   <button
                     type="button"
                     onClick={onOpenSso}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <span>
                       {lang === 'id'
                         ? 'Masuk via SSO accounts.vz.gay'
                         : 'Sign In via accounts.vz.gay SSO'}
                     </span>
-                    <ArrowRight className="w-4 h-4" />
+                    <ArrowRight className="w-4 h-4 shrink-0" />
                   </button>
                   <button
                     type="button"
                     onClick={() => onSelectHost('mail.vz.gay')}
-                    className="px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg hover:bg-slate-200 dark:hover:bg-[#232936] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg hover:bg-slate-200 dark:hover:bg-[#232936] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     {lang === 'id'
                       ? 'Lihat Landing Page mail.vz.gay'
@@ -191,7 +191,7 @@ export function LinksLandingGate({
           </div>
 
           <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
                   Handle ($USERNAME):
@@ -200,7 +200,7 @@ export function LinksLandingGate({
                   type="text"
                   value={previewHandle}
                   onChange={(e) => setPreviewHandle(e.target.value)}
-                  className="w-full px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] sm:min-h-0 px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
                 />
               </div>
               <div>
@@ -211,41 +211,41 @@ export function LinksLandingGate({
                   type="text"
                   value={previewSlug}
                   onChange={(e) => setPreviewSlug(e.target.value)}
-                  className="w-full px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] sm:min-h-0 px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
                 />
               </div>
             </div>
 
             <div className="p-4 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-2.5 text-xs font-mono">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-500">Link-in-Bio URL:</span>
-                <span className="font-semibold text-blue-600 dark:text-blue-400">
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <span className="text-slate-500 shrink-0">Link-in-Bio URL:</span>
+                <span className="font-semibold text-blue-600 dark:text-blue-400 truncate">
                   https://{cleanHandle}.{domain}
                 </span>
               </div>
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-500">Paired Email (1:1):</span>
-                <span className="text-slate-800 dark:text-slate-200">
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <span className="text-slate-500 shrink-0">Paired Email (1:1):</span>
+                <span className="text-slate-800 dark:text-slate-200 truncate">
                   {cleanHandle}@{domain}
                 </span>
               </div>
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-500">Shortlink Format:</span>
-                <span className="text-emerald-600 dark:text-emerald-400">
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <span className="text-slate-500 shrink-0">Shortlink Format:</span>
+                <span className="text-emerald-600 dark:text-emerald-400 truncate">
                   https://{domain}/s/{cleanSlug}
                 </span>
               </div>
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-500">Cookie Isolation:</span>
-                <span className="text-slate-800 dark:text-slate-200">
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <span className="text-slate-500 shrink-0">Cookie Isolation:</span>
+                <span className="text-slate-800 dark:text-slate-200 truncate">
                   Zero-Cookie Static (PSL Safe)
                 </span>
               </div>
             </div>
           </div>
 
-          <div className="pt-3 border-t border-slate-200 dark:border-[#232732] flex items-center justify-between gap-2 text-xs text-slate-500">
-            <span>Wildcard SSL & Edge Routing:</span>
+          <div className="pt-3 border-t border-slate-200 dark:border-[#232732] flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+            <span>Wildcard SSL &amp; Edge Routing:</span>
             <span className="font-mono text-emerald-600 dark:text-emerald-400">
               *.{domain}/* + {domain}/s/*
             </span>
@@ -320,11 +320,11 @@ export function LinksLandingGate({
               : `Want to preview how the public ${user}.${domain} page looks first?`}
           </h3>
         </div>
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 sm:gap-3 shrink-0">
           <button
             type="button"
             onClick={() => onSelectHost('bio_public')}
-            className="px-4 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#252C3B] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="min-h-[44px] sm:min-h-0 px-4 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#252C3B] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {lang === 'id'
               ? `Pratinjau ${user}.${domain}`
@@ -333,7 +333,7 @@ export function LinksLandingGate({
           <button
             type="button"
             onClick={onActivateLinks}
-            className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="min-h-[44px] sm:min-h-0 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {lang === 'id' ? 'Aktifkan & Edit Bio' : 'Activate & Edit Bio'}
           </button>

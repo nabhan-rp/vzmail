@@ -8,11 +8,32 @@ export interface Auth0ResolvedConfig {
   clientId: string;
   redirectUri: string;
   logoutReturnTo: string;
+  isPreviewHost: boolean;
 }
 
 const DEFAULT_AUTH0_DOMAIN = 'accounts.vz.gay';
 const DEFAULT_MAIL_CLIENT_ID = 'sn75KSPt8iU8RlhI5lCC6MY53yt85jy3';
 const DEFAULT_LINKS_CLIENT_ID = 'BVT8uaChXUDLjuCDhtfPYXeSSWn6yuGa';
+
+export function isPreviewOrIframeHost(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname.toLowerCase();
+  const isLocalOrEphemeral =
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host.endsWith('.run.app') ||
+    host.endsWith('.webcontainer.io') ||
+    host.endsWith('.stackblitz.io');
+
+  let isFramed = false;
+  try {
+    isFramed = window.self !== window.top;
+  } catch {
+    isFramed = true;
+  }
+
+  return isLocalOrEphemeral || isFramed;
+}
 
 export function detectAuth0Service(): Auth0ServiceId {
   if (typeof window === 'undefined') return 'mail';
@@ -37,6 +58,7 @@ export function detectAuth0Service(): Auth0ServiceId {
 
 export function resolveAuth0Config(): Auth0ResolvedConfig {
   const service = detectAuth0Service();
+  const isPreviewHost = isPreviewOrIframeHost();
   const domain =
     import.meta.env.VITE_AUTH0_DOMAIN || DEFAULT_AUTH0_DOMAIN;
 
@@ -73,5 +95,6 @@ export function resolveAuth0Config(): Auth0ResolvedConfig {
     clientId,
     redirectUri,
     logoutReturnTo: redirectUri,
+    isPreviewHost,
   };
 }

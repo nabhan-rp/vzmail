@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 // VZ Mail (mail.vz.gay) & VZ Links (links.vz.gay) Multi-OS PWA Service Worker
-const CACHE_NAME = 'vz-pwa-v1.1.0';
+const CACHE_NAME = 'vz-pwa-v1.2.0';
 
 const PRECACHE_ASSETS = [
   '/',
@@ -24,10 +24,12 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll(PRECACHE_ASSETS))
+      .then((cache) =>
+        Promise.allSettled(PRECACHE_ASSETS.map((asset) => cache.add(asset)))
+      )
       .then(() => self.skipWaiting())
       .catch((err) => {
-        console.warn('[SW] Precache failed:', err);
+        console.warn('[SW] Precache warning:', err);
       })
   );
 });
@@ -40,7 +42,6 @@ self.addEventListener('activate', (event) => {
         Promise.all(
           keys.map((key) => {
             if (key !== CACHE_NAME) {
-              console.log('[SW] Purging old cache:', key);
               return caches.delete(key);
             }
             return Promise.resolve(false);
@@ -63,6 +64,16 @@ self.addEventListener('fetch', (event) => {
 
   // 1. Only handle standard HTTP(S) GET requests
   if (req.method !== 'GET' || !url.protocol.startsWith('http')) {
+    return;
+  }
+
+  // 1b. Never intercept Vite dev / HMR module paths
+  if (
+    url.pathname.startsWith('/@vite') ||
+    url.pathname.startsWith('/@react-refresh') ||
+    url.pathname.startsWith('/src/') ||
+    url.pathname.startsWith('/node_modules/')
+  ) {
     return;
   }
 
@@ -93,7 +104,13 @@ self.addEventListener('fetch', (event) => {
           const cached = await caches.match(req);
           if (cached) return cached;
           const fallback = await caches.match('/index.html');
-          return fallback || new Response('Offline', { status: 503, headers: { 'Content-Type': 'text/plain' } });
+          return (
+            fallback ||
+            new Response('Offline', {
+              status: 503,
+              headers: { 'Content-Type': 'text/plain' },
+            })
+          );
         })
     );
     return;
@@ -120,7 +137,14 @@ self.addEventListener('fetch', (event) => {
             }
             return networkRes;
           })
-          .catch(() => cached);
+          .catch(
+            () =>
+              cached ||
+              new Response('', {
+                status: 504,
+                statusText: 'Offline',
+              })
+          );
 
         return cached || fetchPromise;
       })
@@ -130,6 +154,16 @@ self.addEventListener('fetch', (event) => {
 
   // 6. Default fallback
   event.respondWith(
-    caches.match(req).then((cached) => cached || fetch(req))
+    caches.match(req).then(
+      (cached) =>
+        cached ||
+        fetch(req).catch(
+          () =>
+            new Response('', {
+              status: 504,
+              statusText: 'Offline',
+            })
+        )
+    )
   );
 });

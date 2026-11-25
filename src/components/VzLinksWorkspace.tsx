@@ -311,12 +311,12 @@ export function VzLinksWorkspace({
           </h1>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#0B0D11] rounded-lg border border-slate-200/70 dark:border-[#232732]">
+        <div className="w-full lg:w-auto flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2.5">
+          <div className="grid grid-cols-2 sm:flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#0B0D11] rounded-lg border border-slate-200/70 dark:border-[#232732]">
             <button
               type="button"
               onClick={() => setSubTab('bio')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+              className={`min-h-[40px] sm:min-h-0 px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap truncate cursor-pointer ${
                 subTab === 'bio'
                   ? 'bg-white dark:bg-[#191E28] text-slate-900 dark:text-white shadow-xs'
                   : 'text-slate-600 dark:text-slate-400'
@@ -327,55 +327,57 @@ export function VzLinksWorkspace({
             <button
               type="button"
               onClick={() => setSubTab('shortlinks')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+              className={`min-h-[40px] sm:min-h-0 px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap truncate cursor-pointer ${
                 subTab === 'shortlinks'
                   ? 'bg-white dark:bg-[#191E28] text-slate-900 dark:text-white shadow-xs'
                   : 'text-slate-600 dark:text-slate-400'
               }`}
             >
-              {domain}/s/$URL ({shortlinks.length})
+              {domain}/s/ ({shortlinks.length})
             </button>
           </div>
 
-          <button
-            type="button"
-            onClick={() => onSelectHost('bio_public')}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Eye className="w-3.5 h-3.5" />
-            <span>
-              {lang === 'id'
-                ? `Pratinjau ${user}.${domain}`
-                : `Preview ${user}.${domain}`}
-            </span>
-          </button>
-
-          {!session.mailActivated ? (
+          <div className="grid grid-cols-2 sm:flex items-center gap-2">
             <button
               type="button"
-              onClick={() => {
-                onActivateMailFromLinks();
-                onSelectHost('mail.vz.gay');
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-950/70 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              onClick={() => onSelectHost('bio_public')}
+              className="min-h-[44px] sm:min-h-0 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <Mail className="w-3.5 h-3.5" />
-              <span>
+              <Eye className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">
                 {lang === 'id'
-                  ? `Aktifkan Email ${user}@${domain}`
-                  : `Configure ${user}@${domain} Mail`}
+                  ? `Pratinjau Bio`
+                  : `Preview Bio`}
               </span>
             </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => onSelectHost('mail.vz.gay')}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Mail className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-              <span>{user}@{domain}</span>
-            </button>
-          )}
+
+            {!session.mailActivated ? (
+              <button
+                type="button"
+                onClick={() => {
+                  onActivateMailFromLinks();
+                  onSelectHost('mail.vz.gay');
+                }}
+                className="min-h-[44px] sm:min-h-0 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-950/70 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Mail className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">
+                  {lang === 'id'
+                    ? `Aktifkan Mail`
+                    : `Setup Mail`}
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onSelectHost('mail.vz.gay')}
+                className="min-h-[44px] sm:min-h-0 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Mail className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <span className="truncate">{user}@{domain}</span>
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -748,19 +750,19 @@ export function VzLinksWorkspace({
                 <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
                   Label / Judul (Opsional):
                 </label>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                   <input
                     type="text"
                     value={newShortTitle}
                     onChange={(e) => setNewShortTitle(e.target.value)}
                     placeholder="Proposal & CV"
-                    className="flex-1 px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
+                    className="flex-1 min-h-[44px] sm:min-h-0 px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
                   />
                   <button
                     type="submit"
-                    className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg whitespace-nowrap shrink-0 cursor-pointer"
+                    className="min-h-[44px] sm:min-h-0 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    {lang === 'id' ? '+ Buat' : '+ Create'}
+                    {lang === 'id' ? '+ Buat Shortlink' : '+ Create'}
                   </button>
                 </div>
               </div>
@@ -783,12 +785,64 @@ export function VzLinksWorkspace({
               </span>
             </div>
 
-            <div className="overflow-x-auto">
+            {/* Mobile Responsive Shortlink Cards (< md) */}
+            <div className="md:hidden divide-y divide-slate-200 dark:divide-[#232732]">
+              {shortlinks.map((item) => {
+                const fullShort = `https://${domain}/s/${item.slug}`;
+                return (
+                  <div key={item.slug} className="p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-2 min-w-0">
+                      <div className="min-w-0">
+                        <div className="font-mono text-sm font-semibold text-blue-600 dark:text-blue-400 truncate">
+                          {domain}/s/{item.slug}
+                        </div>
+                        <div className="text-xs font-medium text-slate-900 dark:text-white truncate mt-0.5">
+                          {item.title}
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-500 truncate mt-0.5">
+                          {item.targetUrl}
+                        </div>
+                      </div>
+                      <span className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-300 shrink-0">
+                        {item.clicks} clicks
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleTestShortlinkClick(item)}
+                        className="min-h-[40px] px-2.5 py-2 text-xs font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 rounded-lg cursor-pointer"
+                      >
+                        Test 301
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleCopyText(fullShort)}
+                        className="min-h-[40px] px-2.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg cursor-pointer"
+                      >
+                        Copy
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteShortlink(item.slug)}
+                        className="min-h-[40px] px-2.5 py-2 text-xs font-medium text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/30 rounded-lg cursor-pointer"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Desktop High-Density Shortlink Table (>= md) */}
+            <div className="hidden md:block overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="border-b border-slate-200 dark:border-[#232732] bg-[#FAFAFA] dark:bg-[#0F131A] text-slate-500">
                     <th className="py-2.5 pl-5 pr-3 font-medium">Short URL</th>
-                    <th className="py-2.5 px-3 font-medium">Label & Target</th>
+                    <th className="py-2.5 px-3 font-medium">Label &amp; Target</th>
                     <th className="py-2.5 px-3 font-medium text-right">Clicks</th>
                     <th className="py-2.5 pl-3 pr-5 font-medium text-right">
                       Aksi

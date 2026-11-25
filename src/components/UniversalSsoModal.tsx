@@ -25,6 +25,7 @@ interface UniversalSsoModalProps {
   auth0Domain?: string;
   auth0AppName?: string;
   auth0ClientId?: string;
+  isPreviewHost?: boolean;
   onLoginWithAuth0: () => void;
   onSignupWithAuth0: () => void;
   onSignIn: (
@@ -49,6 +50,7 @@ export function UniversalSsoModal({
   auth0Domain = 'accounts.vz.gay',
   auth0AppName = 'VZ Mail',
   auth0ClientId = '',
+  isPreviewHost = false,
   onLoginWithAuth0,
   onSignupWithAuth0,
   onSignIn,
@@ -134,7 +136,7 @@ export function UniversalSsoModal({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="text-slate-400 hover:text-slate-800 dark:hover:text-white cursor-pointer"
+            className="min-h-[44px] min-w-[44px] -mr-2 -mt-2 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-800 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-[#1B202B] cursor-pointer shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
@@ -404,7 +406,18 @@ export function UniversalSsoModal({
               </div>
             </div>
 
-            <details className="rounded-lg border border-slate-200 dark:border-[#232732] p-3.5 text-xs">
+            {isPreviewHost && (
+              <div className="p-3 rounded-lg bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/60 text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
+                {lang === 'id'
+                  ? 'Mode Preview Terdeteksi: Login Auth0 langsung berjalan di domain produksi (mail.vz.gay & links.vz.gay). Untuk mencoba di pratinjau lokal/iframe ini, gunakan formulir Mode Preview Lokal di bawah.'
+                  : 'Preview Environment Detected: Live Auth0 OIDC runs on production domains (mail.vz.gay & links.vz.gay). Use Local Preview Mode below to test seamlessly inside this preview.'}
+              </div>
+            )}
+
+            <details
+              open={isPreviewHost}
+              className="rounded-lg border border-slate-200 dark:border-[#232732] p-3.5 text-xs"
+            >
               <summary className="cursor-pointer font-medium text-slate-600 dark:text-slate-400 select-none">
                 {lang === 'id'
                   ? 'Mode Preview Lokal / Offline Demo (Opsional tanpa Auth0)'
