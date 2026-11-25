@@ -11,6 +11,7 @@ import { useLanguage } from './hooks/useLanguage';
 import { usePwaInstall } from './hooks/usePwaInstall';
 import { useSsoSession } from './hooks/useSsoSession';
 import { useTheme } from './hooks/useTheme';
+import { sanitizePageSlug } from './utils/linksModel';
 import { sanitizeHandle } from './utils/mailIdentity';
 
 // Lazy-load heavy workspaces & modals to keep initial landing page JS minimal
@@ -22,6 +23,11 @@ const VzMailWorkspace = lazy(() =>
 const VzLinksWorkspace = lazy(() =>
   import('./components/VzLinksWorkspace').then((m) => ({
     default: m.VzLinksWorkspace,
+  }))
+);
+const ShortlinkStudio = lazy(() =>
+  import('./components/ShortlinkStudio').then((m) => ({
+    default: m.ShortlinkStudio,
   }))
 );
 const LinksLandingGate = lazy(() =>
@@ -74,14 +80,20 @@ function detectInitialHostView(): ActiveHostView {
     return 'bio_public';
   }
   if (
+    host === 'imy.li' ||
+    host === 'www.imy.li' ||
+    pathname === '/s' ||
+    pathname.startsWith('/s/') ||
+    hostMode === 'shortlinks'
+  ) {
+    return 'shortlinks';
+  }
+  if (
     host === 'links.vz.gay' ||
     hostMode === 'links' ||
     pathname.startsWith('/links')
   ) {
     return 'links.vz.gay';
-  }
-  if (pathname.startsWith('/s/') || hostMode === 'shortlinks') {
-    return 'shortlinks';
   }
   if (hostMode === 'worker') {
     return 'worker_console';
@@ -104,6 +116,23 @@ function detectBioSubdomainUser(): string | null {
     }
   }
   return null;
+}
+
+function detectInitialBioPageSlug(): string {
+  if (typeof window === 'undefined') return '';
+  const params = new URLSearchParams(window.location.search);
+  const queryPage = params.get('bio_page');
+  if (queryPage && queryPage.trim()) {
+    return sanitizePageSlug(queryPage) || '';
+  }
+  const host = window.location.hostname.toLowerCase();
+  if (host.endsWith('.imy.li') && host !== 'www.imy.li' && host !== 'mail.imy.li') {
+    const firstSegment = window.location.pathname.replace(/^\/+|\/+$/g, '').split('/')[0] || '';
+    if (firstSegment) {
+      return sanitizePageSlug(firstSegment) || '';
+    }
+  }
+  return '';
 }
 
 function WorkspaceFallback() {
@@ -177,6 +206,22 @@ export default function App() {
   };
 
   const urlBioUser = useMemo(() => detectBioSubdomainUser(), []);
+  const [bioPageSlug, setBioPageSlug] = useState<string>(() =>
+    detectInitialBioPageSlug()
+  );
+
+  const handleChangeBioPageSlug = (nextSlug: string) => {
+    const clean = sanitizePageSlug(nextSlug) ?? '';
+    setBioPageSlug(clean);
+    if (typeof window !== 'undefined') {
+      const host = window.location.hostname.toLowerCase();
+      if (host.endsWith('.imy.li') && host !== 'www.imy.li' && host !== 'mail.imy.li') {
+        const nextPath = clean ? `/${clean}` : '/';
+        window.history.pushState({}, '', nextPath);
+      }
+    }
+  };
+
   const {
     os,
     isIos,
@@ -206,9 +251,11 @@ export default function App() {
     if (activeHost === 'links.vz.gay') {
       document.title = `VZ Links (links.vz.gay) — ${user}.${domain} & ${domain}/s/`;
     } else if (activeHost === 'bio_public') {
-      document.title = `${user}.${domain} — Link-in-Bio Statis (VZ Links)`;
+      document.title = bioPageSlug
+        ? `${user}.${domain}/${bioPageSlug} — VZ Links`
+        : `${user}.${domain} — VZ Links`;
     } else if (activeHost === 'shortlinks') {
-      document.title = `${domain}/s/$URL — Pemendek Tautan (VZ Links)`;
+      document.title = `${domain}/s/ — Pemendek URL (VZ Links)`;
     } else if (activeHost === 'worker_console' && isAdminOwner) {
       document.title = `Worker & Domain Registry (@${domain}) — VZ Mail & Links`;
     } else {
@@ -240,6 +287,7 @@ export default function App() {
     }
   }, [
     activeHost,
+    bioPageSlug,
     isAdminOwner,
     urlBioUser,
     session.isAuthenticated,
@@ -336,8 +384,11 @@ export default function App() {
                 <VzLinksWorkspace
                   lang={lang}
                   session={session}
-                  initialSubTab="bio"
                   onSelectHost={handleSelectHost}
+                  onOpenPublicBioPage={(slug) => {
+                    setBioPageSlug(slug);
+                    handleSelectHost('bio_public');
+                  }}
                   onActivateMailFromLinks={() => activateMail(false)}
                   onDeactivateLinks={deactivateLinks}
                 />
@@ -357,37 +408,22 @@ export default function App() {
                 />
               ))}
 
-            {activeHost === 'shortlinks' &&
-              (session.isAuthenticated && session.linksActivated ? (
-                <VzLinksWorkspace
-                  lang={lang}
-                  session={session}
-                  initialSubTab="shortlinks"
-                  onSelectHost={handleSelectHost}
-                  onActivateMailFromLinks={() => activateMail(false)}
-                  onDeactivateLinks={deactivateLinks}
-                />
-              ) : (
-                <LinksLandingGate
-                  lang={lang}
-                  session={session}
-                  onActivateLinks={() => {
-                    if (!session.isAuthenticated) {
-                      loginWithAuth0();
-                      return;
-                    }
-                    activateLinks(true);
-                  }}
-                  onLoginWithAuth0={loginWithAuth0}
-                  onSelectHost={handleSelectHost}
-                />
-              ))}
+            {activeHost === 'shortlinks' && (
+              <ShortlinkStudio
+                lang={lang}
+                session={session}
+                onLoginWithAuth0={loginWithAuth0}
+                onSelectHost={handleSelectHost}
+              />
+            )}
 
             {activeHost === 'bio_public' && (
               <ImyBioPublicView
                 lang={lang}
                 session={session}
                 overrideUser={urlBioUser}
+                pageSlug={bioPageSlug}
+                onChangePageSlug={handleChangeBioPageSlug}
                 onSelectHost={handleSelectHost}
               />
             )}

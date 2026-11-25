@@ -15,6 +15,14 @@ import {
   sanitizeSlug,
   stripHeaderInjection,
 } from './src/utils/mailSecurity.ts';
+import {
+  generateShortlinkCode,
+  sanitizeBioWorkspaceInput,
+  sanitizePageSlug,
+  sanitizeShortlinkSlugInput,
+  type BioWorkspaceData,
+  type ShortlinkRecord,
+} from './src/utils/linksModel.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,7 +49,8 @@ const DAILY_OUTBOUND_LIMIT = 25;
 // Ephemeral in-memory local dev buffer (Zero permanent retention: purged immediately upon client ACK)
 const ephemeralQueue: Map<string, EphemeralMailPacket> = new Map();
 const outboundQuotaCounter: Map<string, { date: string; count: number }> = new Map();
-const localShortlinks: Map<string, string> = new Map();
+const localShortlinks: Map<string, ShortlinkRecord> = new Map();
+const localBioWorkspaces: Map<string, BioWorkspaceData> = new Map();
 
 let totalPurgedSinceBoot = 0;
 
@@ -142,9 +151,11 @@ async function startServer() {
       retentionPolicy: 'EPHEMERAL_POP_AND_PURGE',
       outboundProviderMode: (process.env.OUTBOUND_PROVIDER || 'auto').toLowerCase(),
       activeOutboundProvider,
+      linksStorageEngine: 'local-dev-memory',
       bindings: {
         mailTransitKv: true,
         linksKv: true,
+        linksDb: false,
         sendEmail: false,
         cpanelRelay: hasCpanel,
         resendApi: hasResend,
@@ -403,32 +414,196 @@ async function startServer() {
     res.json({ ok: true, kvBound: true, username: user });
   });
 
-  // 6. Local shortlink sync & 301 redirector parity with Cloudflare Worker
+  // 6. Standalone Shortlinks & Multi-Page Bio APIs (parity with Cloudflare Worker)
+  app.get('/api/links/shortlinks', (req, res) => {
+    const ownerParam = String(req.query.owner || '').trim();
+    const slugsParam = String(req.query.slugs || '').trim();
+
+    if (ownerParam) {
+      const owner = sanitizeHandle(ownerParam);
+      const items = Array.from(localShortlinks.values())
+        .filter((r) => r.ownerUser === owner)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      res.json({ ok: true, storageEngine: 'local-dev-memory', items });
+      return;
+    }
+
+    if (slugsParam) {
+      const slugs = slugsParam
+        .split(',')
+        .map((s) => sanitizeSlug(s))
+        .filter(Boolean)
+        .slice(0, 50);
+      const items = slugs
+        .map((s) => localShortlinks.get(s))
+        .filter((r): r is ShortlinkRecord => Boolean(r));
+      res.json({ ok: true, storageEngine: 'local-dev-memory', items });
+      return;
+    }
+
+    res.json({ ok: true, storageEngine: 'local-dev-memory', items: [] });
+  });
+
   app.post('/api/links/shortlinks', (req, res) => {
-    const slug = sanitizeSlug(String(req.body?.slug || ''));
-    const safeTarget = sanitizeExternalUrl(String(req.body?.targetUrl || ''), {
+    const rawTarget = String(req.body?.targetUrl || '').trim();
+    const withProtocol = /^https?:\/\//i.test(rawTarget) ? rawTarget : `https://${rawTarget}`;
+    const safeTarget = sanitizeExternalUrl(withProtocol, {
       allowMailto: false,
       blockPrivateHosts: true,
     });
-    if (!slug || !safeTarget) {
-      res.status(400).json({ ok: false, error: 'Slug atau URL tujuan tidak valid.' });
+    if (!safeTarget) {
+      res.status(400).json({
+        ok: false,
+        error: 'URL tujuan tidak valid atau diblokir. Gunakan alamat https:// publik yang sah.',
+      });
       return;
     }
-    localShortlinks.set(slug, safeTarget);
-    res.json({ ok: true, kvBound: true, slug, targetUrl: safeTarget });
+
+    const rawCustom = String(req.body?.customSlug ?? req.body?.slug ?? '').trim();
+    let finalSlug = '';
+    let isCustomSlug = false;
+
+    if (rawCustom) {
+      const cleanCustom = sanitizeShortlinkSlugInput(rawCustom);
+      if (!cleanCustom) {
+        res.status(400).json({
+          ok: false,
+          error:
+            'Custom slug harus 2–48 karakter (huruf kecil, angka, tanda hubung) dan bukan kata sistem.',
+        });
+        return;
+      }
+      if (localShortlinks.has(cleanCustom)) {
+        res.status(409).json({
+          ok: false,
+          error: `Slug "${cleanCustom}" sudah dipakai. Pilih slug lain atau kosongkan untuk kode acak.`,
+        });
+        return;
+      }
+      finalSlug = cleanCustom;
+      isCustomSlug = true;
+    } else {
+      for (let i = 0; i < 6; i += 1) {
+        const candidate = generateShortlinkCode(i < 4 ? 6 : 7);
+        if (!localShortlinks.has(candidate)) {
+          finalSlug = candidate;
+          break;
+        }
+      }
+      if (!finalSlug) finalSlug = generateShortlinkCode(8);
+    }
+
+    const ownerUser =
+      typeof req.body?.ownerUser === 'string' && req.body.ownerUser.trim()
+        ? sanitizeHandle(req.body.ownerUser)
+        : null;
+    const title = stripHeaderInjection(String(req.body?.title || ''), 120);
+
+    const record: ShortlinkRecord = {
+      slug: finalSlug,
+      ownerUser,
+      title,
+      targetUrl: safeTarget,
+      isCustomSlug,
+      clicks: 0,
+      createdAt: new Date().toISOString(),
+      lastClickedAt: null,
+    };
+    localShortlinks.set(finalSlug, record);
+    res.status(201).json({
+      ok: true,
+      storageEngine: 'local-dev-memory',
+      shortUrl: `https://imy.li/s/${record.slug}`,
+      record,
+    });
   });
 
   app.delete('/api/links/shortlinks/:slug', (req, res) => {
     const slug = sanitizeSlug(String(req.params.slug || ''));
-    localShortlinks.delete(slug);
-    res.json({ ok: true, kvBound: true, deletedSlug: slug });
+    const existing = localShortlinks.get(slug);
+    const ownerParam = String(req.query.owner || '').trim();
+    const ownerUser = ownerParam ? sanitizeHandle(ownerParam) : null;
+    if (existing && existing.ownerUser && ownerUser && existing.ownerUser !== ownerUser) {
+      res.status(403).json({
+        ok: false,
+        error: 'Anda tidak memiliki izin menghapus shortlink milik akun lain.',
+      });
+      return;
+    }
+    const deleted = localShortlinks.delete(slug);
+    res.json({ ok: true, storageEngine: 'local-dev-memory', deletedSlug: slug, deleted });
+  });
+
+  app.get('/api/links/bio/:username', (req, res) => {
+    const username = sanitizeHandle(String(req.params.username || ''));
+    const data = localBioWorkspaces.get(username) || null;
+    res.json({
+      ok: true,
+      storageEngine: 'local-dev-memory',
+      configured: Boolean(data),
+      username,
+      data,
+    });
+  });
+
+  app.put('/api/links/bio/:username', (req, res) => {
+    const username = sanitizeHandle(String(req.params.username || ''));
+    const existing = localBioWorkspaces.get(username);
+    const existingClicks = new Map<string, number>();
+    if (existing) {
+      for (const p of existing.pages) {
+        for (const l of p.links) {
+          existingClicks.set(l.id, l.clicks);
+        }
+      }
+    }
+    const saved = sanitizeBioWorkspaceInput(username, req.body, existingClicks);
+    localBioWorkspaces.set(username, saved);
+    res.json({
+      ok: true,
+      storageEngine: 'local-dev-memory',
+      configured: true,
+      data: saved,
+    });
+  });
+
+  app.post('/api/links/bio-click', (req, res) => {
+    const username = sanitizeHandle(String(req.body?.username || ''));
+    const pageSlug = sanitizePageSlug(String(req.body?.pageSlug || '')) ?? '';
+    const linkId = String(req.body?.linkId || '')
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .slice(0, 80);
+    const workspace = localBioWorkspaces.get(username);
+    if (!workspace || !linkId) {
+      res.json({ ok: true, clicks: null });
+      return;
+    }
+    let clicks: number | null = null;
+    const nextPages = workspace.pages.map((p) => {
+      if (p.pageSlug !== pageSlug) return p;
+      return {
+        ...p,
+        links: p.links.map((l) => {
+          if (l.id !== linkId) return l;
+          clicks = l.clicks + 1;
+          return { ...l, clicks };
+        }),
+      };
+    });
+    if (clicks !== null) {
+      localBioWorkspaces.set(username, { ...workspace, pages: nextPages });
+    }
+    res.json({ ok: true, clicks });
   });
 
   app.get('/s/:slug', (req, res, next) => {
     const slug = sanitizeSlug(String(req.params.slug || ''));
-    const target = localShortlinks.get(slug);
-    if (target) {
-      res.redirect(301, target);
+    const record = localShortlinks.get(slug);
+    if (record) {
+      record.clicks += 1;
+      record.lastClickedAt = new Date().toISOString();
+      res.setHeader('Cache-Control', 'no-store, max-age=0');
+      res.redirect(302, record.targetUrl);
       return;
     }
     next();

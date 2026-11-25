@@ -63,17 +63,27 @@ OUTBOUND_PROVIDER = "auto"
 binding = "MAIL_TRANSIT_KV"
 id = "b330955476094cc2820053732cbb4471"
 
-# 2. VZ Links Shortener & Static Bio KV:
+# 2. VZ Links Shortener & Multi-Page Bio KV (active immediately & automatic fallback when D1 is not bound):
 [[kv_namespaces]]
 binding = "LINKS_KV"
 id = "9fb255e46c7b4501922aa6881c806493"
 
-# 3. Optional Cloudflare Email Sending (uncomment after onboarding imy.li in Compute > Email Service):
+# 3. Recommended Upgrade — Cloudflare D1 SQLite Database for Multi-Page Bio & Shortlinks (`LINKS_DB`):
+#    Run:
+#      npx wrangler d1 create vzlinks-db
+#      npx wrangler d1 execute vzlinks-db --remote --file=cloudflare/schema.sql
+#    Then uncomment below and replace database_id:
+# [[d1_databases]]
+# binding = "LINKS_DB"
+# database_name = "vzlinks-db"
+# database_id = "<PASTE_D1_DATABASE_ID_HERE>"
+
+# 4. Optional Cloudflare Email Sending (uncomment after onboarding imy.li in Compute > Email Service):
 #    Free plan: verified destination addresses only; Workers Paid: any recipient.
 # [[send_email]]
 # name = "SEND_EMAIL"
 
-# 4. Outbound Provider Secrets (set via CLI — NEVER commit secrets into wrangler.toml):
+# 5. Outbound Provider Secrets (set via CLI — NEVER commit secrets into wrangler.toml):
 #    Option A — Hybrid cPanel/WHM Outbound Relay ($0, zero storage on karya.kreasi.org):
 #      npx wrangler secret put CPANEL_RELAY_URL
 #      npx wrangler secret put CPANEL_RELAY_SECRET

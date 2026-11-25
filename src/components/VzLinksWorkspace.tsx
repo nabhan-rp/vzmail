@@ -1,907 +1,1234 @@
 import {
+  ArrowDown,
+  ArrowUp,
+  Check,
   CheckCircle2,
   Copy,
   ExternalLink,
   Eye,
+  EyeOff,
+  FilePlus2,
   Globe,
   Link2,
-  Mail,
+  Palette,
   Plus,
-  ShieldCheck,
+  Save,
+  Scissors,
   Trash2,
+  User,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import {
-  deleteShortlink,
-  getOrSeedBioProfile,
-  getOrSeedShortlinks,
-  saveBioProfile,
-  saveShortlink,
-  type BioLinkCardItem,
-  type ImyBioProfile,
-  type ImyShortlink,
-} from '../utils/localMailDb';
-import {
-  generateRandomSlug,
-  generateSecureId,
-  sanitizeExternalUrl,
-  sanitizeSlug,
-} from '../utils/mailSecurity';
+  BIO_THEMES,
+  SOCIAL_PLATFORMS,
+  createEmptyBioWorkspace,
+  sanitizePageSlug,
+  type BioButtonStyle,
+  type BioLinkItem,
+  type BioPageRecord,
+  type BioThemeId,
+  type BioWorkspaceData,
+  type SocialPlatformId,
+} from '../utils/linksModel';
 import type { ActiveHostView } from './MailLinksTopBar';
+import { SocialIconGlyph } from './SocialIconGlyph';
 
 interface VzLinksWorkspaceProps {
   lang: Language;
   session: SsoSession;
-  initialSubTab?: 'bio' | 'shortlinks';
   onSelectHost: (host: ActiveHostView) => void;
+  onOpenPublicBioPage: (pageSlug: string) => void;
   onActivateMailFromLinks: () => void;
   onDeactivateLinks: () => void;
+}
+
+type EditorTab = 'links' | 'profile_socials' | 'theme';
+
+function formatStorageBadge(engine: string): string {
+  if (engine === 'cloudflare-d1') return 'Cloudflare D1';
+  if (engine === 'cloudflare-kv') return 'Cloudflare KV';
+  if (engine === 'local-dev-memory') return 'Local Dev';
+  return 'Edge Storage';
 }
 
 export function VzLinksWorkspace({
   lang,
   session,
-  initialSubTab = 'bio',
   onSelectHost,
-  onActivateMailFromLinks,
-  onDeactivateLinks,
+  onOpenPublicBioPage,
 }: VzLinksWorkspaceProps) {
-  const user = session.username || 'fadhil';
+  const username = session.username;
   const domain = session.primaryDomain || 'imy.li';
-  const [subTab, setSubTab] = useState<'bio' | 'shortlinks'>(initialSubTab);
 
-  const [profile, setProfile] = useState<ImyBioProfile | null>(null);
-  const [shortlinks, setShortlinks] = useState<ImyShortlink[]>([]);
-  const [savedBanner, setSavedBanner] = useState<string | null>(null);
-  const [errorBanner, setErrorBanner] = useState<string | null>(null);
-  const bannerTimerRef = useRef<number | null>(null);
+  const [workspace, setWorkspace] = useState<BioWorkspaceData>(() =>
+    createEmptyBioWorkspace(username, {
+      displayName: session.name || username,
+      avatarUrl: session.picture || '',
+    })
+  );
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [hasUnsaved, setHasUnsaved] = useState(false);
+  const [storageEngine, setStorageEngine] = useState('');
+  const [statusMessage, setStatusMessage] = useState<{
+    type: 'ok' | 'error';
+    text: string;
+  } | null>(null);
 
-  // Add Bio Link form
+  const [activePageSlug, setActivePageSlug] = useState<string>('');
+  const [editorTab, setEditorTab] = useState<EditorTab>('links');
+
+  // New subpage creator
+  const [addingPage, setAddingPage] = useState(false);
+  const [newPageSlugInput, setNewPageSlugInput] = useState('');
+  const [newPageTitleInput, setNewPageTitleInput] = useState('');
+  const [newPageError, setNewPageError] = useState<string | null>(null);
+
+  // New link creator
   const [newLinkTitle, setNewLinkTitle] = useState('');
-  const [newLinkUrl, setNewLinkUrl] = useState('');
   const [newLinkSubtitle, setNewLinkSubtitle] = useState('');
-  const [newLinkCategory, setNewLinkCategory] =
-    useState<BioLinkCardItem['category']>('project');
+  const [newLinkUrl, setNewLinkUrl] = useState('');
+  const [newLinkError, setNewLinkError] = useState<string | null>(null);
 
-  // Add Shortlink form
-  const [newSlug, setNewSlug] = useState('');
-  const [newShortTitle, setNewShortTitle] = useState('');
-  const [newTargetUrl, setNewTargetUrl] = useState('');
+  const [copiedUrl, setCopiedUrl] = useState(false);
+  const statusTimerRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    setSubTab(initialSubTab);
-  }, [initialSubTab]);
-
-  const loadLinksData = async () => {
-    const [p, sl] = await Promise.all([
-      getOrSeedBioProfile(user),
-      getOrSeedShortlinks(user),
-    ]);
-    setProfile(p);
-    setShortlinks(sl);
+  const flashStatus = (type: 'ok' | 'error', text: string) => {
+    setStatusMessage({ type, text });
+    if (statusTimerRef.current !== null) {
+      window.clearTimeout(statusTimerRef.current);
+    }
+    statusTimerRef.current = window.setTimeout(() => setStatusMessage(null), 3600);
   };
 
-  useEffect(() => {
-    let cancelled = false;
-    Promise.all([getOrSeedBioProfile(user), getOrSeedShortlinks(user)])
-      .then(([p, sl]) => {
-        if (!cancelled) {
-          setProfile(p);
-          setShortlinks(sl);
-        }
-      })
-      .catch(() => {
-        // Ignore transient storage error
+  const loadWorkspace = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/links/bio/${encodeURIComponent(username)}`, {
+        cache: 'no-store',
       });
+      const json = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        configured?: boolean;
+        storageEngine?: string;
+        data?: BioWorkspaceData | null;
+      } | null;
+
+      if (res.ok && json?.ok) {
+        if (json.storageEngine) setStorageEngine(json.storageEngine);
+        if (json.configured && json.data) {
+          setWorkspace(json.data);
+          setHasUnsaved(false);
+        } else {
+          setWorkspace(
+            createEmptyBioWorkspace(username, {
+              displayName: session.name || username,
+              avatarUrl: session.picture || '',
+            })
+          );
+          setHasUnsaved(false);
+        }
+      }
+    } catch {
+      flashStatus(
+        'error',
+        lang === 'id'
+          ? 'Gagal memuat data bio dari server edge.'
+          : 'Failed to load bio data from edge server.'
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [username, session.name, session.picture, lang]);
+
+  useEffect(() => {
+    void loadWorkspace();
     return () => {
-      cancelled = true;
-      if (bannerTimerRef.current !== null) {
-        window.clearTimeout(bannerTimerRef.current);
+      if (statusTimerRef.current !== null) {
+        window.clearTimeout(statusTimerRef.current);
       }
     };
-  }, [user]);
+  }, [loadWorkspace]);
 
-  const flashBanner = (msg: string) => {
-    setErrorBanner(null);
-    setSavedBanner(msg);
-    if (bannerTimerRef.current !== null) {
-      window.clearTimeout(bannerTimerRef.current);
-    }
-    bannerTimerRef.current = window.setTimeout(() => {
-      setSavedBanner((curr) => (curr === msg ? null : curr));
-    }, 3500);
-  };
-
-  const flashError = (msg: string) => {
-    setSavedBanner(null);
-    setErrorBanner(msg);
-    if (bannerTimerRef.current !== null) {
-      window.clearTimeout(bannerTimerRef.current);
-    }
-    bannerTimerRef.current = window.setTimeout(() => {
-      setErrorBanner((curr) => (curr === msg ? null : curr));
-    }, 4500);
-  };
-
-  const handleSaveProfileMeta = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!profile) return;
-    const updated: ImyBioProfile = {
-      ...profile,
-      updatedAt: new Date().toISOString(),
-    };
-    await saveBioProfile(updated);
-    setProfile(updated);
-    flashBanner(
-      lang === 'id'
-        ? `Profil statis ${user}.${domain} berhasil diperbarui.`
-        : `Static profile ${user}.${domain} updated.`
+  const activePage: BioPageRecord = useMemo(() => {
+    return (
+      workspace.pages.find((p) => p.pageSlug === activePageSlug) ||
+      workspace.pages[0]
     );
-  };
+  }, [workspace.pages, activePageSlug]);
 
-  const handleAddBioLink = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!profile || !newLinkTitle.trim() || !newLinkUrl.trim()) return;
-    const normalizedUrl = sanitizeExternalUrl(newLinkUrl, { allowMailto: true });
-    if (!normalizedUrl) {
-      flashError(
-        lang === 'id'
-          ? 'URL tautan tidak valid atau menggunakan skema yang tidak diizinkan (gunakan https:// atau mailto:).'
-          : 'Invalid or unsafe URL scheme (only https://, http://, and mailto: are permitted).'
-      );
-      return;
-    }
+  const activeTheme = BIO_THEMES[activePage.themeId] || BIO_THEMES.midnight_slate;
+  const activePublicPath = activePage.pageSlug
+    ? `${username}.${domain}/${activePage.pageSlug}`
+    : `${username}.${domain}`;
 
-    const item: BioLinkCardItem = {
-      id: generateSecureId('link'),
-      title: newLinkTitle.trim().slice(0, 120),
-      url: normalizedUrl,
-      subtitle:
-        newLinkSubtitle.trim().slice(0, 200) ||
-        `Tautan terverifikasi di ${user}.${domain}`,
-      category: newLinkCategory,
-      clicks: 0,
-      enabled: true,
-    };
-
-    const updated: ImyBioProfile = {
-      ...profile,
-      links: [...profile.links, item],
-      updatedAt: new Date().toISOString(),
-    };
-    await saveBioProfile(updated);
-    setProfile(updated);
-    setNewLinkTitle('');
-    setNewLinkUrl('');
-    setNewLinkSubtitle('');
-    flashBanner(
-      lang === 'id'
-        ? 'Tautan ditambahkan ke halaman bio.'
-        : 'Link added to bio page.'
-    );
-  };
-
-  const handleRemoveBioLink = async (id: string) => {
-    if (!profile) return;
-    const updated: ImyBioProfile = {
-      ...profile,
-      links: profile.links.filter((l) => l.id !== id),
-      updatedAt: new Date().toISOString(),
-    };
-    await saveBioProfile(updated);
-    setProfile(updated);
-  };
-
-  const handleCreateShortlink = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTargetUrl.trim()) return;
-    const cleanSlug = sanitizeSlug(newSlug.trim() || generateRandomSlug(6));
-
-    if (!cleanSlug) {
-      flashError(
-        lang === 'id'
-          ? 'Slug hanya boleh berisi huruf kecil, angka, tanda hubung (-), atau garis bawah (_).'
-          : 'Slug may only contain lowercase letters, numbers, hyphens, or underscores.'
-      );
-      return;
-    }
-
-    const normalizedTarget = sanitizeExternalUrl(newTargetUrl, {
-      allowMailto: false,
-      blockPrivateHosts: true,
+  const filledSocials = useMemo(() => {
+    return SOCIAL_PLATFORMS.filter((p) => {
+      const val = workspace.socials[p.id];
+      return typeof val === 'string' && val.trim().length > 0;
     });
-    if (!normalizedTarget) {
-      flashError(
+  }, [workspace.socials]);
+
+  const updateWorkspace = (updater: (prev: BioWorkspaceData) => BioWorkspaceData) => {
+    setWorkspace((prev) => updater(prev));
+    setHasUnsaved(true);
+  };
+
+  const updateActivePage = (updater: (page: BioPageRecord) => BioPageRecord) => {
+    updateWorkspace((prev) => ({
+      ...prev,
+      pages: prev.pages.map((p) =>
+        p.pageSlug === activePage.pageSlug ? updater(p) : p
+      ),
+    }));
+  };
+
+  const handleSaveToServer = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/links/bio/${encodeURIComponent(username)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(workspace),
+      });
+      const json = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        storageEngine?: string;
+        data?: BioWorkspaceData;
+      } | null;
+
+      if (!res.ok || !json?.ok || !json.data) {
+        flashStatus(
+          'error',
+          json?.error ||
+            (lang === 'id'
+              ? 'Gagal menyimpan perubahan bio.'
+              : 'Failed to save bio changes.')
+        );
+        return;
+      }
+
+      if (json.storageEngine) setStorageEngine(json.storageEngine);
+      setWorkspace(json.data);
+      setHasUnsaved(false);
+      flashStatus(
+        'ok',
         lang === 'id'
-          ? 'URL tujuan shortlink tidak valid atau mengarah ke skema/host yang diblokir.'
-          : 'Invalid target URL or blocked scheme/private host.'
+          ? `Tersimpan! ${activePublicPath} langsung live.`
+          : `Saved! ${activePublicPath} is live.`
+      );
+    } catch {
+      flashStatus(
+        'error',
+        lang === 'id'
+          ? 'Koneksi ke server gagal saat menyimpan.'
+          : 'Network error while saving.'
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCreateSubpage = (e: React.FormEvent) => {
+    e.preventDefault();
+    setNewPageError(null);
+    const cleaned = sanitizePageSlug(newPageSlugInput);
+    if (!cleaned) {
+      setNewPageError(
+        lang === 'id'
+          ? 'Slug halaman harus 2–40 karakter (huruf kecil, angka, tanda hubung) dan bukan kata sistem.'
+          : 'Page slug must be 2–40 chars (lowercase, digits, hyphen) and not a reserved word.'
+      );
+      return;
+    }
+    if (workspace.pages.some((p) => p.pageSlug === cleaned)) {
+      setNewPageError(
+        lang === 'id'
+          ? `Halaman /${cleaned} sudah ada.`
+          : `Page /${cleaned} already exists.`
       );
       return;
     }
 
-    const record: ImyShortlink = {
-      slug: cleanSlug,
-      ownerUser: user,
-      title:
-        newShortTitle.trim().slice(0, 120) ||
-        `Shortlink ${domain}/s/${cleanSlug}`,
-      targetUrl: normalizedTarget,
-      clicks: 0,
-      createdAt: new Date().toISOString(),
-      safeBrowsingVerified: true,
+    const now = new Date().toISOString();
+    const newPage: BioPageRecord = {
+      id: `page-${username}-${cleaned}-${Date.now().toString(36)}`,
+      pageSlug: cleaned,
+      title: newPageTitleInput.trim() || `/${cleaned}`,
+      description: '',
+      themeId: activePage.themeId,
+      buttonStyle: activePage.buttonStyle,
+      showSocials: true,
+      isPublished: true,
+      links: [],
+      updatedAt: now,
     };
 
-    await saveShortlink(record);
-    // Best-effort edge KV sync when Worker LINKS_KV is configured
-    fetch('/api/links/shortlinks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slug: cleanSlug, targetUrl: normalizedTarget }),
-    }).catch(() => {});
-
-    setNewSlug('');
-    setNewShortTitle('');
-    setNewTargetUrl('');
-    await loadLinksData();
-    flashBanner(
-      lang === 'id'
-        ? `Shortlink https://${domain}/s/${cleanSlug} siap digunakan.`
-        : `Shortlink https://${domain}/s/${cleanSlug} created.`
-    );
+    updateWorkspace((prev) => ({
+      ...prev,
+      pages: [...prev.pages, newPage],
+    }));
+    setActivePageSlug(cleaned);
+    setNewPageSlugInput('');
+    setNewPageTitleInput('');
+    setAddingPage(false);
   };
 
-  const handleTestShortlinkClick = async (item: ImyShortlink) => {
-    const updated: ImyShortlink = { ...item, clicks: item.clicks + 1 };
-    await saveShortlink(updated);
-    await loadLinksData();
-    flashBanner(
-      lang === 'id'
-        ? `Simulasi HTTP 301: https://${domain}/s/${item.slug} -> ${item.targetUrl}`
-        : `Simulated HTTP 301: https://${domain}/s/${item.slug} -> ${item.targetUrl}`
-    );
+  const handleDeleteSubpage = (slug: string) => {
+    if (!slug) return; // Root page cannot be deleted
+    updateWorkspace((prev) => ({
+      ...prev,
+      pages: prev.pages.filter((p) => p.pageSlug !== slug),
+    }));
+    if (activePageSlug === slug) {
+      setActivePageSlug('');
+    }
   };
 
-  const handleDeleteShortlink = async (slug: string) => {
-    await deleteShortlink(slug);
-    fetch(`/api/links/shortlinks/${encodeURIComponent(slug)}`, {
-      method: 'DELETE',
-    }).catch(() => {});
-    await loadLinksData();
+  const handleAddLink = (e: React.FormEvent) => {
+    e.preventDefault();
+    setNewLinkError(null);
+    const titleTrimmed = newLinkTitle.trim();
+    const urlTrimmed = newLinkUrl.trim();
+
+    if (!titleTrimmed || !urlTrimmed) {
+      setNewLinkError(
+        lang === 'id'
+          ? 'Judul tautan dan URL tujuan wajib diisi.'
+          : 'Link title and destination URL are required.'
+      );
+      return;
+    }
+
+    const normalizedUrl =
+      /^https?:\/\/|^mailto:/i.test(urlTrimmed)
+        ? urlTrimmed
+        : `https://${urlTrimmed}`;
+
+    const item: BioLinkItem = {
+      id: `lnk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      title: titleTrimmed.slice(0, 100),
+      subtitle: newLinkSubtitle.trim().slice(0, 140),
+      url: normalizedUrl,
+      sortOrder: activePage.links.length,
+      enabled: true,
+      clicks: 0,
+    };
+
+    updateActivePage((page) => ({
+      ...page,
+      links: [...page.links, item],
+    }));
+    setNewLinkTitle('');
+    setNewLinkSubtitle('');
+    setNewLinkUrl('');
   };
 
-  const handleCopyText = (text: string) => {
-    navigator.clipboard?.writeText(text).catch(() => {});
-    flashBanner(
-      lang === 'id' ? `Disalin: ${text}` : `Copied: ${text}`
-    );
+  const handleMoveLink = (index: number, direction: -1 | 1) => {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= activePage.links.length) return;
+    updateActivePage((page) => {
+      const next = [...page.links];
+      const [moved] = next.splice(index, 1);
+      next.splice(targetIndex, 0, moved);
+      return {
+        ...page,
+        links: next.map((l, idx) => ({ ...l, sortOrder: idx })),
+      };
+    });
   };
+
+  const handleToggleLink = (linkId: string) => {
+    updateActivePage((page) => ({
+      ...page,
+      links: page.links.map((l) =>
+        l.id === linkId ? { ...l, enabled: !l.enabled } : l
+      ),
+    }));
+  };
+
+  const handleDeleteLink = (linkId: string) => {
+    updateActivePage((page) => ({
+      ...page,
+      links: page.links
+        .filter((l) => l.id !== linkId)
+        .map((l, idx) => ({ ...l, sortOrder: idx })),
+    }));
+  };
+
+  const handleUpdateSocial = (platformId: SocialPlatformId, value: string) => {
+    updateWorkspace((prev) => ({
+      ...prev,
+      socials: {
+        ...prev.socials,
+        [platformId]: value,
+      },
+    }));
+  };
+
+  const handleCopyActiveUrl = () => {
+    navigator.clipboard?.writeText(`https://${activePublicPath}`).catch(() => {});
+    setCopiedUrl(true);
+    window.setTimeout(() => setCopiedUrl(false), 1800);
+  };
+
+  const buttonRadiusClass =
+    activePage.buttonStyle === 'sharp' ? 'rounded-md' : 'rounded-xl';
 
   return (
-    <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-6 space-y-5">
-      {savedBanner && (
-        <div className="bg-slate-900 dark:bg-blue-950 text-white border border-slate-700 dark:border-blue-800 rounded-lg px-4 py-2.5 text-xs flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{savedBanner}</span>
-        </div>
-      )}
-      {errorBanner && (
-        <div className="bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-200 border border-rose-200 dark:border-rose-800 rounded-lg px-4 py-2.5 text-xs">
-          {errorBanner}
-        </div>
-      )}
-
-      {/* VZ Links Workspace Header Bar */}
-      <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
+    <div className="max-w-[1320px] mx-auto px-4 sm:px-6 py-7 space-y-6">
+      {/* Top Studio Header Bar */}
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-5 border-b border-slate-200 dark:border-[#232732]">
         <div className="space-y-1">
           <div className="text-xs font-mono text-slate-500 dark:text-slate-400">
-            <span>links.vz.gay</span>
+            <span>{username}.{domain}</span>
             <span aria-hidden="true"> · </span>
-            <span>Bio: {user}.{domain}</span>
-            <span aria-hidden="true"> · </span>
-            <span>Shortlinks: {domain}/s/$URL</span>
+            <span>
+              {workspace.pages.length}{' '}
+              {lang === 'id' ? 'halaman aktif' : 'active pages'}
+            </span>
+            {storageEngine && (
+              <>
+                <span aria-hidden="true"> · </span>
+                <span className="text-emerald-600 dark:text-emerald-400">
+                  {formatStorageBadge(storageEngine)}
+                </span>
+              </>
+            )}
+            {hasUnsaved && (
+              <>
+                <span aria-hidden="true"> · </span>
+                <span className="text-amber-600 dark:text-amber-400 font-semibold">
+                  {lang === 'id' ? 'Ada perubahan belum disimpan' : 'Unsaved changes'}
+                </span>
+              </>
+            )}
           </div>
-          <h1 className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white font-display">
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white font-display">
             {lang === 'id'
-              ? `Studio Link-in-Bio & Pemendek Tautan (${user}.${domain})`
-              : `Link-in-Bio & Shortlink Studio (${user}.${domain})`}
+              ? 'Studio Multi-Page Link-in-Bio'
+              : 'Multi-Page Link-in-Bio Studio'}
           </h1>
         </div>
 
-        <div className="w-full lg:w-auto flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2.5">
-          <div className="grid grid-cols-2 sm:flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#0B0D11] rounded-lg border border-slate-200/70 dark:border-[#232732]">
-            <button
-              type="button"
-              onClick={() => setSubTab('bio')}
-              className={`min-h-[40px] sm:min-h-0 px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap truncate cursor-pointer ${
-                subTab === 'bio'
-                  ? 'bg-white dark:bg-[#191E28] text-slate-900 dark:text-white shadow-xs'
-                  : 'text-slate-600 dark:text-slate-400'
-              }`}
-            >
-              {user}.{domain} Bio
-            </button>
-            <button
-              type="button"
-              onClick={() => setSubTab('shortlinks')}
-              className={`min-h-[40px] sm:min-h-0 px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap truncate cursor-pointer ${
-                subTab === 'shortlinks'
-                  ? 'bg-white dark:bg-[#191E28] text-slate-900 dark:text-white shadow-xs'
-                  : 'text-slate-600 dark:text-slate-400'
-              }`}
-            >
-              {domain}/s/ ({shortlinks.length})
-            </button>
-          </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onSelectHost('shortlinks')}
+            className="min-h-[40px] px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 hover:bg-slate-200 dark:bg-[#191E28] dark:hover:bg-[#232A38] border border-slate-200 dark:border-[#2A303E] rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Scissors className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+            <span>{domain}/s/ Shortener</span>
+          </button>
 
-          <div className="grid grid-cols-2 sm:flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => onSelectHost('bio_public')}
-              className="min-h-[44px] sm:min-h-0 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Eye className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">
-                {lang === 'id'
-                  ? `Pratinjau Bio`
-                  : `Preview Bio`}
-              </span>
-            </button>
+          <button
+            type="button"
+            onClick={() => onOpenPublicBioPage(activePage.pageSlug)}
+            className="min-h-[40px] px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#151922] hover:bg-slate-100 dark:hover:bg-[#1E2430] border border-slate-200 dark:border-[#2A303E] rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            <span>{lang === 'id' ? 'Lihat Halaman Publik' : 'View Public Page'}</span>
+          </button>
 
-            {!session.mailActivated ? (
-              <button
-                type="button"
-                onClick={() => {
-                  onActivateMailFromLinks();
-                  onSelectHost('mail.vz.gay');
-                }}
-                className="min-h-[44px] sm:min-h-0 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-950/70 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Mail className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">
-                  {lang === 'id'
-                    ? `Aktifkan Mail`
-                    : `Setup Mail`}
-                </span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => onSelectHost('mail.vz.gay')}
-                className="min-h-[44px] sm:min-h-0 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Mail className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                <span className="truncate">{user}@{domain}</span>
-              </button>
-            )}
-          </div>
+          <button
+            type="button"
+            onClick={() => void handleSaveToServer()}
+            disabled={saving || loading}
+            className="min-h-[40px] px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>
+              {saving
+                ? lang === 'id'
+                  ? 'Menyimpan...'
+                  : 'Saving...'
+                : lang === 'id'
+                  ? 'Simpan & Publikasikan'
+                  : 'Save & Publish'}
+            </span>
+          </button>
         </div>
       </div>
 
-      {subTab === 'bio' && profile ? (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* Left: Profile & Links Editor (7 cols) */}
-          <div className="lg:col-span-7 space-y-6">
-            <form
-              onSubmit={handleSaveProfileMeta}
-              className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 space-y-4"
+      {statusMessage && (
+        <div
+          className={`px-4 py-3 rounded-lg border text-xs flex items-center gap-2 ${
+            statusMessage.type === 'ok'
+              ? 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/60 text-emerald-800 dark:text-emerald-200'
+              : 'bg-rose-50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-900/60 text-rose-800 dark:text-rose-200'
+          }`}
+        >
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <span>{statusMessage.text}</span>
+        </div>
+      )}
+
+      {/* Multi-Page Switcher Bar ($USERNAME.imy.li & $USERNAME.imy.li/$PAGE) */}
+      <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {workspace.pages.map((page) => {
+              const isSelected = page.pageSlug === activePage.pageSlug;
+              const isRoot = page.pageSlug === '';
+              return (
+                <div key={page.id} className="inline-flex items-center">
+                  <button
+                    type="button"
+                    onClick={() => setActivePageSlug(page.pageSlug)}
+                    className={`min-h-[36px] px-3 py-1.5 text-xs font-mono font-semibold rounded-lg border transition-colors inline-flex items-center gap-1.5 cursor-pointer ${
+                      isSelected
+                        ? 'bg-blue-600 text-white border-blue-600'
+                        : 'bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-700 dark:text-slate-300 border-slate-200 dark:border-[#2A303D] hover:border-blue-500/60'
+                    }`}
+                  >
+                    <Globe className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {isRoot
+                        ? lang === 'id'
+                          ? `Utama (${username}.${domain})`
+                          : `Main (${username}.${domain})`
+                        : `/${page.pageSlug}`}
+                    </span>
+                    <span className="opacity-70 text-[10px] tabular-nums">
+                      ({page.links.length})
+                    </span>
+                  </button>
+                </div>
+              );
+            })}
+
+            <button
+              type="button"
+              onClick={() => {
+                setAddingPage((v) => !v);
+                setNewPageError(null);
+              }}
+              className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 bg-blue-50/70 dark:bg-blue-950/30 hover:bg-blue-100 dark:hover:bg-blue-950/50 border border-blue-200 dark:border-blue-900/60 rounded-lg inline-flex items-center gap-1.5 transition-colors cursor-pointer"
             >
-              <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#232732] pb-3">
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900 dark:text-white font-display">
-                    {lang === 'id'
-                      ? `Identitas Halaman Statis (${user}.${domain})`
-                      : `Static Page Identity (${user}.${domain})`}
-                  </h2>
-                  <p className="text-xs text-slate-500">
-                    PSL-safe static rendering · Zero cross-subdomain cookies · No arbitrary user JS
-                  </p>
-                </div>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg cursor-pointer"
-                >
-                  {lang === 'id' ? 'Simpan Profil' : 'Save Profile'}
-                </button>
-              </div>
+              <FilePlus2 className="w-3.5 h-3.5" />
+              <span>{lang === 'id' ? '+ Halaman Baru (/$PAGE)' : '+ New Page (/$PAGE)'}</span>
+            </button>
+          </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                    Nama Tampilan:
-                  </label>
-                  <input
-                    type="text"
-                    value={profile.displayName}
-                    onChange={(e) =>
-                      setProfile({ ...profile, displayName: e.target.value })
-                    }
-                    className="w-full px-3 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                    Lokasi / Tagline Singkat:
-                  </label>
-                  <input
-                    type="text"
-                    value={profile.location}
-                    onChange={(e) =>
-                      setProfile({ ...profile, location: e.target.value })
-                    }
-                    className="w-full px-3 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                  />
-                </div>
-              </div>
+          <div className="flex items-center gap-2 text-xs font-mono text-slate-500">
+            <span className="truncate max-w-[220px] sm:max-w-none">
+              https://{activePublicPath}
+            </span>
+            <button
+              type="button"
+              onClick={handleCopyActiveUrl}
+              className="p-1.5 rounded-md hover:bg-slate-100 dark:hover:bg-[#1C212C] text-slate-600 dark:text-slate-300 cursor-pointer"
+              title="Copy URL"
+            >
+              {copiedUrl ? (
+                <Check className="w-3.5 h-3.5 text-emerald-500" />
+              ) : (
+                <Copy className="w-3.5 h-3.5" />
+              )}
+            </button>
+          </div>
+        </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  Headline:
-                </label>
+        {/* Inline New Sub-Page Form */}
+        {addingPage && (
+          <form
+            onSubmit={handleCreateSubpage}
+            className="pt-3 border-t border-slate-200 dark:border-[#232732] grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end"
+          >
+            <div className="sm:col-span-5 space-y-1">
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-400">
+                {lang === 'id' ? 'Alamat Sub-Halaman' : 'Sub-Page Path'}
+              </label>
+              <div className="flex items-center rounded-lg border border-slate-300 dark:border-[#2A303D] bg-[#FAFAFA] dark:bg-[#0B0D11] overflow-hidden">
+                <span className="px-2.5 py-2 text-xs font-mono text-slate-500 border-r border-slate-200 dark:border-[#232732] truncate max-w-[140px]">
+                  {username}.{domain}/
+                </span>
                 <input
                   type="text"
-                  value={profile.headline}
-                  onChange={(e) =>
-                    setProfile({ ...profile, headline: e.target.value })
-                  }
-                  className="w-full px-3 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
+                  value={newPageSlugInput}
+                  onChange={(e) => setNewPageSlugInput(e.target.value)}
+                  placeholder="promo"
+                  className="w-full px-2.5 py-2 text-xs font-mono bg-transparent text-slate-900 dark:text-white focus:outline-none"
                 />
               </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  Bio Singkat:
-                </label>
-                <textarea
-                  rows={3}
-                  value={profile.bio}
-                  onChange={(e) =>
-                    setProfile({ ...profile, bio: e.target.value })
-                  }
-                  className="w-full px-3 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                />
+            </div>
+            <div className="sm:col-span-4 space-y-1">
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-400">
+                {lang === 'id' ? 'Judul Halaman' : 'Page Title'}
+              </label>
+              <input
+                type="text"
+                value={newPageTitleInput}
+                onChange={(e) => setNewPageTitleInput(e.target.value)}
+                placeholder={lang === 'id' ? 'Katalog & Promo' : 'Catalog & Offers'}
+                className="w-full px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none"
+              />
+            </div>
+            <div className="sm:col-span-3 flex items-center gap-2">
+              <button
+                type="submit"
+                className="flex-1 min-h-[36px] px-3 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors cursor-pointer"
+              >
+                {lang === 'id' ? 'Buat Halaman' : 'Create Page'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setAddingPage(false)}
+                className="min-h-[36px] px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-[#1B202B] rounded-lg cursor-pointer"
+              >
+                {lang === 'id' ? 'Batal' : 'Cancel'}
+              </button>
+            </div>
+            {newPageError && (
+              <div className="sm:col-span-12 text-xs text-rose-600 dark:text-rose-400">
+                {newPageError}
               </div>
+            )}
+          </form>
+        )}
+      </section>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                    Alias Email Publik (+Tag untuk Anti-Spam):
-                  </label>
-                  <input
-                    type="text"
-                    value={profile.publicEmailAlias}
-                    onChange={(e) =>
-                      setProfile({
-                        ...profile,
-                        publicEmailAlias: e.target.value,
-                      })
-                    }
-                    className="w-full px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
+      {/* Main Split: Editor (7 cols) + Live Mobile Bio Preview (5 cols) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* Left Editor Panel */}
+        <div className="lg:col-span-7 bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl overflow-hidden">
+          {/* Editor Tabs */}
+          <div className="px-4 pt-3 border-b border-slate-200 dark:border-[#232732] flex items-center gap-1 overflow-x-auto">
+            <button
+              type="button"
+              onClick={() => setEditorTab('links')}
+              className={`px-3.5 py-2.5 text-xs font-semibold border-b-2 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer ${
+                editorTab === 'links'
+                  ? 'border-blue-600 text-blue-600 dark:text-blue-400'
+                  : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <Link2 className="w-3.5 h-3.5" />
+              <span>
+                {lang === 'id' ? 'Tautan & Halaman' : 'Links & Page'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setEditorTab('profile_socials')}
+              className={`px-3.5 py-2.5 text-xs font-semibold border-b-2 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer ${
+                editorTab === 'profile_socials'
+                  ? 'border-blue-600 text-blue-600 dark:text-blue-400'
+                  : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <User className="w-3.5 h-3.5" />
+              <span>
+                {lang === 'id'
+                  ? `Profil & Ikon Sosmed (${filledSocials.length}/${SOCIAL_PLATFORMS.length})`
+                  : `Profile & Social Icons (${filledSocials.length}/${SOCIAL_PLATFORMS.length})`}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setEditorTab('theme')}
+              className={`px-3.5 py-2.5 text-xs font-semibold border-b-2 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer ${
+                editorTab === 'theme'
+                  ? 'border-blue-600 text-blue-600 dark:text-blue-400'
+                  : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <Palette className="w-3.5 h-3.5" />
+              <span>{lang === 'id' ? 'Tema Halaman' : 'Page Theme'}</span>
+            </button>
+          </div>
+
+          <div className="p-5 sm:p-6 space-y-6">
+            {loading ? (
+              <div className="space-y-3">
+                {[1, 2, 3].map((i) => (
+                  <div
+                    key={i}
+                    className="h-14 rounded-lg bg-slate-100 dark:bg-[#191E28] animate-pulse"
                   />
-                </div>
-                <div className="flex items-end">
-                  <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer pb-2">
+                ))}
+              </div>
+            ) : editorTab === 'links' ? (
+              <>
+                {/* Page Metadata Settings */}
+                <div className="space-y-3 pb-5 border-b border-slate-200 dark:border-[#232732]">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                      {activePage.pageSlug === ''
+                        ? lang === 'id'
+                          ? `Pengaturan Halaman Utama (${username}.${domain})`
+                          : `Main Page Settings (${username}.${domain})`
+                        : lang === 'id'
+                          ? `Pengaturan Sub-Halaman (/${activePage.pageSlug})`
+                          : `Sub-Page Settings (/${activePage.pageSlug})`}
+                    </div>
+                    {activePage.pageSlug !== '' && (
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSubpage(activePage.pageSlug)}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:underline cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>{lang === 'id' ? 'Hapus Halaman' : 'Delete Page'}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-400">
+                        {lang === 'id' ? 'Judul Halaman' : 'Page Title'}
+                      </label>
+                      <input
+                        type="text"
+                        value={activePage.title}
+                        onChange={(e) =>
+                          updateActivePage((p) => ({ ...p, title: e.target.value }))
+                        }
+                        placeholder={workspace.displayName || username}
+                        className="w-full px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-400">
+                        {lang === 'id' ? 'Deskripsi Singkat Halaman' : 'Page Description'}
+                      </label>
+                      <input
+                        type="text"
+                        value={activePage.description}
+                        onChange={(e) =>
+                          updateActivePage((p) => ({
+                            ...p,
+                            description: e.target.value,
+                          }))
+                        }
+                        placeholder={
+                          lang === 'id'
+                            ? 'Opsional — tampil di bawah judul halaman'
+                            : 'Optional — displayed under the page title'
+                        }
+                        className="w-full px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+                  </div>
+
+                  <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer select-none">
                     <input
                       type="checkbox"
-                      checked={profile.showPublicEmailButton}
+                      checked={activePage.showSocials}
                       onChange={(e) =>
-                        setProfile({
-                          ...profile,
-                          showPublicEmailButton: e.target.checked,
-                        })
+                        updateActivePage((p) => ({
+                          ...p,
+                          showSocials: e.target.checked,
+                        }))
                       }
-                      className="rounded border-slate-300 text-blue-600"
+                      className="rounded border-slate-300 text-blue-600 focus:ring-blue-600"
                     />
                     <span>
                       {lang === 'id'
-                        ? `Tampilkan tombol kontak ${user}@${domain}`
-                        : `Show ${user}@${domain} contact button`}
+                        ? 'Tampilkan baris ikon sosial media yang sudah diisi pada halaman ini'
+                        : 'Show configured social media icon bar on this page'}
                     </span>
                   </label>
                 </div>
-              </div>
-            </form>
 
-            {/* Bio Links List + Add New Link */}
-            <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 space-y-5">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-bold text-slate-900 dark:text-white font-display">
-                  {lang === 'id'
-                    ? `Daftar Tautan Terkurasi (${profile.links.length})`
-                    : `Curated Bio Links (${profile.links.length})`}
-                </h2>
-                <span className="text-xs font-mono text-emerald-600 dark:text-emerald-400">
-                  Safe-Browsing Validated
-                </span>
-              </div>
+                {/* Add New Link Form */}
+                <form
+                  onSubmit={handleAddLink}
+                  className="p-4 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-3"
+                >
+                  <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                    {lang === 'id'
+                      ? `Tambah Tautan ke ${activePage.pageSlug ? `/${activePage.pageSlug}` : 'Halaman Utama'}`
+                      : `Add Link to ${activePage.pageSlug ? `/${activePage.pageSlug}` : 'Main Page'}`}
+                  </div>
 
-              <div className="divide-y divide-slate-200 dark:divide-[#232732] border border-slate-200 dark:border-[#232732] rounded-lg">
-                {profile.links.map((item) => (
-                  <div
-                    key={item.id}
-                    className="p-3.5 flex items-center justify-between gap-4"
-                  >
-                    <div className="min-w-0">
-                      <div className="text-xs sm:text-sm font-semibold text-slate-900 dark:text-white truncate">
-                        {item.title}
-                      </div>
-                      <div className="text-[11px] font-mono text-blue-600 dark:text-blue-400 truncate">
-                        {item.url}
-                      </div>
-                      <div className="text-[11px] text-slate-500 truncate">
-                        {item.subtitle} · {item.clicks} clicks
-                      </div>
-                    </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <input
+                      type="text"
+                      value={newLinkTitle}
+                      onChange={(e) => setNewLinkTitle(e.target.value)}
+                      placeholder={lang === 'id' ? 'Judul tombol (misal: Portofolio)' : 'Button title (e.g. Portfolio)'}
+                      className="px-3 py-2 text-xs bg-white dark:bg-[#13161C] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                    <input
+                      type="text"
+                      value={newLinkSubtitle}
+                      onChange={(e) => setNewLinkSubtitle(e.target.value)}
+                      placeholder={lang === 'id' ? 'Subjudul (opsional)' : 'Subtitle (optional)'}
+                      className="px-3 py-2 text-xs bg-white dark:bg-[#13161C] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row gap-2.5">
+                    <input
+                      type="text"
+                      value={newLinkUrl}
+                      onChange={(e) => setNewLinkUrl(e.target.value)}
+                      placeholder="https://... atau mailto:..."
+                      className="flex-1 px-3 py-2 text-xs font-mono bg-white dark:bg-[#13161C] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
                     <button
-                      type="button"
-                      onClick={() => handleRemoveBioLink(item.id)}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 cursor-pointer shrink-0"
-                      aria-label="Remove link"
+                      type="submit"
+                      className="min-h-[36px] px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      <Trash2 className="w-4 h-4" />
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>{lang === 'id' ? 'Tambah Tautan' : 'Add Link'}</span>
                     </button>
                   </div>
-                ))}
-              </div>
 
-              <form
-                onSubmit={handleAddBioLink}
-                className="pt-3 border-t border-slate-200 dark:border-[#232732] space-y-3"
-              >
-                <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
-                  {lang === 'id' ? '+ Tambah Kartu Tautan Baru' : '+ Add New Link Card'}
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <input
-                    type="text"
-                    required
-                    value={newLinkTitle}
-                    onChange={(e) => setNewLinkTitle(e.target.value)}
-                    placeholder="Judul tautan (mis. GitHub / Portofolio)"
-                    className="px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                  />
-                  <input
-                    type="text"
-                    required
-                    value={newLinkUrl}
-                    onChange={(e) => setNewLinkUrl(e.target.value)}
-                    placeholder="https://... atau https://imy.li/s/..."
-                    className="px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                  />
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <input
-                    type="text"
-                    value={newLinkSubtitle}
-                    onChange={(e) => setNewLinkSubtitle(e.target.value)}
-                    placeholder="Deskripsi singkat (opsional)"
-                    className="sm:col-span-2 px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                  />
-                  <select
-                    value={newLinkCategory}
-                    onChange={(e) =>
-                      setNewLinkCategory(
-                        e.target.value as BioLinkCardItem['category']
-                      )
-                    }
-                    className="px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                  >
-                    <option value="project">Project</option>
-                    <option value="social">Social</option>
-                    <option value="contact">Contact</option>
-                    <option value="document">Document</option>
-                  </select>
-                </div>
-                <button
-                  type="submit"
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg cursor-pointer"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>{lang === 'id' ? 'Tambahkan Tautan' : 'Add Link'}</span>
-                </button>
-              </form>
-            </div>
-          </div>
-
-          {/* Right: Live Mini Static Preview Card (5 cols) */}
-          <div className="lg:col-span-5 bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 space-y-5">
-            <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#232732] pb-3">
-              <div className="text-xs font-mono text-slate-500">
-                https://{user}.{domain}
-              </div>
-              <button
-                type="button"
-                onClick={() => handleCopyText(`https://${user}.${domain}`)}
-                className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
-              >
-                <Copy className="w-3.5 h-3.5" />
-                <span>Copy URL</span>
-              </button>
-            </div>
-
-            <div className="p-5 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-4">
-              <div className="space-y-1">
-                <div className="w-11 h-11 rounded-lg bg-blue-600 text-white font-display font-bold flex items-center justify-center text-base">
-                  {user.slice(0, 2).toUpperCase()}
-                </div>
-                <h3 className="pt-2 text-base font-bold text-slate-900 dark:text-white font-display">
-                  {profile.displayName}
-                </h3>
-                <div className="text-xs font-mono text-slate-500">
-                  @{user} · {profile.location}
-                </div>
-                <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed pt-1">
-                  {profile.bio}
-                </p>
-              </div>
-
-              {profile.showPublicEmailButton && (
-                <div className="p-3 rounded-lg bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60 flex items-center justify-between gap-2 text-xs">
-                  <span className="font-mono text-blue-700 dark:text-blue-300 truncate">
-                    {profile.publicEmailAlias}
-                  </span>
-                  <span className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 shrink-0">
-                    VZ Mail Verified
-                  </span>
-                </div>
-              )}
-
-              <div className="space-y-2">
-                {profile.links.map((item) => (
-                  <div
-                    key={item.id}
-                    className="p-3 rounded-lg bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] flex items-center justify-between gap-3"
-                  >
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
-                        {item.title}
-                      </div>
-                      <div className="text-[11px] text-slate-500 truncate">
-                        {item.subtitle}
-                      </div>
+                  {newLinkError && (
+                    <div className="text-xs text-rose-600 dark:text-rose-400">
+                      {newLinkError}
                     </div>
-                    <ExternalLink className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                  </div>
-                ))}
-              </div>
-            </div>
+                  )}
+                </form>
 
-            <div className="pt-2 flex items-center justify-between text-xs text-slate-500">
-              <a
-                href="https://myaccount.vz.gay"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-blue-600 dark:text-blue-400 hover:underline"
-              >
-                myaccount.vz.gay
-              </a>
-              <button
-                type="button"
-                onClick={onDeactivateLinks}
-                className="hover:text-rose-600 cursor-pointer"
-              >
-                {lang === 'id' ? 'Nonaktifkan VZ Links' : 'Disable VZ Links'}
-              </button>
-            </div>
+                {/* Active Page Links List */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between text-xs text-slate-500">
+                    <span>
+                      {lang === 'id' ? 'Daftar Tautan Halaman Ini' : 'Links on This Page'}
+                    </span>
+                    <span className="font-mono tabular-nums">
+                      {activePage.links.length} {lang === 'id' ? 'item' : 'items'}
+                    </span>
+                  </div>
+
+                  {activePage.links.length === 0 ? (
+                    <div className="p-8 rounded-xl border border-dashed border-slate-300 dark:border-[#2A303E] text-center space-y-1">
+                      <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                        {lang === 'id'
+                          ? 'Belum ada tautan di halaman ini'
+                          : 'No links on this page yet'}
+                      </div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        {lang === 'id'
+                          ? 'Tambahkan tautan pertama Anda di formulir atas, lalu klik Simpan & Publikasikan.'
+                          : 'Add your first link using the form above, then click Save & Publish.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {activePage.links.map((link, idx) => (
+                        <div
+                          key={link.id}
+                          className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 ${
+                            link.enabled
+                              ? 'bg-[#FAFAFA] dark:bg-[#0B0D11] border-slate-200 dark:border-[#232732]'
+                              : 'bg-slate-100/60 dark:bg-[#0B0D11]/50 border-slate-200/70 dark:border-[#1E222D] opacity-65'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1 space-y-0.5">
+                            <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                              {link.title}
+                            </div>
+                            {link.subtitle && (
+                              <div className="text-[11px] text-slate-500 truncate">
+                                {link.subtitle}
+                              </div>
+                            )}
+                            <div className="text-[11px] font-mono text-slate-400 truncate">
+                              {link.url}
+                              <span aria-hidden="true"> · </span>
+                              <span className="tabular-nums">
+                                {link.clicks.toLocaleString()}{' '}
+                                {lang === 'id' ? 'klik' : 'clicks'}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleMoveLink(idx, -1)}
+                              disabled={idx === 0}
+                              aria-label="Move up"
+                              className="p-1.5 text-slate-500 hover:text-slate-900 dark:hover:text-white disabled:opacity-30 rounded-md hover:bg-slate-200/70 dark:hover:bg-[#1B202B] cursor-pointer"
+                            >
+                              <ArrowUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleMoveLink(idx, 1)}
+                              disabled={idx === activePage.links.length - 1}
+                              aria-label="Move down"
+                              className="p-1.5 text-slate-500 hover:text-slate-900 dark:hover:text-white disabled:opacity-30 rounded-md hover:bg-slate-200/70 dark:hover:bg-[#1B202B] cursor-pointer"
+                            >
+                              <ArrowDown className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleLink(link.id)}
+                              aria-label={link.enabled ? 'Hide link' : 'Show link'}
+                              className="p-1.5 text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 rounded-md hover:bg-slate-200/70 dark:hover:bg-[#1B202B] cursor-pointer"
+                            >
+                              {link.enabled ? (
+                                <Eye className="w-3.5 h-3.5" />
+                              ) : (
+                                <EyeOff className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteLink(link.id)}
+                              aria-label="Delete link"
+                              className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 rounded-md hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : editorTab === 'profile_socials' ? (
+              <div className="space-y-6">
+                {/* Main Profile Details */}
+                <div className="space-y-3 pb-5 border-b border-slate-200 dark:border-[#232732]">
+                  <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                    {lang === 'id'
+                      ? `Identitas Profil Utama (${username}.${domain})`
+                      : `Main Profile Identity (${username}.${domain})`}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-400">
+                        {lang === 'id' ? 'Nama Tampilan' : 'Display Name'}
+                      </label>
+                      <input
+                        type="text"
+                        value={workspace.displayName}
+                        onChange={(e) =>
+                          updateWorkspace((prev) => ({
+                            ...prev,
+                            displayName: e.target.value,
+                          }))
+                        }
+                        className="w-full px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-400">
+                        {lang === 'id' ? 'Headline / Profesi' : 'Headline / Role'}
+                      </label>
+                      <input
+                        type="text"
+                        value={workspace.headline}
+                        onChange={(e) =>
+                          updateWorkspace((prev) => ({
+                            ...prev,
+                            headline: e.target.value,
+                          }))
+                        }
+                        placeholder={
+                          lang === 'id'
+                            ? 'Contoh: Kreator Digital & Engineer'
+                            : 'Example: Digital Creator & Engineer'
+                        }
+                        className="w-full px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="block text-xs font-medium text-slate-600 dark:text-slate-400">
+                      {lang === 'id' ? 'Bio Singkat' : 'Short Bio'}
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={workspace.bio}
+                      onChange={(e) =>
+                        updateWorkspace((prev) => ({ ...prev, bio: e.target.value }))
+                      }
+                      placeholder={
+                        lang === 'id'
+                          ? 'Ceritakan singkat tentang Anda atau tautan yang Anda bagikan.'
+                          : 'Write a short bio about yourself or what you share.'
+                      }
+                      className="w-full px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="block text-xs font-medium text-slate-600 dark:text-slate-400">
+                      {lang === 'id' ? 'URL Foto Profil (Opsional)' : 'Avatar Image URL (Optional)'}
+                    </label>
+                    <input
+                      type="url"
+                      value={workspace.avatarUrl}
+                      onChange={(e) =>
+                        updateWorkspace((prev) => ({
+                          ...prev,
+                          avatarUrl: e.target.value,
+                        }))
+                      }
+                      placeholder="https://..."
+                      className="w-full px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+                </div>
+
+                {/* All 16 Social Media Platform Icons */}
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                      {lang === 'id'
+                        ? 'Ikon Sosial Media (Tampil Otomatis Hanya Jika Diisi)'
+                        : 'Social Media Icons (Shown Publicly Only When Filled)'}
+                    </div>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      {lang === 'id'
+                        ? 'Semua platform sudah tersedia di sini. Kolom yang dibiarkan kosong tidak akan ditampilkan di halaman publik Anda.'
+                        : 'All platforms are built in. Any field left blank stays hidden on your public bio page.'}
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {SOCIAL_PLATFORMS.map((platform) => {
+                      const val = workspace.socials[platform.id] || '';
+                      const isFilled = val.trim().length > 0;
+                      return (
+                        <div key={platform.id} className="space-y-1">
+                          <label className="flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-300">
+                            <span className="inline-flex items-center gap-1.5">
+                              <SocialIconGlyph
+                                platform={platform.id}
+                                className={`w-3.5 h-3.5 ${
+                                  isFilled
+                                    ? 'text-blue-600 dark:text-blue-400'
+                                    : 'text-slate-400'
+                                }`}
+                              />
+                              <span>{platform.label}</span>
+                            </span>
+                            {isFilled && (
+                              <span className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400">
+                                {lang === 'id' ? 'Tampil' : 'Visible'}
+                              </span>
+                            )}
+                          </label>
+                          <input
+                            type="text"
+                            value={val}
+                            onChange={(e) =>
+                              handleUpdateSocial(platform.id, e.target.value)
+                            }
+                            placeholder={platform.placeholder}
+                            className="w-full px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              /* Theme & Button Style per Page */
+              <div className="space-y-6">
+                <div className="space-y-2.5">
+                  <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                    {lang === 'id'
+                      ? `Tema Warna untuk ${activePage.pageSlug ? `/${activePage.pageSlug}` : 'Halaman Utama'}`
+                      : `Color Theme for ${activePage.pageSlug ? `/${activePage.pageSlug}` : 'Main Page'}`}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {(Object.keys(BIO_THEMES) as BioThemeId[]).map((themeKey) => {
+                      const t = BIO_THEMES[themeKey];
+                      const selected = activePage.themeId === themeKey;
+                      return (
+                        <button
+                          key={themeKey}
+                          type="button"
+                          onClick={() =>
+                            updateActivePage((p) => ({ ...p, themeId: themeKey }))
+                          }
+                          className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
+                            selected
+                              ? 'border-blue-600 ring-2 ring-blue-600/30 bg-blue-50/40 dark:bg-blue-950/20'
+                              : 'border-slate-200 dark:border-[#232732] hover:border-slate-400 dark:hover:border-slate-600'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span
+                              className="w-5 h-5 rounded-md border border-slate-300 dark:border-slate-700 shrink-0"
+                              style={{ backgroundColor: t.swatchHex }}
+                            />
+                            <span className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                              {t.name}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="space-y-2.5">
+                  <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                    {lang === 'id' ? 'Gaya Tombol Tautan' : 'Link Button Style'}
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    {(
+                      [
+                        {
+                          id: 'rounded',
+                          label: lang === 'id' ? 'Solid Rounded' : 'Solid Rounded',
+                        },
+                        {
+                          id: 'sharp',
+                          label: lang === 'id' ? 'Solid Sharp' : 'Solid Sharp',
+                        },
+                        {
+                          id: 'outline',
+                          label: lang === 'id' ? 'Outline Minimal' : 'Minimal Outline',
+                        },
+                      ] as { id: BioButtonStyle; label: string }[]
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() =>
+                          updateActivePage((p) => ({ ...p, buttonStyle: opt.id }))
+                        }
+                        className={`p-3 rounded-xl border text-xs font-semibold transition-colors cursor-pointer ${
+                          activePage.buttonStyle === opt.id
+                            ? 'border-blue-600 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-950/20'
+                            : 'border-slate-200 dark:border-[#232732] text-slate-700 dark:text-slate-300 hover:border-slate-400'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
-      ) : (
-        /* SHORTLINK MANAGER: imy.li/s/$URL */
-        <div className="space-y-6">
-          <form
-            onSubmit={handleCreateShortlink}
-            className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 space-y-4"
+
+        {/* Right Live Mobile Preview */}
+        <div className="lg:col-span-5 lg:sticky lg:top-20 space-y-3">
+          <div className="flex items-center justify-between text-xs text-slate-500 font-mono">
+            <span>{lang === 'id' ? 'Pratinjau Langsung' : 'Live Preview'}</span>
+            <span className="truncate max-w-[240px]">https://{activePublicPath}</span>
+          </div>
+
+          <div
+            className={`rounded-2xl border p-6 sm:p-7 min-h-[520px] flex flex-col justify-between transition-colors ${activeTheme.pageBgClass} ${activeTheme.dividerClass}`}
           >
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h2 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white font-display">
-                  {lang === 'id'
-                    ? `Buat Shortlink Baru (${domain}/s/$URL)`
-                    : `Create New Shortlink (${domain}/s/$URL)`}
-                </h2>
-                <p className="text-xs text-slate-500">
-                  {lang === 'id'
-                    ? `Dialihkan cepat via HTTP 301 oleh Cloudflare Worker yang sama dengan mail.vz.gay dan ${user}.${domain}.`
-                    : `Fast HTTP 301 edge redirect handled by the same Cloudflare Worker serving mail.vz.gay and ${user}.${domain}.`}
-                </p>
-              </div>
-              <div className="flex items-center gap-1.5 text-xs font-mono text-emerald-600 dark:text-emerald-400">
-                <ShieldCheck className="w-4 h-4" />
-                <span>Anti-Phishing Route Guard</span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-              <div className="md:col-span-3">
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  Slug ({domain}/s/...):
-                </label>
-                <div className="flex items-center">
-                  <span className="px-2.5 py-2 text-xs font-mono bg-slate-100 dark:bg-[#1B202B] border border-r-0 border-slate-300 dark:border-[#2A303D] rounded-l-lg text-slate-500">
-                    /s/
-                  </span>
-                  <input
-                    type="text"
-                    value={newSlug}
-                    onChange={(e) => setNewSlug(e.target.value)}
-                    placeholder="cv-2026"
-                    className="w-full px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-r-lg text-slate-900 dark:text-white"
+            <div className="space-y-6">
+              {/* Profile Header */}
+              <div className="flex flex-col items-center text-center space-y-2.5">
+                {workspace.avatarUrl ? (
+                  <img
+                    src={workspace.avatarUrl}
+                    alt={workspace.displayName || username}
+                    className="w-16 h-16 rounded-2xl object-cover border border-white/15"
                   />
-                </div>
-              </div>
-
-              <div className="md:col-span-5">
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  URL Tujuan (Target URL):
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={newTargetUrl}
-                  onChange={(e) => setNewTargetUrl(e.target.value)}
-                  placeholder="https://docs.vz.gay/proposal-2026"
-                  className="w-full px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div className="md:col-span-4">
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  Label / Judul (Opsional):
-                </label>
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                  <input
-                    type="text"
-                    value={newShortTitle}
-                    onChange={(e) => setNewShortTitle(e.target.value)}
-                    placeholder="Proposal & CV"
-                    className="flex-1 min-h-[44px] sm:min-h-0 px-3 py-2 text-xs bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                  />
-                  <button
-                    type="submit"
-                    className="min-h-[44px] sm:min-h-0 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg whitespace-nowrap shrink-0 cursor-pointer"
+                ) : (
+                  <div
+                    className={`w-16 h-16 rounded-2xl flex items-center justify-center text-lg font-bold font-display ${activeTheme.avatarClass}`}
                   >
-                    {lang === 'id' ? '+ Buat Shortlink' : '+ Create'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </form>
-
-          {/* Shortlinks High-Density Data Grid */}
-          <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-slate-200 dark:border-[#232732] flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white font-display">
-                <Link2 className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                <span>
-                  {lang === 'id'
-                    ? `Daftar Shortlink Aktif (${domain}/s/$URL)`
-                    : `Active Shortlinks (${domain}/s/$URL)`}
-                </span>
-              </div>
-              <span className="text-xs font-mono tabular-nums text-slate-500">
-                {shortlinks.length} routes
-              </span>
-            </div>
-
-            {/* Mobile Responsive Shortlink Cards (< md) */}
-            <div className="md:hidden divide-y divide-slate-200 dark:divide-[#232732]">
-              {shortlinks.map((item) => {
-                const fullShort = `https://${domain}/s/${item.slug}`;
-                return (
-                  <div key={item.slug} className="p-4 space-y-3">
-                    <div className="flex items-start justify-between gap-2 min-w-0">
-                      <div className="min-w-0">
-                        <div className="font-mono text-sm font-semibold text-blue-600 dark:text-blue-400 truncate">
-                          {domain}/s/{item.slug}
-                        </div>
-                        <div className="text-xs font-medium text-slate-900 dark:text-white truncate mt-0.5">
-                          {item.title}
-                        </div>
-                        <div className="text-[11px] font-mono text-slate-500 truncate mt-0.5">
-                          {item.targetUrl}
-                        </div>
-                      </div>
-                      <span className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-300 shrink-0">
-                        {item.clicks} clicks
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-3 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleTestShortlinkClick(item)}
-                        className="min-h-[40px] px-2.5 py-2 text-xs font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 rounded-lg cursor-pointer"
-                      >
-                        Test 301
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleCopyText(fullShort)}
-                        className="min-h-[40px] px-2.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg cursor-pointer"
-                      >
-                        Copy
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteShortlink(item.slug)}
-                        className="min-h-[40px] px-2.5 py-2 text-xs font-medium text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/30 rounded-lg cursor-pointer"
-                      >
-                        Delete
-                      </button>
-                    </div>
+                    {(workspace.displayName || username).slice(0, 2).toUpperCase()}
                   </div>
-                );
-              })}
+                )}
+
+                <div className="space-y-1">
+                  <h2 className={`text-lg font-bold font-display ${activeTheme.titleClass}`}>
+                    {activePage.pageSlug === ''
+                      ? workspace.displayName || username
+                      : activePage.title || `/${activePage.pageSlug}`}
+                  </h2>
+                  {activePage.pageSlug === '' && workspace.headline && (
+                    <div className={`text-xs font-medium ${activeTheme.mutedClass}`}>
+                      {workspace.headline}
+                    </div>
+                  )}
+                  {(activePage.pageSlug === '' ? workspace.bio : activePage.description) && (
+                    <p
+                      className={`text-xs leading-relaxed max-w-[36ch] mx-auto ${activeTheme.bodyClass}`}
+                    >
+                      {activePage.pageSlug === ''
+                        ? workspace.bio
+                        : activePage.description}
+                    </p>
+                  )}
+                </div>
+
+                {/* Filled Social Icons Only */}
+                {activePage.showSocials && filledSocials.length > 0 && (
+                  <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                    {filledSocials.map((platform) => (
+                      <span
+                        key={platform.id}
+                        title={platform.label}
+                        className={`w-9 h-9 rounded-lg border inline-flex items-center justify-center ${activeTheme.socialBtnClass}`}
+                      >
+                        <SocialIconGlyph platform={platform.id} className="w-4 h-4" />
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Links Stack */}
+              <div className="space-y-2.5">
+                {activePage.links.filter((l) => l.enabled).length === 0 ? (
+                  <div
+                    className={`p-5 rounded-xl border border-dashed text-center text-xs ${activeTheme.dividerClass} ${activeTheme.mutedClass}`}
+                  >
+                    {lang === 'id'
+                      ? 'Belum ada tautan aktif di halaman ini.'
+                      : 'No active links on this page yet.'}
+                  </div>
+                ) : (
+                  activePage.links
+                    .filter((l) => l.enabled)
+                    .map((link) => (
+                      <div
+                        key={link.id}
+                        className={`w-full px-4 py-3 border flex items-center justify-between gap-3 transition-colors ${buttonRadiusClass} ${
+                          activePage.buttonStyle === 'outline'
+                            ? activeTheme.linkOutlineClass
+                            : activeTheme.linkSolidClass
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold truncate">
+                            {link.title}
+                          </div>
+                          {link.subtitle && (
+                            <div className="text-[11px] opacity-75 truncate">
+                              {link.subtitle}
+                            </div>
+                          )}
+                        </div>
+                        <ExternalLink className="w-3.5 h-3.5 opacity-70 shrink-0" />
+                      </div>
+                    ))
+                )}
+              </div>
             </div>
 
-            {/* Desktop High-Density Shortlink Table (>= md) */}
-            <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-slate-200 dark:border-[#232732] bg-[#FAFAFA] dark:bg-[#0F131A] text-slate-500">
-                    <th className="py-2.5 pl-5 pr-3 font-medium">Short URL</th>
-                    <th className="py-2.5 px-3 font-medium">Label &amp; Target</th>
-                    <th className="py-2.5 px-3 font-medium text-right">Clicks</th>
-                    <th className="py-2.5 pl-3 pr-5 font-medium text-right">
-                      Aksi
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-[#232732]">
-                  {shortlinks.map((item) => {
-                    const fullShort = `https://${domain}/s/${item.slug}`;
-                    return (
-                      <tr
-                        key={item.slug}
-                        className="h-11 hover:bg-slate-50 dark:hover:bg-[#171B24]"
-                      >
-                        <td className="py-2.5 pl-5 pr-3 font-mono font-semibold text-blue-600 dark:text-blue-400 whitespace-nowrap">
-                          {domain}/s/{item.slug}
-                        </td>
-                        <td className="py-2.5 px-3 max-w-md truncate">
-                          <div className="font-medium text-slate-900 dark:text-white truncate">
-                            {item.title}
-                          </div>
-                          <div className="text-[11px] font-mono text-slate-500 truncate">
-                            {item.targetUrl}
-                          </div>
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300">
-                          {item.clicks}
-                        </td>
-                        <td className="py-2.5 pl-3 pr-5 text-right whitespace-nowrap space-x-2">
-                          <button
-                            type="button"
-                            onClick={() => handleTestShortlinkClick(item)}
-                            className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
-                          >
-                            Test 301
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleCopyText(fullShort)}
-                            className="text-xs text-slate-600 dark:text-slate-300 hover:underline cursor-pointer"
-                          >
-                            Copy
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteShortlink(item.slug)}
-                            className="text-xs text-rose-600 dark:text-rose-400 hover:underline cursor-pointer"
-                          >
-                            Delete
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+            {/* Subtle Page Navigation Footer inside Preview */}
+            <div
+              className={`pt-5 mt-6 border-t text-center text-[11px] font-mono ${activeTheme.dividerClass} ${activeTheme.mutedClass}`}
+            >
+              {activePublicPath}
             </div>
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

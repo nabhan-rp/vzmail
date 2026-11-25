@@ -136,8 +136,8 @@ export function MailLinksTopBar({
       label: `${domain}/s/`,
       subtitle:
         lang === 'id'
-          ? 'Pemendek Tautan HTTP 301'
-          : 'Fast HTTP 301 Shortlinks',
+          ? 'Pemendek URL Mandiri'
+          : 'Standalone URL Shortener',
       icon: Scissors,
     },
     {

@@ -1,16 +1,14 @@
 import {
   ArrowRight,
-  CheckCircle2,
   ExternalLink,
-  Globe,
+  Layers,
   Link2,
-  Lock,
+  Palette,
+  Scissors,
   ShieldCheck,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
-import { sanitizeHandle } from '../utils/mailIdentity';
 import type { ActiveHostView } from './MailLinksTopBar';
 
 interface LinksLandingGateProps {
@@ -28,108 +26,74 @@ export function LinksLandingGate({
   onLoginWithAuth0,
   onSelectHost,
 }: LinksLandingGateProps) {
-  const user = session.isAuthenticated ? session.username : 'fadhil';
+  const user = session.isAuthenticated ? session.username : 'username';
   const domain = session.primaryDomain || 'imy.li';
-  const [previewHandle, setPreviewHandle] = useState(user);
-  const [previewSlug, setPreviewSlug] = useState('portfolio');
-
-  useEffect(() => {
-    setPreviewHandle(user);
-  }, [user]);
-
-  const cleanHandle = sanitizeHandle(previewHandle || user);
-  const cleanSlug =
-    previewSlug
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9-_]/g, '') || 'portfolio';
 
   return (
-    <div className="max-w-[1280px] mx-auto px-4 sm:px-6 py-10 sm:py-14 space-y-12">
-      {/* Hero Split for links.vz.gay */}
-      <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
-        <div className="lg:col-span-7 flex flex-col justify-between bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 sm:p-8">
+    <div className="max-w-[1200px] mx-auto px-4 sm:px-6 py-10 sm:py-14 space-y-10">
+      {/* 2-Card Split: Multi-Page Bio (Left) + Standalone URL Shortener Direct Access (Right) */}
+      <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+        {/* Left: Multi-Page Link-in-Bio Activation */}
+        <div className="lg:col-span-7 flex flex-col justify-between bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 sm:p-8 space-y-6">
           <div className="space-y-4">
             <div className="text-xs font-mono text-slate-500 dark:text-slate-400">
               <span>links.vz.gay</span>
               <span aria-hidden="true"> · </span>
-              <span>
-                {user}.{domain} Link-in-Bio
-              </span>
+              <span>{user}.{domain}</span>
               <span aria-hidden="true"> · </span>
-              <span>{domain}/s/$URL Shortener</span>
+              <span>{user}.{domain}/$PAGE</span>
             </div>
 
             <h1 className="text-2xl sm:text-4xl font-bold tracking-tight text-slate-900 dark:text-white font-display text-balance">
               {lang === 'id'
-                ? `Halaman Link-in-Bio ${user}.${domain} & Pemendek Tautan ${domain}/s/`
-                : `Static PSL-Safe Link-in-Bio (${user}.${domain}) & ${domain}/s/ Shortlinks`}
+                ? `Multi-Page Link-in-Bio ${user}.${domain}`
+                : `Multi-Page Link-in-Bio on ${user}.${domain}`}
             </h1>
 
-            <p className="text-sm sm:text-base text-slate-600 dark:text-slate-300 leading-relaxed max-w-[65ch]">
+            <p className="text-sm sm:text-base text-slate-600 dark:text-slate-300 leading-relaxed max-w-[62ch]">
               {lang === 'id'
-                ? `VZ Links memasangkan identitas SSO Anda dengan subdomain profil statis ${user}.${domain} (terisolasi tanpa cookie lintas-subdomain & bebas skrip pihak ketiga) serta pemendek URL cepat di ${domain}/s/$URL—berjalan dalam satu Cloudflare Worker terpadu bersama VZ Mail.`
-                : `VZ Links pairs your universal SSO handle with a curated static ${user}.${domain} profile (zero cross-subdomain cookie collision, no arbitrary third-party JS) and ultra-fast ${domain}/s/$URL shortlinks—powered by the same 2-in-1 Cloudflare Worker as VZ Mail.`}
+                ? `Buat halaman profil utama di ${user}.${domain} lengkap dengan ikon sosial media (hanya tampil jika diisi), serta tambah banyak sub-halaman terpisah seperti ${user}.${domain}/promo atau ${user}.${domain}/kerja dengan tema warna sendiri.`
+                : `Build your main profile on ${user}.${domain} with optional social icons (shown only when filled), plus unlimited separate sub-pages like ${user}.${domain}/promo or ${user}.${domain}/work with custom color themes.`}
             </p>
           </div>
 
-          <div className="mt-8 pt-6 border-t border-slate-200 dark:border-[#232732] space-y-4">
+          <div className="pt-6 border-t border-slate-200 dark:border-[#232732] space-y-4">
             {session.isAuthenticated ? (
               <>
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-400">
-                  <div>
-                    <span className="font-semibold text-slate-900 dark:text-white">
-                      {lang === 'id'
-                        ? 'Akun SSO Universal (accounts.vz.gay):'
-                        : 'Universal SSO Account (accounts.vz.gay):'}
-                    </span>{' '}
-                    <span className="font-mono">{session.username}</span>
-                  </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-400">
                   <span>
+                    {lang === 'id' ? 'Akun SSO:' : 'SSO Account:'}{' '}
+                    <strong className="font-mono text-slate-900 dark:text-white">
+                      {session.username}
+                    </strong>
+                  </span>
+                  <span className="font-mono">
                     {lang === 'id'
-                      ? `Status VZ Links: Belum Diaktifkan (Opt-In)`
-                      : `VZ Links Status: Not Activated Yet (Opt-In)`}
+                      ? 'Status Bio: Belum Diaktifkan'
+                      : 'Bio Status: Not Activated'}
                   </span>
                 </div>
 
-                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                  {lang === 'id'
-                    ? `Jika Anda mengaktifkan VZ Links terlebih dahulu, sistem juga akan menawarkan opsi apakah Anda ingin sekalian mengonfigurasi kotak surat email ${user}@${domain} di VZ Mail.`
-                    : `If you activate VZ Links first, you will also be prompted with the option to configure your paired ${user}@${domain} email mailbox on VZ Mail.`}
-                </p>
-
-                <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2.5 sm:gap-3 pt-1">
+                <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2.5">
                   <button
                     type="button"
                     onClick={onActivateLinks}
-                    className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <Link2 className="w-4 h-4 shrink-0" />
-                    <span className="truncate">
+                    <span>
                       {lang === 'id'
-                        ? `Aktifkan ${user}.${domain} & Shortlink`
-                        : `Activate ${user}.${domain} & Shortlinks`}
+                        ? `Aktifkan Studio Bio (${user}.${domain})`
+                        : `Activate Bio Studio (${user}.${domain})`}
                     </span>
                     <ArrowRight className="w-4 h-4 shrink-0" />
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => onSelectHost('mail.vz.gay')}
-                    className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232936] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    <span className="truncate">
-                      {lang === 'id'
-                        ? `Buka VZ Mail (${user}@${domain})`
-                        : `Explore VZ Mail (${user}@${domain})`}
-                    </span>
                   </button>
 
                   <a
                     href="https://myaccount.vz.gay"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="min-h-[44px] inline-flex items-center justify-center sm:justify-start gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0"
+                    className="min-h-[44px] inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors"
                   >
                     <span>myaccount.vz.gay</span>
                     <ExternalLink className="w-3.5 h-3.5" />
@@ -137,207 +101,128 @@ export function LinksLandingGate({
                 </div>
               </>
             ) : (
-              <div className="space-y-3">
-                <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300">
-                  {lang === 'id'
-                    ? 'Masuk langsung dengan akun SSO accounts.vz.gay untuk mengklaim subdomain Link-in-Bio dan membuat shortlink.'
-                    : 'Sign in directly with your accounts.vz.gay SSO identity to claim your Link-in-Bio subdomain and create shortlinks.'}
-                </p>
-                <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2.5 sm:gap-3">
-                  <button
-                    type="button"
-                    onClick={onLoginWithAuth0}
-                    className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    <span>
-                      {lang === 'id'
-                        ? 'Masuk dengan SSO'
-                        : 'Sign In with SSO'}
-                    </span>
-                    <ArrowRight className="w-4 h-4 shrink-0" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onSelectHost('mail.vz.gay')}
-                    className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg hover:bg-slate-200 dark:hover:bg-[#232936] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    {lang === 'id'
-                      ? 'Buka mail.vz.gay'
-                      : 'Open mail.vz.gay'}
-                  </button>
-                </div>
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={onLoginWithAuth0}
+                  className="min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <span>
+                    {lang === 'id' ? 'Masuk SSO untuk Atur Bio' : 'Sign In SSO to Manage Bio'}
+                  </span>
+                  <ArrowRight className="w-4 h-4 shrink-0" />
+                </button>
               </div>
             )}
           </div>
         </div>
 
-        {/* Right Column: Interactive Namespace Simulator ($USERNAME.imy.li + imy.li/s/$URL) */}
+        {/* Right: Direct Shortcut to Standalone URL Shortener (imy.li/s/) */}
         <div className="lg:col-span-5 flex flex-col justify-between bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 sm:p-8 space-y-6">
-          <div className="space-y-2">
-            <div className="text-xs font-mono text-slate-500 dark:text-slate-400">
-              <span>Unified {domain} Namespace</span>
+          <div className="space-y-3">
+            <div className="text-xs font-mono text-emerald-600 dark:text-emerald-400">
+              <span>{domain}/s/$RANDOM</span>
               <span aria-hidden="true"> · </span>
-              <span>1:1 Identity Pairing</span>
+              <span>{lang === 'id' ? 'Bisa Tanpa Login' : 'No Login Needed'}</span>
             </div>
-            <h2 className="text-lg font-bold text-slate-900 dark:text-white font-display">
+
+            <h2 className="text-xl font-bold text-slate-900 dark:text-white font-display">
               {lang === 'id'
-                ? 'Simulasi Pairing Bio, Email & Shortlink'
-                : 'Live Bio, Email & Shortlink Pairing Preview'}
+                ? `Pemendek URL Mandiri (${domain}/s/)`
+                : `Standalone URL Shortener (${domain}/s/)`}
             </h2>
-            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+
+            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
               {lang === 'id'
-                ? 'Satu username SSO mengunci alamat email dan subdomain bio yang sama agar tidak dapat diklaim orang lain.'
-                : 'A single SSO username reserves both the matching email handle and link-in-bio subdomain so no one else can claim it.'}
+                ? `Ingin menyingkat tautan panjang saja tanpa mengatur halaman Bio? Tempel URL tujuan Anda untuk langsung membuat tautan pendek acak atau custom slug dengan penghitung klik nyata.`
+                : `Just want to shorten a long URL without setting up a Bio page? Paste any destination link to generate a random code or custom slug with real click tracking immediately.`}
             </p>
           </div>
 
           <div className="space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  Handle ($USERNAME):
-                </label>
-                <input
-                  type="text"
-                  value={previewHandle}
-                  onChange={(e) => setPreviewHandle(e.target.value)}
-                  className="w-full min-h-[44px] sm:min-h-0 px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  Shortlink Slug ($URL):
-                </label>
-                <input
-                  type="text"
-                  value={previewSlug}
-                  onChange={(e) => setPreviewSlug(e.target.value)}
-                  className="w-full min-h-[44px] sm:min-h-0 px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                />
-              </div>
-            </div>
-
-            <div className="p-4 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-2.5 text-xs font-mono">
-              <div className="flex items-center justify-between gap-2 min-w-0">
-                <span className="text-slate-500 shrink-0">Link-in-Bio URL:</span>
-                <span className="font-semibold text-blue-600 dark:text-blue-400 truncate">
-                  https://{cleanHandle}.{domain}
+            <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1.5 text-xs font-mono">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500">Random Code:</span>
+                <span className="text-slate-900 dark:text-white">
+                  https://{domain}/s/k8m2x9
                 </span>
               </div>
-              <div className="flex items-center justify-between gap-2 min-w-0">
-                <span className="text-slate-500 shrink-0">Paired Email (1:1):</span>
-                <span className="text-slate-800 dark:text-slate-200 truncate">
-                  {cleanHandle}@{domain}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 min-w-0">
-                <span className="text-slate-500 shrink-0">Shortlink Format:</span>
-                <span className="text-emerald-600 dark:text-emerald-400 truncate">
-                  https://{domain}/s/{cleanSlug}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 min-w-0">
-                <span className="text-slate-500 shrink-0">Cookie Isolation:</span>
-                <span className="text-slate-800 dark:text-slate-200 truncate">
-                  Zero-Cookie Static (PSL Safe)
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500">Custom Slug:</span>
+                <span className="text-blue-600 dark:text-blue-400">
+                  https://{domain}/s/slug-anda
                 </span>
               </div>
             </div>
-          </div>
 
-          <div className="pt-3 border-t border-slate-200 dark:border-[#232732] flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-            <span>Wildcard SSL &amp; Edge Routing:</span>
-            <span className="font-mono text-emerald-600 dark:text-emerald-400">
-              *.{domain}/* + {domain}/s/*
-            </span>
+            <button
+              type="button"
+              onClick={() => onSelectHost('shortlinks')}
+              className="w-full min-h-[44px] px-4 py-2.5 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 dark:bg-emerald-600 dark:hover:bg-emerald-700 rounded-lg inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            >
+              <Scissors className="w-4 h-4 shrink-0" />
+              <span>
+                {lang === 'id'
+                  ? `Buka Pemendek URL (${domain}/s/)`
+                  : `Open URL Shortener (${domain}/s/)`}
+              </span>
+              <ArrowRight className="w-4 h-4 shrink-0" />
+            </button>
           </div>
         </div>
       </section>
 
-      {/* 3-Column Technical Architecture Highlights for VZ Links */}
+      {/* 3-Column Feature Summary */}
       <section className="grid grid-cols-1 md:grid-cols-3 gap-5">
         <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-5 space-y-2">
           <div className="flex items-center justify-between text-xs text-slate-500 font-mono">
-            <span>01. Zero Cookie Collision</span>
-            <Lock className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+            <span>01. Multi-Page Bio</span>
+            <Layers className="w-4 h-4 text-blue-600 dark:text-blue-400" />
           </div>
           <h3 className="text-sm font-bold text-slate-900 dark:text-white font-display">
             {lang === 'id'
-              ? 'Aman Tanpa Public Suffix List (PSL)'
-              : 'Safe Without Public Suffix List (PSL)'}
+              ? 'Banyak Halaman dalam 1 Subdomain'
+              : 'Multiple Pages on 1 Subdomain'}
           </h3>
           <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
             {lang === 'id'
-              ? `Semua sesi login disimpan terpusat di accounts.vz.gay & links.vz.gay, sedangkan halaman ${user}.${domain} dirender murni statis tanpa custom JS bebas dari user.`
-              : `All login sessions stay strictly on accounts.vz.gay & links.vz.gay while ${user}.${domain} renders as curated static HTML with zero arbitrary user JavaScript.`}
+              ? `Pisahkan daftar tautan utama di ${user}.${domain} dengan sub-halaman khusus seperti /kerja, /toko, atau /event.`
+              : `Separate your main profile links on ${user}.${domain} from dedicated sub-pages like /work, /shop, or /events.`}
           </p>
         </div>
 
         <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-5 space-y-2">
           <div className="flex items-center justify-between text-xs text-slate-500 font-mono">
-            <span>02. Shortlink Namespace</span>
-            <Globe className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+            <span>02. Tema & Sosmed</span>
+            <Palette className="w-4 h-4 text-violet-600 dark:text-violet-400" />
           </div>
           <h3 className="text-sm font-bold text-slate-900 dark:text-white font-display">
             {lang === 'id'
-              ? `Pemendek URL ${domain}/s/$URL`
-              : `Fast ${domain}/s/$URL Redirection`}
+              ? '16 Ikon Sosmed & Tema per Halaman'
+              : '16 Social Icons & Per-Page Themes'}
           </h3>
           <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
             {lang === 'id'
-              ? `Path ${domain}/s/$URL menangani pengalihan HTTP 301 berkecepatan tinggi di edge Cloudflare lengkap dengan penghitung klik tabular-nums.`
-              : `Root path ${domain}/s/$URL performs instant HTTP 301 edge redirects backed by Cloudflare KV with real-time click counters.`}
+              ? 'Semua ikon sosmed populer siap pakai dan hanya tampil bila Anda mengisi tautannya. Setiap halaman bebas memilih tema warna sendiri.'
+              : 'All popular social icons are built in and stay hidden until filled. Every bio page can use its own color palette and button style.'}
           </p>
         </div>
 
         <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-5 space-y-2">
           <div className="flex items-center justify-between text-xs text-slate-500 font-mono">
-            <span>03. Anti-Phishing Guard</span>
+            <span>03. Cloudflare Edge</span>
             <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
           </div>
           <h3 className="text-sm font-bold text-slate-900 dark:text-white font-display">
             {lang === 'id'
-              ? 'Proteksi Reputasi Domain & Email'
-              : 'Shared Domain Reputation Protection'}
+              ? 'Tervalidasi & Tanpa Data Palsu'
+              : 'Validated & Real Edge Storage'}
           </h3>
           <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
             {lang === 'id'
-              ? `Seluruh tautan di ${user}.${domain} dan ${domain}/s/ divalidasi otomatis agar domain ${domain} tetap bersih dari suspend registry maupun filter spam email.`
-              : `Every URL on ${user}.${domain} and ${domain}/s/ is validated automatically so the shared ${domain} root maintains clean registry and email deliverability reputation.`}
+              ? 'Setiap tautan dan hitungan klik disimpan nyata di Cloudflare D1 / KV dengan validasi URL otomatis.'
+              : 'Every link and click counter is stored directly in Cloudflare D1 / KV with automatic URL validation.'}
           </p>
-        </div>
-      </section>
-
-      {/* Quick Preview CTA to Public Bio */}
-      <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2 text-xs font-mono text-emerald-600 dark:text-emerald-400">
-            <CheckCircle2 className="w-4 h-4" />
-            <span>Live Static Subdomain Preview Ready</span>
-          </div>
-          <h3 className="text-base font-bold text-slate-900 dark:text-white font-display">
-            {lang === 'id'
-              ? `Ingin melihat tampilan halaman publik ${user}.${domain} terlebih dahulu?`
-              : `Want to preview how the public ${user}.${domain} page looks first?`}
-          </h3>
-        </div>
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 sm:gap-3 shrink-0">
-          <button
-            type="button"
-            onClick={() => onSelectHost('bio_public')}
-            className="min-h-[44px] sm:min-h-0 px-4 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#252C3B] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            {lang === 'id'
-              ? `Pratinjau ${user}.${domain}`
-              : `Preview ${user}.${domain}`}
-          </button>
-          <button
-            type="button"
-            onClick={onActivateLinks}
-            className="min-h-[44px] sm:min-h-0 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            {lang === 'id' ? 'Aktifkan & Edit Bio' : 'Activate & Edit Bio'}
-          </button>
         </div>
       </section>
     </div>

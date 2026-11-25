@@ -39,6 +39,19 @@ import {
   sanitizeSlug,
   stripHeaderInjection,
 } from '../src/utils/mailSecurity.ts';
+import {
+  generateShortlinkCode,
+  isValidBioThemeId,
+  isValidButtonStyle,
+  sanitizeBioWorkspaceInput,
+  sanitizePageSlug,
+  sanitizeShortlinkSlugInput,
+  sanitizeSocialsMap,
+  type BioLinkItem,
+  type BioPageRecord,
+  type BioWorkspaceData,
+  type ShortlinkRecord,
+} from '../src/utils/linksModel.ts';
 
 export interface CloudflareSendEmailMessage {
   from: string | { email: string; name?: string };
@@ -58,6 +71,7 @@ export interface WorkerEnv {
   ASSETS?: Fetcher;
   MAIL_TRANSIT_KV?: KVNamespace;
   LINKS_KV?: KVNamespace;
+  LINKS_DB?: D1Database;
   SEND_EMAIL?: SendEmailBinding;
   APP_DOMAIN?: string;
   LINKS_DOMAIN?: string;
@@ -634,6 +648,457 @@ export function canonicalizeImyRecipient(rawAddress: string): {
   };
 }
 
+type LinksStorageEngine = 'cloudflare-d1' | 'cloudflare-kv' | 'none';
+
+function getLinksStorageEngine(env: WorkerEnv): LinksStorageEngine {
+  if (env.LINKS_DB) return 'cloudflare-d1';
+  if (env.LINKS_KV) return 'cloudflare-kv';
+  return 'none';
+}
+
+function parseKvShortlinkRecord(slug: string, raw: string | null): ShortlinkRecord | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Partial<ShortlinkRecord>;
+      const safeTarget = sanitizeExternalUrl(String(parsed.targetUrl || ''), {
+        allowMailto: false,
+        blockPrivateHosts: true,
+      });
+      if (!safeTarget) return null;
+      return {
+        slug: parsed.slug || slug,
+        ownerUser: typeof parsed.ownerUser === 'string' && parsed.ownerUser ? parsed.ownerUser : null,
+        title: String(parsed.title || '').slice(0, 120),
+        targetUrl: safeTarget,
+        isCustomSlug: Boolean(parsed.isCustomSlug),
+        clicks: Math.max(0, Number(parsed.clicks) || 0),
+        createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : new Date().toISOString(),
+        lastClickedAt: typeof parsed.lastClickedAt === 'string' ? parsed.lastClickedAt : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+  // Backward compatibility for legacy plain-string KV values (`short:<slug>` -> `https://...`)
+  const safeTarget = sanitizeExternalUrl(trimmed, {
+    allowMailto: false,
+    blockPrivateHosts: true,
+  });
+  if (!safeTarget) return null;
+  return {
+    slug,
+    ownerUser: null,
+    title: '',
+    targetUrl: safeTarget,
+    isCustomSlug: true,
+    clicks: 0,
+    createdAt: new Date().toISOString(),
+    lastClickedAt: null,
+  };
+}
+
+async function getShortlinkRecord(env: WorkerEnv, slug: string): Promise<ShortlinkRecord | null> {
+  if (env.LINKS_DB) {
+    const row = await env.LINKS_DB.prepare(
+      'SELECT slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at FROM shortlinks WHERE slug = ? LIMIT 1'
+    )
+      .bind(slug)
+      .first<{
+        slug: string;
+        owner_user: string | null;
+        title: string | null;
+        target_url: string;
+        is_custom_slug: number;
+        clicks: number;
+        created_at: string;
+        last_clicked_at: string | null;
+      }>();
+    if (row) {
+      return {
+        slug: row.slug,
+        ownerUser: row.owner_user || null,
+        title: row.title || '',
+        targetUrl: row.target_url,
+        isCustomSlug: Boolean(row.is_custom_slug),
+        clicks: Math.max(0, Number(row.clicks) || 0),
+        createdAt: row.created_at,
+        lastClickedAt: row.last_clicked_at || null,
+      };
+    }
+  }
+  if (env.LINKS_KV) {
+    const raw = await env.LINKS_KV.get(`short:${slug}`, 'text');
+    return parseKvShortlinkRecord(slug, raw);
+  }
+  return null;
+}
+
+async function listShortlinksByOwner(env: WorkerEnv, ownerUser: string): Promise<ShortlinkRecord[]> {
+  if (env.LINKS_DB) {
+    const res = await env.LINKS_DB.prepare(
+      'SELECT slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at FROM shortlinks WHERE owner_user = ? ORDER BY created_at DESC LIMIT 200'
+    )
+      .bind(ownerUser)
+      .all<{
+        slug: string;
+        owner_user: string | null;
+        title: string | null;
+        target_url: string;
+        is_custom_slug: number;
+        clicks: number;
+        created_at: string;
+        last_clicked_at: string | null;
+      }>();
+    return (res.results || []).map((row) => ({
+      slug: row.slug,
+      ownerUser: row.owner_user || null,
+      title: row.title || '',
+      targetUrl: row.target_url,
+      isCustomSlug: Boolean(row.is_custom_slug),
+      clicks: Math.max(0, Number(row.clicks) || 0),
+      createdAt: row.created_at,
+      lastClickedAt: row.last_clicked_at || null,
+    }));
+  }
+  if (env.LINKS_KV) {
+    const idx = await env.LINKS_KV.get<string[]>(`short_idx:${ownerUser}`, 'json');
+    const slugs = Array.isArray(idx) ? idx.slice(0, 200) : [];
+    const records = await Promise.all(slugs.map((s) => getShortlinkRecord(env, s)));
+    return records
+      .filter((r): r is ShortlinkRecord => Boolean(r))
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+  return [];
+}
+
+async function saveShortlinkRecord(env: WorkerEnv, record: ShortlinkRecord): Promise<void> {
+  if (env.LINKS_DB) {
+    await env.LINKS_DB.prepare(
+      'INSERT INTO shortlinks (slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    )
+      .bind(
+        record.slug,
+        record.ownerUser,
+        record.title,
+        record.targetUrl,
+        record.isCustomSlug ? 1 : 0,
+        record.clicks,
+        record.createdAt,
+        record.lastClickedAt
+      )
+      .run();
+    return;
+  }
+  if (env.LINKS_KV) {
+    await env.LINKS_KV.put(`short:${record.slug}`, JSON.stringify(record));
+    if (record.ownerUser) {
+      const existing = await env.LINKS_KV.get<string[]>(`short_idx:${record.ownerUser}`, 'json');
+      const next = [record.slug, ...(Array.isArray(existing) ? existing.filter((s) => s !== record.slug) : [])].slice(
+        0,
+        200
+      );
+      await env.LINKS_KV.put(`short_idx:${record.ownerUser}`, JSON.stringify(next));
+    }
+  }
+}
+
+async function deleteShortlinkRecord(
+  env: WorkerEnv,
+  slug: string,
+  ownerUser: string | null
+): Promise<{ deleted: boolean; forbidden?: boolean }> {
+  const existing = await getShortlinkRecord(env, slug);
+  if (!existing) {
+    return { deleted: false };
+  }
+  if (existing.ownerUser && ownerUser && existing.ownerUser !== ownerUser) {
+    return { deleted: false, forbidden: true };
+  }
+  if (env.LINKS_DB) {
+    await env.LINKS_DB.prepare('DELETE FROM shortlinks WHERE slug = ?').bind(slug).run();
+  }
+  if (env.LINKS_KV) {
+    await env.LINKS_KV.delete(`short:${slug}`);
+    if (existing.ownerUser) {
+      const idx = await env.LINKS_KV.get<string[]>(`short_idx:${existing.ownerUser}`, 'json');
+      if (Array.isArray(idx)) {
+        await env.LINKS_KV.put(
+          `short_idx:${existing.ownerUser}`,
+          JSON.stringify(idx.filter((s) => s !== slug))
+        );
+      }
+    }
+  }
+  return { deleted: true };
+}
+
+async function incrementShortlinkClick(env: WorkerEnv, slug: string): Promise<void> {
+  const now = new Date().toISOString();
+  try {
+    if (env.LINKS_DB) {
+      await env.LINKS_DB.prepare(
+        'UPDATE shortlinks SET clicks = clicks + 1, last_clicked_at = ? WHERE slug = ?'
+      )
+        .bind(now, slug)
+        .run();
+      return;
+    }
+    if (env.LINKS_KV) {
+      const rec = await getShortlinkRecord(env, slug);
+      if (rec) {
+        await env.LINKS_KV.put(
+          `short:${slug}`,
+          JSON.stringify({ ...rec, clicks: rec.clicks + 1, lastClickedAt: now })
+        );
+      }
+    }
+  } catch (err) {
+    logError('shortlink_click_increment_failed', err, { slug });
+  }
+}
+
+async function getBioWorkspaceFromStorage(
+  env: WorkerEnv,
+  username: string
+): Promise<BioWorkspaceData | null> {
+  if (env.LINKS_DB) {
+    const profile = await env.LINKS_DB.prepare(
+      'SELECT username, display_name, headline, bio, avatar_url, socials_json, updated_at FROM bio_profiles WHERE username = ? LIMIT 1'
+    )
+      .bind(username)
+      .first<{
+        username: string;
+        display_name: string;
+        headline: string;
+        bio: string;
+        avatar_url: string;
+        socials_json: string;
+        updated_at: string;
+      }>();
+
+    if (profile) {
+      const pagesRes = await env.LINKS_DB.prepare(
+        'SELECT id, page_slug, title, description, theme_id, button_style, show_socials, is_published, updated_at FROM bio_pages WHERE username = ? ORDER BY CASE WHEN page_slug = "" THEN 0 ELSE 1 END, page_slug ASC'
+      )
+        .bind(username)
+        .all<{
+          id: string;
+          page_slug: string;
+          title: string;
+          description: string;
+          theme_id: string;
+          button_style: string;
+          show_socials: number;
+          is_published: number;
+          updated_at: string;
+        }>();
+
+      const linksRes = await env.LINKS_DB.prepare(
+        'SELECT id, page_id, title, subtitle, url, sort_order, enabled, clicks FROM bio_links WHERE username = ? ORDER BY sort_order ASC'
+      )
+        .bind(username)
+        .all<{
+          id: string;
+          page_id: string;
+          title: string;
+          subtitle: string;
+          url: string;
+          sort_order: number;
+          enabled: number;
+          clicks: number;
+        }>();
+
+      const linksByPage = new Map<string, BioLinkItem[]>();
+      for (const l of linksRes.results || []) {
+        const list = linksByPage.get(l.page_id) || [];
+        list.push({
+          id: l.id,
+          title: l.title,
+          subtitle: l.subtitle || '',
+          url: l.url,
+          sortOrder: Number(l.sort_order) || 0,
+          enabled: Boolean(l.enabled),
+          clicks: Math.max(0, Number(l.clicks) || 0),
+        });
+        linksByPage.set(l.page_id, list);
+      }
+
+      let parsedSocials: unknown = {};
+      try {
+        parsedSocials = JSON.parse(profile.socials_json || '{}');
+      } catch {
+        parsedSocials = {};
+      }
+
+      const pages: BioPageRecord[] = (pagesRes.results || []).map((p) => ({
+        id: p.id,
+        pageSlug: p.page_slug || '',
+        title: p.title || profile.display_name || username,
+        description: p.description || '',
+        themeId: isValidBioThemeId(p.theme_id) ? p.theme_id : 'midnight_slate',
+        buttonStyle: isValidButtonStyle(p.button_style) ? p.button_style : 'rounded',
+        showSocials: Boolean(p.show_socials),
+        isPublished: Boolean(p.is_published),
+        links: linksByPage.get(p.id) || [],
+        updatedAt: p.updated_at || profile.updated_at,
+      }));
+
+      return {
+        username: profile.username,
+        displayName: profile.display_name || username,
+        headline: profile.headline || '',
+        bio: profile.bio || '',
+        avatarUrl: profile.avatar_url || '',
+        socials: sanitizeSocialsMap(parsedSocials),
+        pages,
+        updatedAt: profile.updated_at,
+        configured: true,
+      };
+    }
+  }
+
+  if (env.LINKS_KV) {
+    const raw = await env.LINKS_KV.get<BioWorkspaceData>(`bio:${username}`, 'json');
+    if (raw && typeof raw === 'object' && Array.isArray(raw.pages)) {
+      return { ...raw, username, configured: true };
+    }
+  }
+
+  return null;
+}
+
+async function saveBioWorkspaceToStorage(
+  env: WorkerEnv,
+  username: string,
+  rawInput: unknown
+): Promise<BioWorkspaceData> {
+  const existing = await getBioWorkspaceFromStorage(env, username);
+  const existingClicks = new Map<string, number>();
+  if (existing) {
+    for (const p of existing.pages) {
+      for (const l of p.links) {
+        existingClicks.set(l.id, l.clicks);
+      }
+    }
+  }
+
+  const sanitized = sanitizeBioWorkspaceInput(username, rawInput, existingClicks);
+
+  if (env.LINKS_DB) {
+    const stmts: D1PreparedStatement[] = [
+      env.LINKS_DB.prepare(
+        'INSERT INTO bio_profiles (username, display_name, headline, bio, avatar_url, socials_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(username) DO UPDATE SET display_name = excluded.display_name, headline = excluded.headline, bio = excluded.bio, avatar_url = excluded.avatar_url, socials_json = excluded.socials_json, updated_at = excluded.updated_at'
+      ).bind(
+        sanitized.username,
+        sanitized.displayName,
+        sanitized.headline,
+        sanitized.bio,
+        sanitized.avatarUrl,
+        JSON.stringify(sanitized.socials),
+        sanitized.updatedAt
+      ),
+      env.LINKS_DB.prepare('DELETE FROM bio_links WHERE username = ?').bind(sanitized.username),
+      env.LINKS_DB.prepare('DELETE FROM bio_pages WHERE username = ?').bind(sanitized.username),
+    ];
+
+    for (const page of sanitized.pages) {
+      stmts.push(
+        env.LINKS_DB.prepare(
+          'INSERT INTO bio_pages (id, username, page_slug, title, description, theme_id, button_style, show_socials, is_published, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ).bind(
+          page.id,
+          sanitized.username,
+          page.pageSlug,
+          page.title,
+          page.description,
+          page.themeId,
+          page.buttonStyle,
+          page.showSocials ? 1 : 0,
+          page.isPublished ? 1 : 0,
+          page.updatedAt
+        )
+      );
+
+      for (const link of page.links) {
+        stmts.push(
+          env.LINKS_DB.prepare(
+            'INSERT INTO bio_links (id, page_id, username, title, subtitle, url, sort_order, enabled, clicks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(
+            link.id,
+            page.id,
+            sanitized.username,
+            link.title,
+            link.subtitle,
+            link.url,
+            link.sortOrder,
+            link.enabled ? 1 : 0,
+            link.clicks
+          )
+        );
+      }
+    }
+
+    await env.LINKS_DB.batch(stmts);
+    return sanitized;
+  }
+
+  if (env.LINKS_KV) {
+    await env.LINKS_KV.put(`bio:${sanitized.username}`, JSON.stringify(sanitized));
+  }
+
+  return sanitized;
+}
+
+async function incrementBioLinkClickInStorage(
+  env: WorkerEnv,
+  username: string,
+  pageSlug: string,
+  linkId: string
+): Promise<number | null> {
+  if (env.LINKS_DB) {
+    await env.LINKS_DB.prepare(
+      'UPDATE bio_links SET clicks = clicks + 1 WHERE id = ? AND username = ?'
+    )
+      .bind(linkId, username)
+      .run();
+    const row = await env.LINKS_DB.prepare(
+      'SELECT clicks FROM bio_links WHERE id = ? AND username = ? LIMIT 1'
+    )
+      .bind(linkId, username)
+      .first<{ clicks: number }>();
+    return row ? Number(row.clicks) || 0 : null;
+  }
+
+  if (env.LINKS_KV) {
+    const workspace = await getBioWorkspaceFromStorage(env, username);
+    if (!workspace) return null;
+    let updatedClicks: number | null = null;
+    const nextPages = workspace.pages.map((p) => {
+      if (p.pageSlug !== pageSlug) return p;
+      return {
+        ...p,
+        links: p.links.map((l) => {
+          if (l.id !== linkId) return l;
+          updatedClicks = l.clicks + 1;
+          return { ...l, clicks: updatedClicks };
+        }),
+      };
+    });
+    if (updatedClicks !== null) {
+      await env.LINKS_KV.put(
+        `bio:${username}`,
+        JSON.stringify({ ...workspace, pages: nextPages })
+      );
+    }
+    return updatedClicks;
+  }
+
+  return null;
+}
+
 async function handleApiRequest(
   request: Request,
   url: URL,
@@ -652,9 +1117,11 @@ async function handleApiRequest(
       retentionPolicy: 'EPHEMERAL_POP_AND_PURGE',
       outboundProviderMode: (env.OUTBOUND_PROVIDER || 'auto').trim().toLowerCase(),
       activeOutboundProvider,
+      linksStorageEngine: getLinksStorageEngine(env),
       bindings: {
         mailTransitKv: Boolean(env.MAIL_TRANSIT_KV),
         linksKv: Boolean(env.LINKS_KV),
+        linksDb: Boolean(env.LINKS_DB),
         sendEmail: caps.cloudflare,
         cpanelRelay: caps.cpanelRelay,
         resendApi: caps.resend,
@@ -666,8 +1133,19 @@ async function handleApiRequest(
     });
   }
 
-  // Optional constant-time auth gate for /api/mail/* and mutating /api/links/*
-  if (url.pathname.startsWith('/api/mail/') || (url.pathname.startsWith('/api/links/') && request.method !== 'GET')) {
+  // Optional constant-time auth gate for /api/mail/* and bio/delete endpoints.
+  // Public shortlink creation (POST /api/links/shortlinks) and click tracking (POST /api/links/bio-click)
+  // stay publicly accessible for both guest visitors and logged-in SSO users.
+  const isPublicLinksWrite =
+    (url.pathname === '/api/links/shortlinks' && request.method === 'POST') ||
+    (url.pathname === '/api/links/bio-click' && request.method === 'POST');
+
+  if (
+    url.pathname.startsWith('/api/mail/') ||
+    (url.pathname.startsWith('/api/links/') &&
+      request.method !== 'GET' &&
+      !isPublicLinksWrite)
+  ) {
     const authorized = await verifyRelayAuth(request, env);
     if (!authorized) {
       return jsonResponse({ ok: false, error: 'Unauthorized relay token.' }, 401);
@@ -1069,32 +1547,130 @@ async function handleApiRequest(
     });
   }
 
-  // 6. Optional KV-backed Shortlink API (`/api/links/shortlinks`)
+  // 6. Standalone Shortlink API (`/api/links/shortlinks`) — D1 primary + KV fallback
+  if (url.pathname === '/api/links/shortlinks' && request.method === 'GET') {
+    const ownerParam = url.searchParams.get('owner')?.trim() || '';
+    const slugsParam = url.searchParams.get('slugs')?.trim() || '';
+    const storageEngine = getLinksStorageEngine(env);
+
+    if (ownerParam) {
+      const owner = sanitizeHandle(ownerParam);
+      const items = await listShortlinksByOwner(env, owner);
+      return jsonResponse({ ok: true, storageEngine, items });
+    }
+
+    if (slugsParam) {
+      const slugs = slugsParam
+        .split(',')
+        .map((s) => sanitizeSlug(s))
+        .filter(Boolean)
+        .slice(0, 50);
+      const fetched = await Promise.all(slugs.map((s) => getShortlinkRecord(env, s)));
+      const items = fetched.filter((item): item is ShortlinkRecord => Boolean(item));
+      return jsonResponse({ ok: true, storageEngine, items });
+    }
+
+    return jsonResponse({ ok: true, storageEngine, items: [] });
+  }
+
   if (url.pathname === '/api/links/shortlinks' && request.method === 'POST') {
-    const parsed = await readBoundedJson<{ slug?: string; targetUrl?: string }>(request);
+    const parsed = await readBoundedJson<{
+      targetUrl?: string;
+      customSlug?: string;
+      slug?: string;
+      title?: string;
+      ownerUser?: string | null;
+    }>(request);
     if (!parsed.ok) {
       return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
     }
-    const slug = sanitizeSlug(String(parsed.data.slug || ''));
-    const safeTarget = sanitizeExternalUrl(String(parsed.data.targetUrl || ''), {
+
+    const rawTarget = String(parsed.data.targetUrl || '').trim();
+    const withProtocol = /^https?:\/\//i.test(rawTarget) ? rawTarget : `https://${rawTarget}`;
+    const safeTarget = sanitizeExternalUrl(withProtocol, {
       allowMailto: false,
       blockPrivateHosts: true,
     });
-    if (!slug || !safeTarget) {
+    if (!safeTarget) {
       return jsonResponse(
-        { ok: false, error: 'Slug atau URL tujuan tidak valid / tidak aman.' },
+        {
+          ok: false,
+          error: 'URL tujuan tidak valid atau diblokir. Gunakan alamat https:// publik yang sah.',
+        },
         400
       );
     }
-    if (env.LINKS_KV) {
-      await env.LINKS_KV.put(`short:${slug}`, safeTarget);
+
+    const rawCustom = String(parsed.data.customSlug ?? parsed.data.slug ?? '').trim();
+    let finalSlug = '';
+    let isCustomSlug = false;
+
+    if (rawCustom) {
+      const cleanCustom = sanitizeShortlinkSlugInput(rawCustom);
+      if (!cleanCustom) {
+        return jsonResponse(
+          {
+            ok: false,
+            error:
+              'Custom slug harus 2–48 karakter (huruf kecil, angka, tanda hubung) dan bukan kata sistem.',
+          },
+          400
+        );
+      }
+      const existing = await getShortlinkRecord(env, cleanCustom);
+      if (existing) {
+        return jsonResponse(
+          {
+            ok: false,
+            error: `Slug "${cleanCustom}" sudah dipakai. Pilih slug lain atau kosongkan untuk kode acak.`,
+          },
+          409
+        );
+      }
+      finalSlug = cleanCustom;
+      isCustomSlug = true;
+    } else {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        const candidate = generateShortlinkCode(attempt < 4 ? 6 : 7);
+        const existing = await getShortlinkRecord(env, candidate);
+        if (!existing) {
+          finalSlug = candidate;
+          break;
+        }
+      }
+      if (!finalSlug) {
+        finalSlug = generateShortlinkCode(8);
+      }
     }
-    return jsonResponse({
-      ok: true,
-      kvBound: Boolean(env.LINKS_KV),
-      slug,
+
+    const ownerUser =
+      typeof parsed.data.ownerUser === 'string' && parsed.data.ownerUser.trim()
+        ? sanitizeHandle(parsed.data.ownerUser)
+        : null;
+    const title = stripHeaderInjection(String(parsed.data.title || ''), 120);
+
+    const record: ShortlinkRecord = {
+      slug: finalSlug,
+      ownerUser,
+      title,
       targetUrl: safeTarget,
-    });
+      isCustomSlug,
+      clicks: 0,
+      createdAt: new Date().toISOString(),
+      lastClickedAt: null,
+    };
+
+    await saveShortlinkRecord(env, record);
+
+    return jsonResponse(
+      {
+        ok: true,
+        storageEngine: getLinksStorageEngine(env),
+        shortUrl: `https://${primaryDomain}/s/${record.slug}`,
+        record,
+      },
+      201
+    );
   }
 
   if (url.pathname.startsWith('/api/links/shortlinks/') && request.method === 'DELETE') {
@@ -1102,10 +1678,72 @@ async function handleApiRequest(
     if (!slug) {
       return jsonResponse({ ok: false, error: 'Slug tidak valid.' }, 400);
     }
-    if (env.LINKS_KV) {
-      await env.LINKS_KV.delete(`short:${slug}`);
+    const ownerParam = url.searchParams.get('owner')?.trim();
+    const ownerUser = ownerParam ? sanitizeHandle(ownerParam) : null;
+    const result = await deleteShortlinkRecord(env, slug, ownerUser);
+    if (result.forbidden) {
+      return jsonResponse(
+        { ok: false, error: 'Anda tidak memiliki izin menghapus shortlink milik akun lain.' },
+        403
+      );
     }
-    return jsonResponse({ ok: true, kvBound: Boolean(env.LINKS_KV), deletedSlug: slug });
+    return jsonResponse({
+      ok: true,
+      storageEngine: getLinksStorageEngine(env),
+      deletedSlug: slug,
+      deleted: result.deleted,
+    });
+  }
+
+  // 7. Multi-Page Link-in-Bio API (`/api/links/bio/:username` & `/api/links/bio-click`)
+  if (url.pathname.startsWith('/api/links/bio/') && request.method === 'GET') {
+    const rawUser = decodeURIComponent(url.pathname.replace('/api/links/bio/', '').split('/')[0] || '');
+    const username = sanitizeHandle(rawUser);
+    const data = await getBioWorkspaceFromStorage(env, username);
+    return jsonResponse({
+      ok: true,
+      storageEngine: getLinksStorageEngine(env),
+      configured: Boolean(data),
+      username,
+      data,
+    });
+  }
+
+  if (url.pathname.startsWith('/api/links/bio/') && request.method === 'PUT') {
+    const rawUser = decodeURIComponent(url.pathname.replace('/api/links/bio/', '').split('/')[0] || '');
+    const username = sanitizeHandle(rawUser);
+    const parsed = await readBoundedJson<Record<string, unknown>>(request);
+    if (!parsed.ok) {
+      return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
+    }
+    const saved = await saveBioWorkspaceToStorage(env, username, parsed.data);
+    return jsonResponse({
+      ok: true,
+      storageEngine: getLinksStorageEngine(env),
+      configured: true,
+      data: saved,
+    });
+  }
+
+  if (url.pathname === '/api/links/bio-click' && request.method === 'POST') {
+    const parsed = await readBoundedJson<{
+      username?: string;
+      pageSlug?: string;
+      linkId?: string;
+    }>(request);
+    if (!parsed.ok) {
+      return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
+    }
+    const username = sanitizeHandle(String(parsed.data.username || ''));
+    const pageSlug = sanitizePageSlug(String(parsed.data.pageSlug || '')) ?? '';
+    const linkId = String(parsed.data.linkId || '')
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .slice(0, 80);
+    if (!linkId) {
+      return jsonResponse({ ok: false, error: 'linkId tidak valid.' }, 400);
+    }
+    const clicks = await incrementBioLinkClickInStorage(env, username, pageSlug, linkId);
+    return jsonResponse({ ok: true, clicks });
   }
 
   return jsonResponse({ ok: false, error: 'Endpoint API tidak ditemukan.' }, 404);
@@ -1115,7 +1753,7 @@ export default {
   async fetch(
     request: Request,
     env: WorkerEnv,
-    _ctx: ExecutionContext
+    ctx: ExecutionContext
   ): Promise<Response> {
     const url = new URL(request.url);
     const host = url.hostname.toLowerCase();
@@ -1159,22 +1797,26 @@ export default {
       }
 
       // 3. Shortlink Redirector: imy.li/s/$SLUG or links.vz.gay/s/$SLUG
+      //    Uses 302 + no-store so browsers don't cache over real click counting.
       if (url.pathname.startsWith('/s/') && (request.method === 'GET' || request.method === 'HEAD')) {
         const rawSlug = url.pathname.replace(/^\/s\//, '').split('/')[0] || '';
         const slug = sanitizeSlug(rawSlug);
-        if (slug && env.LINKS_KV) {
-          const rawTarget = await env.LINKS_KV.get(`short:${slug}`, 'text');
-          if (rawTarget) {
-            const safeTarget = sanitizeExternalUrl(rawTarget, {
+        if (slug) {
+          const record = await getShortlinkRecord(env, slug);
+          if (record) {
+            const safeTarget = sanitizeExternalUrl(record.targetUrl, {
               allowMailto: false,
               blockPrivateHosts: true,
             });
             if (safeTarget) {
+              if (request.method === 'GET') {
+                ctx.waitUntil(incrementShortlinkClick(env, slug));
+              }
               return new Response(null, {
-                status: 301,
+                status: 302,
                 headers: {
                   Location: safeTarget,
-                  'Cache-Control': 'public, max-age=300',
+                  'Cache-Control': 'no-store, max-age=0',
                   'X-Content-Type-Options': 'nosniff',
                   'Referrer-Policy': 'no-referrer',
                 },

@@ -2,6 +2,7 @@ import {
   Activity,
   CheckCircle2,
   Copy,
+  Database,
   Download,
   Globe,
   Inbox,
@@ -30,9 +31,11 @@ interface HealthSnapshot {
   primaryDomain?: string;
   outboundProviderMode?: string;
   activeOutboundProvider?: string;
+  linksStorageEngine?: string;
   bindings?: {
     mailTransitKv?: boolean;
     linksKv?: boolean;
+    linksDb?: boolean;
     sendEmail?: boolean;
     cpanelRelay?: boolean;
     resendApi?: boolean;
@@ -43,7 +46,7 @@ interface HealthSnapshot {
   timestamp?: string;
 }
 
-type SetupGuideTab = 'inbound' | 'cpanel' | 'api_cloudflare';
+type SetupGuideTab = 'inbound' | 'cpanel' | 'api_cloudflare' | 'd1_upgrade';
 
 const CPANEL_SECRET_FILE_SNIPPET = `<?php
 // Simpan DI LUAR public_html, misal: /home/<username_cpanel>/.vz_relay_secret.php
@@ -71,6 +74,22 @@ npx wrangler secret put BREVO_API_KEY
 # Opsi B3 — Cloudflare Email Sending (Workers Paid $5/bln):
 # Uncomment [[send_email]] di wrangler.toml lalu jalankan:
 npm run cf:deploy`;
+
+const D1_UPGRADE_CLI_CMD = `# 1. Buat database Cloudflare D1 gratis (5 GB storage, 5M read/hari)
+npx wrangler d1 create vzlinks-db
+# -> Salin "database_id" dari output perintah di atas
+
+# 2. Terapkan tabel relasional Multi-Page Bio & Shortlink ke D1 produksi
+npx wrangler d1 execute vzlinks-db --remote --file=cloudflare/schema.sql
+
+# 3. Uncomment blok [[d1_databases]] di wrangler.toml & tempel database_id Anda,
+#    lalu deploy ulang Worker:
+npm run cf:deploy`;
+
+const D1_WRANGLER_BLOCK_SNIPPET = `[[d1_databases]]
+binding = "LINKS_DB"
+database_name = "vzlinks-db"
+database_id = "TEMPEL_DATABASE_ID_DARI_WRANGLER_D1_CREATE"`;
 
 const WRANGLER_ROUTES_SNIPPET = `name = "vzmail"
 main = "cloudflare/worker-mail-links.ts"
@@ -362,18 +381,22 @@ export function WorkerDomainConsole({
             </div>
 
             <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1">
-              <div className="text-[11px] text-slate-500">Links & Bio KV</div>
+              <div className="text-[11px] text-slate-500">Links Storage (D1 / KV)</div>
               <div className="font-mono font-semibold text-slate-900 dark:text-white">
-                LINKS_KV
+                {health?.bindings?.linksDb ? 'LINKS_DB (D1)' : 'LINKS_KV (Fallback)'}
               </div>
               <div
                 className={`text-[11px] font-mono font-semibold ${
-                  health?.bindings?.linksKv
+                  health?.bindings?.linksDb || health?.bindings?.linksKv
                     ? 'text-emerald-600 dark:text-emerald-400'
                     : 'text-amber-600 dark:text-amber-400'
                 }`}
               >
-                {health?.bindings?.linksKv ? 'Connected' : 'Not Bound'}
+                {health?.bindings?.linksDb
+                  ? 'Cloudflare D1 Active'
+                  : health?.bindings?.linksKv
+                    ? 'KV Active · D1 Ready'
+                    : 'Not Bound'}
               </div>
             </div>
 
@@ -481,6 +504,19 @@ export function WorkerDomainConsole({
             >
               <Send className="w-3.5 h-3.5" />
               <span>3. Resend / Brevo / CF Paid</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveGuideTab('d1_upgrade')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                activeGuideTab === 'd1_upgrade'
+                  ? 'bg-amber-600 text-white'
+                  : 'bg-slate-100 dark:bg-[#1B202B] text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-[#252C3B]'
+              }`}
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span>4. Upgrade D1 &amp; Route imy.li/*</span>
             </button>
           </div>
         </div>
@@ -719,6 +755,88 @@ export function WorkerDomainConsole({
                 <pre className="p-3.5 text-[11px] font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">
                   {API_WRANGLER_SECRETS_CMD}
                 </pre>
+              </div>
+            </div>
+          )}
+
+          {activeGuideTab === 'd1_upgrade' && (
+            <div className="space-y-5">
+              <div className="p-3.5 rounded-lg bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 text-xs text-amber-900 dark:text-amber-200 leading-relaxed">
+                <strong>Dual-Storage Otomatis (Cloudflare D1 Utama + LINKS_KV Fallback):</strong>{' '}
+                Saat ini Multi-Page Bio (<span className="font-mono">$USER.imy.li/$PAGE</span>)
+                dan Shortlink (<span className="font-mono">imy.li/s/$RANDOM</span>) sudah langsung
+                berfungsi memakai <span className="font-mono font-semibold">LINKS_KV</span>.
+                Kapan pun siap beralih ke database SQL penuh (klik atomik, ribuan tautan &amp;
+                halaman, gratis hingga 5 GB / 5 juta baca per hari), aktifkan binding{' '}
+                <span className="font-mono font-semibold">LINKS_DB</span> dengan 3 langkah di bawah.
+              </div>
+
+              <ol className="space-y-2.5 text-xs sm:text-sm text-slate-700 dark:text-slate-300 list-decimal pl-5">
+                <li>
+                  <strong>Aktifkan Route Apex <span className="font-mono">imy.li/*</span>:</strong>{' '}
+                  Di Cloudflare Dashboard → zona <span className="font-mono">imy.li</span> →{' '}
+                  <strong>DNS</strong>, pastikan record apex <span className="font-mono">@</span>{' '}
+                  berstatus <strong>Proxied (Orange Cloud)</strong> dan Worker{' '}
+                  <span className="font-mono">vzmail</span> memiliki route{' '}
+                  <span className="font-mono font-semibold">imy.li/*</span> (selain{' '}
+                  <span className="font-mono">*.imy.li/*</span>) agar{' '}
+                  <span className="font-mono">https://imy.li/s/$CODE</span> langsung diarahkan ke
+                  Worker.
+                </li>
+                <li>
+                  <strong>Buat Database D1 &amp; Migrasi Skema:</strong> Jalankan perintah CLI di
+                  kiri menggunakan skema yang sudah tersedia di{' '}
+                  <span className="font-mono font-semibold">cloudflare/schema.sql</span>.
+                </li>
+                <li>
+                  <strong>Bind <span className="font-mono">LINKS_DB</span> di{' '}
+                  <span className="font-mono">wrangler.toml</span> &amp; Deploy:</strong> Uncomment
+                  blok <span className="font-mono">[[d1_databases]]</span> lalu jalankan{' '}
+                  <span className="font-mono">npm run cf:deploy</span>. Worker otomatis mendeteksi{' '}
+                  <span className="font-mono">LINKS_DB</span> tanpa perlu mengubah kode apa pun.
+                </li>
+              </ol>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="rounded-lg border border-slate-200 dark:border-[#232732] overflow-hidden">
+                  <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1016] border-b border-slate-200 dark:border-[#232732] flex items-center justify-between text-xs">
+                    <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-slate-800 dark:text-slate-200">
+                      <Terminal className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                      <span>Wrangler D1 Setup &amp; Migration CLI</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopy('D1 Setup CLI', D1_UPGRADE_CLI_CMD)}
+                      className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </button>
+                  </div>
+                  <pre className="p-3.5 text-[11px] font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">
+                    {D1_UPGRADE_CLI_CMD}
+                  </pre>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 dark:border-[#232732] overflow-hidden">
+                  <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1016] border-b border-slate-200 dark:border-[#232732] flex items-center justify-between text-xs">
+                    <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-slate-800 dark:text-slate-200">
+                      <Database className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                      <span>wrangler.toml — [[d1_databases]]</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopy('D1 wrangler.toml block', D1_WRANGLER_BLOCK_SNIPPET)}
+                      className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </button>
+                  </div>
+                  <pre className="p-3.5 text-[11px] font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">
+                    {D1_WRANGLER_BLOCK_SNIPPET}
+                  </pre>
+                </div>
               </div>
             </div>
           )}
