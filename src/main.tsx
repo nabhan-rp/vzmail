@@ -7,7 +7,7 @@ import { resolveAuth0Config } from './utils/auth0Config.ts';
 
 const auth0Config = resolveAuth0Config();
 
-// Dynamically configure Multi-OS PWA Manifest & Apple Touch Icon per host (VZ Mail vs VZ Links)
+// Dynamically configure Multi-OS PWA Manifest, Favicon, Mask Icon & Apple Touch Icon per host (VZ Mail vs VZ Links)
 if (typeof window !== 'undefined') {
   const isLinks = auth0Config.service === 'links';
   const manifestHref = isLinks
@@ -16,11 +16,24 @@ if (typeof window !== 'undefined') {
   const appleIconHref = isLinks
     ? '/icons/apple-touch-icon-links.png'
     : '/icons/apple-touch-icon-mail.png';
+  const faviconHref = isLinks ? '/icons/links.svg' : '/icons/mail.svg';
+  const maskColor = isLinks ? '#8B5CF6' : '#3B82F6';
   const appTitle = isLinks ? 'VZ Links' : 'VZ Mail';
 
   const manifestEl = document.getElementById('app-manifest') as HTMLLinkElement | null;
   if (manifestEl) {
     manifestEl.href = manifestHref;
+  }
+
+  const faviconEl = document.getElementById('app-favicon') as HTMLLinkElement | null;
+  if (faviconEl) {
+    faviconEl.href = faviconHref;
+  }
+
+  const maskIconEl = document.getElementById('app-mask-icon') as HTMLLinkElement | null;
+  if (maskIconEl) {
+    maskIconEl.href = faviconHref;
+    maskIconEl.setAttribute('color', maskColor);
   }
 
   const appleIconEl = document.getElementById('apple-touch-icon') as HTMLLinkElement | null;
@@ -31,6 +44,11 @@ if (typeof window !== 'undefined') {
   const appleTitleMeta = document.querySelector('meta[name="apple-mobile-web-app-title"]');
   if (appleTitleMeta) {
     appleTitleMeta.setAttribute('content', appTitle);
+  }
+
+  const appNameMeta = document.querySelector('meta[name="application-name"]');
+  if (appNameMeta) {
+    appNameMeta.setAttribute('content', appTitle);
   }
 
   // Register Multi-OS PWA Service Worker only on production HTTPS origins (skip dev & AI Studio preview iframes)

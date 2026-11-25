@@ -58,7 +58,6 @@ interface VzMailWorkspaceProps {
   composeRequested: number;
   onSelectHost: (host: ActiveHostView) => void;
   onOpenVault: () => void;
-  onOpenSso: () => void;
   onDeactivateMail: () => void;
   refreshTrigger: number;
 }
@@ -120,7 +119,6 @@ export function VzMailWorkspace({
   composeRequested,
   onSelectHost,
   onOpenVault,
-  onOpenSso,
   onDeactivateMail,
   refreshTrigger,
 }: VzMailWorkspaceProps) {
@@ -1192,16 +1190,15 @@ export function VzMailWorkspace({
           </div>
         </div>
         <div className="pt-1 flex items-center justify-between text-[11px]">
-          <button
-            type="button"
-            onClick={() => {
-              onCloseDrawer?.();
-              onOpenSso();
-            }}
-            className="text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+          <a
+            href="https://myaccount.vz.gay"
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() => onCloseDrawer?.()}
+            className="text-blue-600 dark:text-blue-400 hover:underline"
           >
             myaccount.vz.gay
-          </button>
+          </a>
           <button
             type="button"
             onClick={() => {

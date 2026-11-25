@@ -38,7 +38,6 @@ interface VzLinksWorkspaceProps {
   onSelectHost: (host: ActiveHostView) => void;
   onActivateMailFromLinks: () => void;
   onDeactivateLinks: () => void;
-  onOpenSso: () => void;
 }
 
 export function VzLinksWorkspace({
@@ -48,7 +47,6 @@ export function VzLinksWorkspace({
   onSelectHost,
   onActivateMailFromLinks,
   onDeactivateLinks,
-  onOpenSso,
 }: VzLinksWorkspaceProps) {
   const user = session.username || 'fadhil';
   const domain = session.primaryDomain || 'imy.li';
@@ -670,13 +668,14 @@ export function VzLinksWorkspace({
             </div>
 
             <div className="pt-2 flex items-center justify-between text-xs text-slate-500">
-              <button
-                type="button"
-                onClick={onOpenSso}
-                className="text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+              <a
+                href="https://myaccount.vz.gay"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 dark:text-blue-400 hover:underline"
               >
                 myaccount.vz.gay
-              </button>
+              </a>
               <button
                 type="button"
                 onClick={onDeactivateLinks}

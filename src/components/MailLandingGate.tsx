@@ -20,7 +20,7 @@ interface MailLandingGateProps {
   lang: Language;
   session: SsoSession;
   onActivateMail: () => void;
-  onOpenSso: () => void;
+  onLoginWithAuth0: () => void;
   onSelectHost: (host: ActiveHostView) => void;
 }
 
@@ -28,7 +28,7 @@ export function MailLandingGate({
   lang,
   session,
   onActivateMail,
-  onOpenSso,
+  onLoginWithAuth0,
   onSelectHost,
 }: MailLandingGateProps) {
   const user = session.isAuthenticated ? session.username : 'fadhil';
@@ -124,33 +124,34 @@ export function MailLandingGate({
                     </span>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={onOpenSso}
-                    className="min-h-[44px] inline-flex items-center justify-center sm:justify-start gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  <a
+                    href="https://myaccount.vz.gay"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="min-h-[44px] inline-flex items-center justify-center sm:justify-start gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0"
                   >
                     <span>myaccount.vz.gay</span>
                     <ExternalLink className="w-3.5 h-3.5" />
-                  </button>
+                  </a>
                 </div>
               </>
             ) : (
               <div className="space-y-3">
                 <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300">
                   {lang === 'id'
-                    ? 'Masuk dengan akun SSO Universal accounts.vz.gay terlebih dahulu. Setelah masuk, Anda dapat memilih untuk mengaktifkan email atau tidak.'
-                    : 'Sign in with your universal accounts.vz.gay SSO account first. Once signed in, you can choose whether or not to activate an email mailbox.'}
+                    ? 'Masuk langsung dengan akun SSO Universal accounts.vz.gay. Setelah masuk, Anda dapat memilih untuk mengaktifkan email atau tidak.'
+                    : 'Sign in directly with your universal accounts.vz.gay SSO account. Once signed in, you can choose whether or not to activate an email mailbox.'}
                 </p>
                 <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2.5 sm:gap-3">
                   <button
                     type="button"
-                    onClick={onOpenSso}
+                    onClick={onLoginWithAuth0}
                     className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <span>
                       {lang === 'id'
-                        ? 'Masuk via SSO accounts.vz.gay'
-                        : 'Sign In via accounts.vz.gay SSO'}
+                        ? 'Masuk dengan SSO'
+                        : 'Sign In with SSO'}
                     </span>
                     <ArrowRight className="w-4 h-4 shrink-0" />
                   </button>
@@ -160,8 +161,8 @@ export function MailLandingGate({
                     className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg hover:bg-slate-200 dark:hover:bg-[#232936] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     {lang === 'id'
-                      ? 'Lihat Landing Page links.vz.gay'
-                      : 'View links.vz.gay Landing Page'}
+                      ? 'Buka links.vz.gay'
+                      : 'Open links.vz.gay'}
                   </button>
                 </div>
               </div>
@@ -367,15 +368,25 @@ export function MailLandingGate({
                 : 'Each service is opt-in and can be enabled or disabled here or via the central myaccount.vz.gay account dashboard.'}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onOpenSso}
-            className="px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#242B3A] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            {lang === 'id'
-              ? 'Kelola Akun SSO & Layanan'
-              : 'Manage SSO & Services'}
-          </button>
+          {session.isAuthenticated ? (
+            <a
+              href="https://myaccount.vz.gay"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#242B3A] rounded-lg transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
+            >
+              <span>myaccount.vz.gay</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          ) : (
+            <button
+              type="button"
+              onClick={onLoginWithAuth0}
+              className="px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {lang === 'id' ? 'Masuk dengan SSO' : 'Sign In with SSO'}
+            </button>
+          )}
         </div>
 
         <div className="overflow-x-auto">

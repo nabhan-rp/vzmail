@@ -39,11 +39,6 @@ const WorkerDomainConsole = lazy(() =>
     default: m.WorkerDomainConsole,
   }))
 );
-const UniversalSsoModal = lazy(() =>
-  import('./components/UniversalSsoModal').then((m) => ({
-    default: m.UniversalSsoModal,
-  }))
-);
 const VaultBackupModal = lazy(() =>
   import('./components/VaultBackupModal').then((m) => ({
     default: m.VaultBackupModal,
@@ -54,6 +49,16 @@ const PwaInstallModal = lazy(() =>
     default: m.PwaInstallModal,
   }))
 );
+
+function detectDefaultServiceView(): 'mail.vz.gay' | 'links.vz.gay' {
+  if (typeof window === 'undefined') return 'mail.vz.gay';
+  const host = window.location.hostname.toLowerCase();
+  const pathname = window.location.pathname.toLowerCase();
+  if (host === 'links.vz.gay' || pathname.startsWith('/links')) {
+    return 'links.vz.gay';
+  }
+  return 'mail.vz.gay';
+}
 
 function detectInitialHostView(): ActiveHostView {
   if (typeof window === 'undefined') return 'mail.vz.gay';
@@ -115,16 +120,12 @@ export default function App() {
   const { lang, setLang } = useLanguage();
   const {
     session,
+    isAdminOwner,
     isLoading: authLoading,
     authError,
-    isPreviewHost,
-    auth0Domain,
-    auth0AppName,
-    auth0ClientId,
     crossOffer,
     loginWithAuth0,
     signupWithAuth0,
-    signIn,
     signOut,
     activateMail,
     deactivateMail,
@@ -137,9 +138,30 @@ export default function App() {
     detectInitialHostView()
   );
 
+  // Guard: If a visitor or non-admin account accesses ?host_mode=worker or worker_console,
+  // automatically redirect them to the main service home page and clean the URL query param.
+  useEffect(() => {
+    if (authLoading) return;
+    if (activeHost === 'worker_console' && !isAdminOwner) {
+      const fallbackView = detectDefaultServiceView();
+      setActiveHost(fallbackView);
+      if (typeof window !== 'undefined') {
+        const url = new URL(window.location.href);
+        if (url.searchParams.get('host_mode') === 'worker') {
+          url.searchParams.delete('host_mode');
+          window.history.replaceState({}, document.title, url.toString());
+        }
+      }
+    }
+  }, [authLoading, activeHost, isAdminOwner]);
+
   // On dedicated production domains (mail.vz.gay vs links.vz.gay), navigate across origins
   // so each service uses its own isolated Auth0 SPA Client ID and origin storage.
   const handleSelectHost = (nextHost: ActiveHostView) => {
+    if (nextHost === 'worker_console' && !isAdminOwner) {
+      setActiveHost(detectDefaultServiceView());
+      return;
+    }
     if (typeof window !== 'undefined') {
       const currentHostname = window.location.hostname.toLowerCase();
       if (currentHostname === 'mail.vz.gay' && nextHost === 'links.vz.gay') {
@@ -153,6 +175,7 @@ export default function App() {
     }
     setActiveHost(nextHost);
   };
+
   const urlBioUser = useMemo(() => detectBioSubdomainUser(), []);
   const {
     os,
@@ -162,12 +185,11 @@ export default function App() {
     promptInstall,
   } = usePwaInstall();
   const [pwaOpen, setPwaOpen] = useState(false);
-  const [ssoOpen, setSsoOpen] = useState(false);
   const [vaultOpen, setVaultOpen] = useState(false);
   const [composeCounter, setComposeCounter] = useState(0);
   const [mailRefreshCounter, setMailRefreshCounter] = useState(0);
 
-  // Keep document title synchronized with the active domain view
+  // Keep document title & tab favicon synchronized with the active domain view
   useEffect(() => {
     const user =
       activeHost === 'bio_public' && urlBioUser
@@ -176,19 +198,49 @@ export default function App() {
           ? session.username
           : 'username';
     const domain = session.primaryDomain || 'imy.li';
+    const isLinksView =
+      activeHost === 'links.vz.gay' ||
+      activeHost === 'shortlinks' ||
+      activeHost === 'bio_public';
+
     if (activeHost === 'links.vz.gay') {
       document.title = `VZ Links (links.vz.gay) — ${user}.${domain} & ${domain}/s/`;
     } else if (activeHost === 'bio_public') {
       document.title = `${user}.${domain} — Link-in-Bio Statis (VZ Links)`;
     } else if (activeHost === 'shortlinks') {
       document.title = `${domain}/s/$URL — Pemendek Tautan (VZ Links)`;
-    } else if (activeHost === 'worker_console') {
+    } else if (activeHost === 'worker_console' && isAdminOwner) {
       document.title = `Worker & Domain Registry (@${domain}) — VZ Mail & Links`;
     } else {
       document.title = `VZ Mail (mail.vz.gay) — Email Lokal Privat @${domain}`;
     }
+
+    const svgHref = isLinksView ? '/icons/links.svg' : '/icons/mail.svg';
+    const maskColor = isLinksView ? '#8B5CF6' : '#3B82F6';
+    const appleHref = isLinksView
+      ? '/icons/apple-touch-icon-links.png'
+      : '/icons/apple-touch-icon-mail.png';
+
+    const faviconEl = document.getElementById('app-favicon') as HTMLLinkElement | null;
+    if (faviconEl && faviconEl.getAttribute('href') !== svgHref) {
+      faviconEl.href = svgHref;
+    }
+
+    const maskIconEl = document.getElementById('app-mask-icon') as HTMLLinkElement | null;
+    if (maskIconEl) {
+      if (maskIconEl.getAttribute('href') !== svgHref) {
+        maskIconEl.href = svgHref;
+      }
+      maskIconEl.setAttribute('color', maskColor);
+    }
+
+    const appleIconEl = document.getElementById('apple-touch-icon') as HTMLLinkElement | null;
+    if (appleIconEl && appleIconEl.getAttribute('href') !== appleHref) {
+      appleIconEl.href = appleHref;
+    }
   }, [
     activeHost,
+    isAdminOwner,
     urlBioUser,
     session.isAuthenticated,
     session.username,
@@ -206,7 +258,15 @@ export default function App() {
           activeHost={activeHost}
           onSelectHost={handleSelectHost}
           session={session}
-          onOpenSso={() => setSsoOpen(true)}
+          isAdminOwner={isAdminOwner}
+          isAuthLoading={authLoading}
+          onLoginWithAuth0={loginWithAuth0}
+          onSignupWithAuth0={signupWithAuth0}
+          onSignOut={signOut}
+          onActivateMail={() => activateMail(true)}
+          onDeactivateMail={deactivateMail}
+          onActivateLinks={() => activateLinks(true)}
+          onDeactivateLinks={deactivateLinks}
           onOpenCompose={() => setComposeCounter((c) => c + 1)}
           onOpenInstall={() => setPwaOpen(true)}
           isInstalled={isInstalled}
@@ -227,14 +287,14 @@ export default function App() {
         {authError && (
           <div className="bg-rose-50 dark:bg-rose-950/40 border-b border-rose-200 dark:border-rose-900/60 px-4 sm:px-6 py-2.5 text-xs text-rose-700 dark:text-rose-300 flex items-center justify-between gap-4">
             <span className="font-mono">
-              Auth0 Error: {authError.message}
+              Auth0: {authError.message}
             </span>
             <button
               type="button"
-              onClick={() => setSsoOpen(true)}
+              onClick={loginWithAuth0}
               className="font-semibold underline shrink-0 cursor-pointer"
             >
-              {lang === 'id' ? 'Lihat Detail SSO' : 'Open SSO Details'}
+              {lang === 'id' ? 'Masuk Ulang SSO' : 'Retry SSO Sign In'}
             </button>
           </div>
         )}
@@ -252,7 +312,6 @@ export default function App() {
                   composeRequested={composeCounter}
                   onSelectHost={handleSelectHost}
                   onOpenVault={() => setVaultOpen(true)}
-                  onOpenSso={() => setSsoOpen(true)}
                   onDeactivateMail={deactivateMail}
                   refreshTrigger={mailRefreshCounter}
                 />
@@ -262,12 +321,12 @@ export default function App() {
                   session={session}
                   onActivateMail={() => {
                     if (!session.isAuthenticated) {
-                      setSsoOpen(true);
+                      loginWithAuth0();
                       return;
                     }
                     activateMail(true);
                   }}
-                  onOpenSso={() => setSsoOpen(true)}
+                  onLoginWithAuth0={loginWithAuth0}
                   onSelectHost={handleSelectHost}
                 />
               ))}
@@ -281,7 +340,6 @@ export default function App() {
                   onSelectHost={handleSelectHost}
                   onActivateMailFromLinks={() => activateMail(false)}
                   onDeactivateLinks={deactivateLinks}
-                  onOpenSso={() => setSsoOpen(true)}
                 />
               ) : (
                 <LinksLandingGate
@@ -289,12 +347,12 @@ export default function App() {
                   session={session}
                   onActivateLinks={() => {
                     if (!session.isAuthenticated) {
-                      setSsoOpen(true);
+                      loginWithAuth0();
                       return;
                     }
                     activateLinks(true);
                   }}
-                  onOpenSso={() => setSsoOpen(true)}
+                  onLoginWithAuth0={loginWithAuth0}
                   onSelectHost={handleSelectHost}
                 />
               ))}
@@ -308,7 +366,6 @@ export default function App() {
                   onSelectHost={handleSelectHost}
                   onActivateMailFromLinks={() => activateMail(false)}
                   onDeactivateLinks={deactivateLinks}
-                  onOpenSso={() => setSsoOpen(true)}
                 />
               ) : (
                 <LinksLandingGate
@@ -316,12 +373,12 @@ export default function App() {
                   session={session}
                   onActivateLinks={() => {
                     if (!session.isAuthenticated) {
-                      setSsoOpen(true);
+                      loginWithAuth0();
                       return;
                     }
                     activateLinks(true);
                   }}
-                  onOpenSso={() => setSsoOpen(true)}
+                  onLoginWithAuth0={loginWithAuth0}
                   onSelectHost={handleSelectHost}
                 />
               ))}
@@ -335,7 +392,7 @@ export default function App() {
               />
             )}
 
-            {activeHost === 'worker_console' && (
+            {activeHost === 'worker_console' && isAdminOwner && (
               <WorkerDomainConsole
                 lang={lang}
                 username={session.username || 'fadhil'}
@@ -400,31 +457,6 @@ export default function App() {
           activeHost={activeHost}
           onSelectHost={handleSelectHost}
         />
-
-        {ssoOpen && (
-          <Suspense fallback={null}>
-            <UniversalSsoModal
-              isOpen={ssoOpen}
-              lang={lang}
-              session={session}
-              isLoading={authLoading}
-              authError={authError}
-              isPreviewHost={isPreviewHost}
-              auth0Domain={auth0Domain}
-              auth0AppName={auth0AppName}
-              auth0ClientId={auth0ClientId}
-              onLoginWithAuth0={loginWithAuth0}
-              onSignupWithAuth0={signupWithAuth0}
-              onSignIn={signIn}
-              onSignOut={signOut}
-              onActivateMail={() => activateMail(true)}
-              onDeactivateMail={deactivateMail}
-              onActivateLinks={() => activateLinks(true)}
-              onDeactivateLinks={deactivateLinks}
-              onClose={() => setSsoOpen(false)}
-            />
-          </Suspense>
-        )}
 
         {vaultOpen && (
           <Suspense fallback={null}>

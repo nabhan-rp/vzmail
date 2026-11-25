@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 // VZ Mail (mail.vz.gay) & VZ Links (links.vz.gay) Multi-OS PWA Service Worker
-const CACHE_NAME = 'vz-pwa-v1.2.0';
+const CACHE_NAME = 'vz-pwa-v1.3.0';
 
 const PRECACHE_ASSETS = [
   '/',
@@ -10,6 +10,8 @@ const PRECACHE_ASSETS = [
   '/manifest-mail.webmanifest',
   '/manifest-links.webmanifest',
   '/favicon.svg',
+  '/icons/mail.svg',
+  '/icons/links.svg',
   '/icons/mail-192.png',
   '/icons/mail-512.png',
   '/icons/mail-maskable.png',

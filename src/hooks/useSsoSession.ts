@@ -29,8 +29,8 @@ interface UserModulePrefs {
   primaryDomain: string;
 }
 
-const LOCAL_SESSION_KEY = 'vz_sso_local_session_v3';
 const MODULE_PREFS_KEY = 'vz_sso_module_prefs_v3';
+export const ADMIN_OWNER_EMAIL = 'nabhanraflipratama.id@gmail.com';
 
 const DEFAULT_PREFS: UserModulePrefs = {
   birthDate: '2001-05-14',
@@ -126,38 +126,10 @@ export function useSsoSession() {
 
   const auth0Config = useMemo(() => resolveAuth0Config(), []);
   const auth0Domain = auth0Config.domain;
-  const localSessionStorageKey = `${LOCAL_SESSION_KEY}_${auth0Config.service}`;
 
   const [prefsMap, setPrefsMap] = useState<Record<string, UserModulePrefs>>(() =>
     readAllPrefs()
   );
-
-  const [localSession, setLocalSession] = useState<SsoSession>(() => {
-    if (typeof window === 'undefined') return SIGNED_OUT_SESSION;
-    try {
-      const raw = window.localStorage.getItem(localSessionStorageKey);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Partial<SsoSession>;
-        if (parsed.isAuthenticated && parsed.authProvider === 'local') {
-          return {
-            isAuthenticated: true,
-            authProvider: 'local',
-            username: sanitizeHandle(parsed.username || 'fadhil'),
-            birthDate:
-              typeof parsed.birthDate === 'string'
-                ? parsed.birthDate
-                : DEFAULT_PREFS.birthDate,
-            mailActivated: Boolean(parsed.mailActivated),
-            linksActivated: Boolean(parsed.linksActivated),
-            primaryDomain: parsed.primaryDomain || DEFAULT_PREFS.primaryDomain,
-          };
-        }
-      }
-    } catch {
-      // Ignore storage errors
-    }
-    return SIGNED_OUT_SESSION;
-  });
 
   const [crossOffer, setCrossOffer] = useState<CrossServiceOffer>(null);
 
@@ -169,22 +141,6 @@ export function useSsoSession() {
       // Ignore storage errors
     }
   }, [prefsMap]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      if (localSession.isAuthenticated && localSession.authProvider === 'local') {
-        window.localStorage.setItem(
-          localSessionStorageKey,
-          JSON.stringify(localSession)
-        );
-      } else {
-        window.localStorage.removeItem(localSessionStorageKey);
-      }
-    } catch {
-      // Ignore storage errors
-    }
-  }, [localSession, localSessionStorageKey]);
 
   const auth0Key = useMemo(() => {
     if (!auth0Authenticated || !auth0User) return null;
@@ -210,12 +166,16 @@ export function useSsoSession() {
       };
     }
 
-    if (localSession.isAuthenticated && localSession.authProvider === 'local') {
-      return localSession;
-    }
-
     return SIGNED_OUT_SESSION;
-  }, [auth0Authenticated, auth0User, auth0Key, prefsMap, localSession]);
+  }, [auth0Authenticated, auth0User, auth0Key, prefsMap]);
+
+  const isAdminOwner = useMemo(() => {
+    return Boolean(
+      auth0Authenticated &&
+        auth0User?.email &&
+        auth0User.email.toLowerCase() === ADMIN_OWNER_EMAIL
+    );
+  }, [auth0Authenticated, auth0User]);
 
   const age = session.isAuthenticated
     ? calculateAgeFromDob(session.birthDate)
@@ -236,37 +196,7 @@ export function useSsoSession() {
     });
   }, [loginWithRedirect]);
 
-  const signIn = useCallback(
-    (
-      username: string,
-      birthDate: string,
-      options?: { mailActivated?: boolean; linksActivated?: boolean }
-    ) => {
-      const cleanUser = sanitizeHandle(username || 'fadhil');
-      const nextMail = options?.mailActivated ?? false;
-      const nextLinks = options?.linksActivated ?? false;
-      setLocalSession({
-        isAuthenticated: true,
-        authProvider: 'local',
-        username: cleanUser,
-        birthDate: birthDate || DEFAULT_PREFS.birthDate,
-        mailActivated: nextMail,
-        linksActivated: nextLinks,
-        primaryDomain: 'imy.li',
-      });
-      if (nextMail && !nextLinks) {
-        setCrossOffer('offer_links_after_mail');
-      } else if (nextLinks && !nextMail) {
-        setCrossOffer('offer_mail_after_links');
-      } else {
-        setCrossOffer(null);
-      }
-    },
-    []
-  );
-
   const signOut = useCallback(() => {
-    setLocalSession(SIGNED_OUT_SESSION);
     setCrossOffer(null);
     if (auth0Authenticated) {
       void auth0Logout({
@@ -285,19 +215,6 @@ export function useSsoSession() {
           return {
             ...prevMap,
             [auth0Key]: updater(current),
-          };
-        });
-      } else {
-        setLocalSession((prev) => {
-          const updated = updater({
-            birthDate: prev.birthDate || DEFAULT_PREFS.birthDate,
-            mailActivated: prev.mailActivated,
-            linksActivated: prev.linksActivated,
-            primaryDomain: prev.primaryDomain || DEFAULT_PREFS.primaryDomain,
-          });
-          return {
-            ...prev,
-            ...updated,
           };
         });
       }
@@ -349,9 +266,9 @@ export function useSsoSession() {
 
   return {
     session,
-    isLoading: auth0Config.isPreviewHost ? false : isLoading,
-    authError: auth0Config.isPreviewHost ? null : (authError ?? null),
-    isPreviewHost: auth0Config.isPreviewHost,
+    isAdminOwner,
+    isLoading,
+    authError: authError ?? null,
     auth0Domain,
     auth0ClientId: auth0Config.clientId,
     auth0AppName: auth0Config.appName,
@@ -361,7 +278,6 @@ export function useSsoSession() {
     crossOffer,
     loginWithAuth0,
     signupWithAuth0,
-    signIn,
     signOut,
     activateMail,
     deactivateMail,

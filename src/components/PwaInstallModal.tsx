@@ -313,7 +313,7 @@ export function PwaInstallModal({
         {/* Footer actions */}
         <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-[#232732] text-xs">
           <span className="text-[11px] text-slate-400 font-mono">
-            Service Worker: active (v1.1)
+            Service Worker: active (v1.3)
           </span>
           <button
             type="button"
