@@ -5,10 +5,13 @@ import {
   Link2,
   Palette,
   Scissors,
+  ShieldAlert,
   ShieldCheck,
 } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
+import { checkReservedUsername } from '../utils/reservedUsernames';
 import type { ActiveHostView } from './MailLinksTopBar';
 
 interface LinksLandingGateProps {
@@ -28,6 +31,49 @@ export function LinksLandingGate({
 }: LinksLandingGateProps) {
   const user = session.isAuthenticated ? session.username : 'username';
   const domain = session.primaryDomain || 'imy.li';
+  const [legalAccepted, setLegalAccepted] = useState(false);
+
+  const reservedCheck = session.isAuthenticated
+    ? checkReservedUsername(session.username)
+    : { isReserved: false, canonical: '', matchedWord: null, category: null };
+
+  useEffect(() => {
+    if (!session.isAuthenticated || !session.username) {
+      setLegalAccepted(false);
+      return;
+    }
+    try {
+      const saved = window.localStorage.getItem(
+        `vz_legal_consent_links_v1:${session.username}`
+      );
+      setLegalAccepted(saved === 'accepted');
+    } catch {
+      setLegalAccepted(false);
+    }
+  }, [session.isAuthenticated, session.username]);
+
+  const handleToggleConsent = (checked: boolean) => {
+    setLegalAccepted(checked);
+    if (session.isAuthenticated && session.username) {
+      try {
+        if (checked) {
+          window.localStorage.setItem(
+            `vz_legal_consent_links_v1:${session.username}`,
+            'accepted'
+          );
+        } else {
+          window.localStorage.removeItem(
+            `vz_legal_consent_links_v1:${session.username}`
+          );
+        }
+      } catch {
+        // Ignore storage errors
+      }
+    }
+  };
+
+  const canActivate =
+    session.isAuthenticated && !reservedCheck.isReserved && legalAccepted;
 
   return (
     <div className="max-w-[1200px] mx-auto px-4 sm:px-6 py-10 sm:py-14 space-y-10">
@@ -74,11 +120,97 @@ export function LinksLandingGate({
                   </span>
                 </div>
 
+                {reservedCheck.isReserved ? (
+                  <div className="p-3.5 rounded-lg bg-rose-50 dark:bg-rose-950/35 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-800 dark:text-rose-200 space-y-1.5">
+                    <div className="font-semibold flex items-center gap-1.5">
+                      <ShieldAlert className="w-4 h-4 shrink-0" />
+                      <span>
+                        {lang === 'id'
+                          ? `Username sistem "${session.username}" dilindungi (Reserved)`
+                          : `System username "${session.username}" is reserved`}
+                      </span>
+                    </div>
+                    <p className="leading-relaxed">
+                      {lang === 'id'
+                        ? `Subdomain ${session.username}.${domain} dicadangkan khusus untuk operasional resmi sistem (admin, webmaster, noreply, support, dll.). Ubah username SSO Anda di myaccount.vz.gay untuk mengaktifkan Studio Bio.`
+                        : `Subdomain ${session.username}.${domain} is reserved for official system operations (admin, webmaster, noreply, support, etc.). Update your SSO username on myaccount.vz.gay to activate Bio Studio.`}
+                    </p>
+                  </div>
+                ) : (
+                  <label className="flex items-start gap-2.5 p-3 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={legalAccepted}
+                      onChange={(e) => handleToggleConsent(e.target.checked)}
+                      className="mt-0.5 rounded border-slate-300 text-blue-600 focus:ring-blue-600 shrink-0"
+                    />
+                    <span className="leading-relaxed">
+                      {lang === 'id' ? (
+                        <>
+                          Saya menyetujui{' '}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              onSelectHost('terms');
+                            }}
+                            className="font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                          >
+                            Syarat &amp; Ketentuan
+                          </button>{' '}
+                          dan{' '}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              onSelectHost('privacy');
+                            }}
+                            className="font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                          >
+                            Kebijakan Privasi
+                          </button>{' '}
+                          VZ Links &amp; VZ Mail, termasuk aturan TLD{' '}
+                          <span className="font-mono">.gay</span> (anti-kebencian) &amp; ccTLD{' '}
+                          <span className="font-mono">.li</span> (anti-phishing/malware).
+                        </>
+                      ) : (
+                        <>
+                          I agree to the VZ Links &amp; VZ Mail{' '}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              onSelectHost('terms');
+                            }}
+                            className="font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                          >
+                            Terms of Service
+                          </button>{' '}
+                          and{' '}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              onSelectHost('privacy');
+                            }}
+                            className="font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                          >
+                            Privacy Policy
+                          </button>
+                          , including <span className="font-mono">.gay</span> Rights Protections
+                          Policy and SWITCH <span className="font-mono">.li</span> anti-abuse rules.
+                        </>
+                      )}
+                    </span>
+                  </label>
+                )}
+
                 <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2.5">
                   <button
                     type="button"
+                    disabled={!canActivate}
                     onClick={onActivateLinks}
-                    className="min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-45 disabled:cursor-not-allowed rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <Link2 className="w-4 h-4 shrink-0" />
                     <span>

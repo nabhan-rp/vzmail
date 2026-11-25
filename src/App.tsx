@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { ConfirmActionModal } from './components/ConfirmActionModal';
 import { CrossServiceOfferBar } from './components/CrossServiceOfferBar';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { MailLandingGate } from './components/MailLandingGate';
@@ -45,6 +46,11 @@ const WorkerDomainConsole = lazy(() =>
     default: m.WorkerDomainConsole,
   }))
 );
+const LegalDocumentView = lazy(() =>
+  import('./components/LegalDocumentView').then((m) => ({
+    default: m.LegalDocumentView,
+  }))
+);
 const VaultBackupModal = lazy(() =>
   import('./components/VaultBackupModal').then((m) => ({
     default: m.VaultBackupModal,
@@ -72,6 +78,13 @@ function detectInitialHostView(): ActiveHostView {
   const params = new URLSearchParams(window.location.search);
   const hostMode = params.get('host_mode');
   const pathname = window.location.pathname.toLowerCase();
+
+  if (pathname === '/terms' || pathname.startsWith('/terms/')) {
+    return 'terms';
+  }
+  if (pathname === '/privacy' || pathname.startsWith('/privacy/')) {
+    return 'privacy';
+  }
 
   if (
     hostMode === 'bio' ||
@@ -184,6 +197,18 @@ export default function App() {
     }
   }, [authLoading, activeHost, isAdminOwner]);
 
+  const [confirmDeactivateService, setConfirmDeactivateService] = useState<
+    'mail' | 'links' | null
+  >(null);
+
+  useEffect(() => {
+    const onPopState = () => {
+      setActiveHost(detectInitialHostView());
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
   // On dedicated production domains (mail.vz.gay vs links.vz.gay), navigate across origins
   // so each service uses its own isolated Auth0 SPA Client ID and origin storage.
   const handleSelectHost = (nextHost: ActiveHostView) => {
@@ -201,8 +226,24 @@ export default function App() {
         window.location.href = 'https://mail.vz.gay';
         return;
       }
+
+      if (nextHost === 'terms' && window.location.pathname !== '/terms') {
+        window.history.pushState({}, '', '/terms');
+      } else if (nextHost === 'privacy' && window.location.pathname !== '/privacy') {
+        window.history.pushState({}, '', '/privacy');
+      } else if (
+        nextHost !== 'terms' &&
+        nextHost !== 'privacy' &&
+        (window.location.pathname === '/terms' ||
+          window.location.pathname === '/privacy')
+      ) {
+        window.history.pushState({}, '', '/');
+      }
     }
     setActiveHost(nextHost);
+    if (nextHost === 'terms' || nextHost === 'privacy') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
   };
 
   const urlBioUser = useMemo(() => detectBioSubdomainUser(), []);
@@ -248,7 +289,17 @@ export default function App() {
       activeHost === 'shortlinks' ||
       activeHost === 'bio_public';
 
-    if (activeHost === 'links.vz.gay') {
+    if (activeHost === 'terms') {
+      document.title =
+        lang === 'id'
+          ? 'Syarat & Ketentuan (Terms of Service) — VZ Mail & VZ Links'
+          : 'Terms of Service — VZ Mail & VZ Links';
+    } else if (activeHost === 'privacy') {
+      document.title =
+        lang === 'id'
+          ? 'Kebijakan Privasi (Privacy Policy) — VZ Mail & VZ Links'
+          : 'Privacy Policy — VZ Mail & VZ Links';
+    } else if (activeHost === 'links.vz.gay') {
       document.title = `VZ Links (links.vz.gay) — ${user}.${domain} & ${domain}/s/`;
     } else if (activeHost === 'bio_public') {
       document.title = bioPageSlug
@@ -312,9 +363,9 @@ export default function App() {
           onSignupWithAuth0={signupWithAuth0}
           onSignOut={signOut}
           onActivateMail={() => activateMail(true)}
-          onDeactivateMail={deactivateMail}
+          onDeactivateMail={() => setConfirmDeactivateService('mail')}
           onActivateLinks={() => activateLinks(true)}
-          onDeactivateLinks={deactivateLinks}
+          onDeactivateLinks={() => setConfirmDeactivateService('links')}
           onOpenCompose={() => setComposeCounter((c) => c + 1)}
           onOpenInstall={() => setPwaOpen(true)}
           isInstalled={isInstalled}
@@ -360,7 +411,7 @@ export default function App() {
                   composeRequested={composeCounter}
                   onSelectHost={handleSelectHost}
                   onOpenVault={() => setVaultOpen(true)}
-                  onDeactivateMail={deactivateMail}
+                  onDeactivateMail={() => setConfirmDeactivateService('mail')}
                   refreshTrigger={mailRefreshCounter}
                 />
               ) : (
@@ -390,7 +441,7 @@ export default function App() {
                     handleSelectHost('bio_public');
                   }}
                   onActivateMailFromLinks={() => activateMail(false)}
-                  onDeactivateLinks={deactivateLinks}
+                  onDeactivateLinks={() => setConfirmDeactivateService('links')}
                 />
               ) : (
                 <LinksLandingGate
@@ -434,6 +485,15 @@ export default function App() {
                 username={session.username || 'fadhil'}
               />
             )}
+
+            {(activeHost === 'terms' || activeHost === 'privacy') && (
+              <LegalDocumentView
+                lang={lang}
+                docType={activeHost}
+                onSwitchDoc={(next) => handleSelectHost(next)}
+                onBack={() => handleSelectHost(detectDefaultServiceView())}
+              />
+            )}
           </Suspense>
         </main>
 
@@ -447,6 +507,26 @@ export default function App() {
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-4">
+              <a
+                href="/terms"
+                onClick={(e) => {
+                  e.preventDefault();
+                  handleSelectHost('terms');
+                }}
+                className="hover:text-slate-900 dark:hover:text-white transition-colors"
+              >
+                {lang === 'id' ? 'Syarat & Ketentuan' : 'Terms of Service'}
+              </a>
+              <a
+                href="/privacy"
+                onClick={(e) => {
+                  e.preventDefault();
+                  handleSelectHost('privacy');
+                }}
+                className="hover:text-slate-900 dark:hover:text-white transition-colors"
+              >
+                {lang === 'id' ? 'Kebijakan Privasi' : 'Privacy Policy'}
+              </a>
               <a
                 href="https://vz.gay"
                 target="_blank"
@@ -487,6 +567,42 @@ export default function App() {
             </div>
           </div>
         </footer>
+
+        <ConfirmActionModal
+          isOpen={confirmDeactivateService !== null}
+          lang={lang}
+          tone="warning"
+          title={
+            confirmDeactivateService === 'mail'
+              ? lang === 'id'
+                ? `Nonaktifkan layanan VZ Mail (${session.username}@${session.primaryDomain || 'imy.li'})?`
+                : `Disable VZ Mail (${session.username}@${session.primaryDomain || 'imy.li'})?`
+              : lang === 'id'
+                ? `Nonaktifkan akses Studio VZ Links (${session.username}.${session.primaryDomain || 'imy.li'})?`
+                : `Disable VZ Links Studio (${session.username}.${session.primaryDomain || 'imy.li'})?`
+          }
+          description={
+            confirmDeactivateService === 'mail'
+              ? lang === 'id'
+                ? 'Akses kotak surat lokal pada sesi ini akan dinonaktifkan dan Anda akan kembali ke halaman aktivasi VZ Mail. Riwayat pesan lokal di IndexedDB browser tidak dihapus.'
+                : 'Mailbox access for this session will be disabled and you will return to the VZ Mail activation page. Local IndexedDB messages remain intact on your device.'
+              : lang === 'id'
+                ? 'Akses Studio VZ Links pada sesi ini akan dinonaktifkan. Untuk menyembunyikan halaman Bio dari publik atau menghapus data permanen dari database, gunakan tab Pengaturan & Bahaya di Studio Bio.'
+                : 'VZ Links Studio access for this session will be disabled. To hide your Bio page from public visitors or permanently delete database records, use the Settings & Danger tab in Bio Studio.'
+          }
+          confirmLabel={
+            lang === 'id' ? 'Ya, Nonaktifkan' : 'Yes, Disable'
+          }
+          onConfirm={() => {
+            if (confirmDeactivateService === 'mail') {
+              deactivateMail();
+            } else if (confirmDeactivateService === 'links') {
+              deactivateLinks();
+            }
+            setConfirmDeactivateService(null);
+          }}
+          onCancel={() => setConfirmDeactivateService(null)}
+        />
 
         <MobileBottomNav
           lang={lang}

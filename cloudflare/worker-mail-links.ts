@@ -41,6 +41,10 @@ import {
 } from '../src/utils/mailSecurity.ts';
 import {
   AVATAR_MAX_BYTES,
+  BIO_DELETE_COOLDOWN_MS,
+  BIO_DELETE_COOLDOWN_SECONDS,
+  RECYCLE_BIN_RETENTION_MS,
+  RECYCLE_BIN_TTL_SECONDS,
   detectValidatedAvatarMime,
   generateShortlinkCode,
   isValidBioThemeId,
@@ -50,11 +54,15 @@ import {
   sanitizePageSlug,
   sanitizeShortlinkSlugInput,
   sanitizeSocialsMap,
+  type BioDeleteCooldownInfo,
   type BioLinkItem,
   type BioPageRecord,
   type BioWorkspaceData,
+  type RecycleBinItemType,
+  type RecycleBinRecord,
   type ShortlinkRecord,
 } from '../src/utils/linksModel.ts';
+import { checkReservedUsername } from '../src/utils/reservedUsernames.ts';
 
 export interface CloudflareSendEmailMessage {
   from: string | { email: string; name?: string };
@@ -813,7 +821,7 @@ async function deleteShortlinkRecord(
   env: WorkerEnv,
   slug: string,
   ownerUser: string | null
-): Promise<{ deleted: boolean; forbidden?: boolean }> {
+): Promise<{ deleted: boolean; forbidden?: boolean; record?: ShortlinkRecord }> {
   const existing = await getShortlinkRecord(env, slug);
   if (!existing) {
     return { deleted: false };
@@ -836,7 +844,7 @@ async function deleteShortlinkRecord(
       }
     }
   }
-  return { deleted: true };
+  return { deleted: true, record: existing };
 }
 
 async function incrementShortlinkClick(env: WorkerEnv, slug: string): Promise<void> {
@@ -870,7 +878,7 @@ async function getBioWorkspaceFromStorage(
 ): Promise<BioWorkspaceData | null> {
   if (env.LINKS_DB) {
     const profile = await env.LINKS_DB.prepare(
-      'SELECT username, display_name, headline, bio, avatar_url, socials_json, updated_at FROM bio_profiles WHERE username = ? LIMIT 1'
+      'SELECT username, display_name, headline, bio, avatar_url, socials_json, is_deactivated, deactivated_at, updated_at FROM bio_profiles WHERE username = ? LIMIT 1'
     )
       .bind(username)
       .first<{
@@ -880,6 +888,8 @@ async function getBioWorkspaceFromStorage(
         bio: string;
         avatar_url: string;
         socials_json: string;
+        is_deactivated?: number;
+        deactivated_at?: string | null;
         updated_at: string;
       }>();
 
@@ -960,6 +970,8 @@ async function getBioWorkspaceFromStorage(
         avatarUrl: sanitizeBioAvatarUrl(profile.avatar_url || ''),
         socials: sanitizeSocialsMap(parsedSocials),
         pages,
+        isDeactivated: Boolean(profile.is_deactivated),
+        deactivatedAt: profile.deactivated_at || null,
         updatedAt: profile.updated_at,
         configured: true,
       };
@@ -969,7 +981,13 @@ async function getBioWorkspaceFromStorage(
   if (env.LINKS_KV) {
     const raw = await env.LINKS_KV.get<BioWorkspaceData>(`bio:${username}`, 'json');
     if (raw && typeof raw === 'object' && Array.isArray(raw.pages)) {
-      return { ...raw, username, configured: true };
+      return {
+        ...raw,
+        username,
+        isDeactivated: raw.isDeactivated === true,
+        deactivatedAt: raw.isDeactivated ? raw.deactivatedAt || null : null,
+        configured: true,
+      };
     }
   }
 
@@ -996,7 +1014,7 @@ async function saveBioWorkspaceToStorage(
   if (env.LINKS_DB) {
     const stmts: D1PreparedStatement[] = [
       env.LINKS_DB.prepare(
-        'INSERT INTO bio_profiles (username, display_name, headline, bio, avatar_url, socials_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(username) DO UPDATE SET display_name = excluded.display_name, headline = excluded.headline, bio = excluded.bio, avatar_url = excluded.avatar_url, socials_json = excluded.socials_json, updated_at = excluded.updated_at'
+        'INSERT INTO bio_profiles (username, display_name, headline, bio, avatar_url, socials_json, is_deactivated, deactivated_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(username) DO UPDATE SET display_name = excluded.display_name, headline = excluded.headline, bio = excluded.bio, avatar_url = excluded.avatar_url, socials_json = excluded.socials_json, is_deactivated = excluded.is_deactivated, deactivated_at = excluded.deactivated_at, updated_at = excluded.updated_at'
       ).bind(
         sanitized.username,
         sanitized.displayName,
@@ -1004,6 +1022,8 @@ async function saveBioWorkspaceToStorage(
         sanitized.bio,
         sanitized.avatarUrl,
         JSON.stringify(sanitized.socials),
+        sanitized.isDeactivated ? 1 : 0,
+        sanitized.deactivatedAt || null,
         sanitized.updatedAt
       ),
       env.LINKS_DB.prepare('DELETE FROM bio_links WHERE username = ?').bind(sanitized.username),
@@ -1306,6 +1326,335 @@ async function deleteAvatarFromStorage(
   await Promise.allSettled(tasks);
 }
 
+async function getBioDeleteCooldown(
+  env: WorkerEnv,
+  username: string
+): Promise<BioDeleteCooldownInfo> {
+  const nowMs = Date.now();
+  const empty: BioDeleteCooldownInfo = {
+    active: false,
+    deletedAt: null,
+    unlockAt: null,
+    remainingMs: 0,
+  };
+
+  if (env.LINKS_DB) {
+    const row = await env.LINKS_DB.prepare(
+      'SELECT deleted_at, unlock_at FROM bio_delete_cooldowns WHERE username = ? LIMIT 1'
+    )
+      .bind(username)
+      .first<{ deleted_at: string; unlock_at: string }>();
+    if (row) {
+      const unlockMs = new Date(row.unlock_at).getTime();
+      if (Number.isFinite(unlockMs) && unlockMs > nowMs) {
+        return {
+          active: true,
+          deletedAt: row.deleted_at,
+          unlockAt: row.unlock_at,
+          remainingMs: unlockMs - nowMs,
+        };
+      }
+      await env.LINKS_DB.prepare('DELETE FROM bio_delete_cooldowns WHERE username = ?')
+        .bind(username)
+        .run();
+    }
+  }
+
+  if (env.LINKS_KV) {
+    const rec = await env.LINKS_KV.get<{ deletedAt?: string; unlockAt?: string }>(
+      `cooldown:bio:${username}`,
+      'json'
+    );
+    if (rec?.unlockAt) {
+      const unlockMs = new Date(rec.unlockAt).getTime();
+      if (Number.isFinite(unlockMs) && unlockMs > nowMs) {
+        return {
+          active: true,
+          deletedAt: rec.deletedAt || null,
+          unlockAt: rec.unlockAt,
+          remainingMs: unlockMs - nowMs,
+        };
+      }
+      await env.LINKS_KV.delete(`cooldown:bio:${username}`);
+    }
+  }
+
+  return empty;
+}
+
+async function hardDeleteBioProfileAndSetCooldown(
+  env: WorkerEnv,
+  username: string
+): Promise<BioDeleteCooldownInfo> {
+  const now = new Date();
+  const deletedAt = now.toISOString();
+  const unlockAt = new Date(now.getTime() + BIO_DELETE_COOLDOWN_MS).toISOString();
+
+  // 1. Delete all avatars for this user across R2, D1, and KV
+  if (env.LINKS_MEDIA_R2) {
+    try {
+      const listed = await env.LINKS_MEDIA_R2.list({ prefix: `avatars/${username}/` });
+      if (listed.objects.length > 0) {
+        await env.LINKS_MEDIA_R2.delete(listed.objects.map((o) => o.key));
+      }
+    } catch (err) {
+      logError('bio_hard_delete_r2_failed', err, { username });
+    }
+  }
+
+  if (env.LINKS_DB) {
+    await env.LINKS_DB.batch([
+      env.LINKS_DB.prepare('DELETE FROM bio_links WHERE username = ?').bind(username),
+      env.LINKS_DB.prepare('DELETE FROM bio_pages WHERE username = ?').bind(username),
+      env.LINKS_DB.prepare('DELETE FROM bio_profiles WHERE username = ?').bind(username),
+      env.LINKS_DB.prepare('DELETE FROM bio_avatars WHERE username = ?').bind(username),
+      env.LINKS_DB.prepare(
+        'INSERT INTO bio_delete_cooldowns (username, deleted_at, unlock_at) VALUES (?, ?, ?) ON CONFLICT(username) DO UPDATE SET deleted_at = excluded.deleted_at, unlock_at = excluded.unlock_at'
+      ).bind(username, deletedAt, unlockAt),
+    ]);
+  }
+
+  if (env.LINKS_KV) {
+    await env.LINKS_KV.delete(`bio:${username}`);
+    try {
+      const avatarKeys = await env.LINKS_KV.list({ prefix: `avatar:avatars/${username}/` });
+      await Promise.allSettled(avatarKeys.keys.map((k) => env.LINKS_KV!.delete(k.name)));
+    } catch {
+      // Ignore KV list errors
+    }
+    await env.LINKS_KV.put(
+      `cooldown:bio:${username}`,
+      JSON.stringify({ deletedAt, unlockAt }),
+      { expirationTtl: BIO_DELETE_COOLDOWN_SECONDS }
+    );
+  }
+
+  return {
+    active: true,
+    deletedAt,
+    unlockAt,
+    remainingMs: BIO_DELETE_COOLDOWN_MS,
+  };
+}
+
+async function purgeExpiredRecycleBinD1(env: WorkerEnv): Promise<void> {
+  if (!env.LINKS_DB) return;
+  const nowIso = new Date().toISOString();
+  await env.LINKS_DB.prepare('DELETE FROM links_recycle_bin WHERE expires_at <= ?')
+    .bind(nowIso)
+    .run();
+}
+
+async function addItemToRecycleBin(
+  env: WorkerEnv,
+  ownerUser: string,
+  itemType: RecycleBinItemType,
+  label: string,
+  summary: string,
+  payload: Record<string, unknown>
+): Promise<RecycleBinRecord> {
+  const now = new Date();
+  const record: RecycleBinRecord = {
+    id: generateSecureId('rb'),
+    ownerUser,
+    itemType,
+    label: label.trim().slice(0, 140),
+    summary: summary.trim().slice(0, 260),
+    payload,
+    deletedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + RECYCLE_BIN_RETENTION_MS).toISOString(),
+  };
+
+  if (env.LINKS_DB) {
+    await purgeExpiredRecycleBinD1(env);
+    await env.LINKS_DB.prepare(
+      'INSERT INTO links_recycle_bin (id, owner_user, item_type, label, summary, payload_json, deleted_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    )
+      .bind(
+        record.id,
+        record.ownerUser,
+        record.itemType,
+        record.label,
+        record.summary,
+        JSON.stringify(record.payload),
+        record.deletedAt,
+        record.expiresAt
+      )
+      .run();
+    return record;
+  }
+
+  if (env.LINKS_KV) {
+    await env.LINKS_KV.put(
+      `recycle:${ownerUser}:${record.id}`,
+      JSON.stringify(record),
+      { expirationTtl: RECYCLE_BIN_TTL_SECONDS }
+    );
+  }
+
+  return record;
+}
+
+async function listRecycleBinItems(
+  env: WorkerEnv,
+  ownerUser: string
+): Promise<RecycleBinRecord[]> {
+  const nowMs = Date.now();
+
+  if (env.LINKS_DB) {
+    await purgeExpiredRecycleBinD1(env);
+    const res = await env.LINKS_DB.prepare(
+      'SELECT id, owner_user, item_type, label, summary, payload_json, deleted_at, expires_at FROM links_recycle_bin WHERE owner_user = ? ORDER BY deleted_at DESC LIMIT 100'
+    )
+      .bind(ownerUser)
+      .all<{
+        id: string;
+        owner_user: string;
+        item_type: string;
+        label: string;
+        summary: string;
+        payload_json: string;
+        deleted_at: string;
+        expires_at: string;
+      }>();
+
+    return (res.results || []).map((row) => {
+      let parsedPayload: Record<string, unknown> = {};
+      try {
+        parsedPayload = JSON.parse(row.payload_json || '{}');
+      } catch {
+        parsedPayload = {};
+      }
+      return {
+        id: row.id,
+        ownerUser: row.owner_user,
+        itemType:
+          row.item_type === 'bio_page' || row.item_type === 'shortlink'
+            ? row.item_type
+            : 'bio_link',
+        label: row.label,
+        summary: row.summary,
+        payload: parsedPayload,
+        deletedAt: row.deleted_at,
+        expiresAt: row.expires_at,
+      };
+    });
+  }
+
+  if (env.LINKS_KV) {
+    const listed = await env.LINKS_KV.list({ prefix: `recycle:${ownerUser}:`, limit: 100 });
+    const rows = await Promise.all(
+      listed.keys.map((k) => env.LINKS_KV!.get<RecycleBinRecord>(k.name, 'json'))
+    );
+    return rows
+      .filter(
+        (r): r is RecycleBinRecord =>
+          Boolean(r && r.id && new Date(r.expiresAt).getTime() > nowMs)
+      )
+      .sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
+  }
+
+  return [];
+}
+
+async function getRecycleBinItem(
+  env: WorkerEnv,
+  ownerUser: string,
+  id: string
+): Promise<RecycleBinRecord | null> {
+  if (env.LINKS_DB) {
+    await purgeExpiredRecycleBinD1(env);
+    const row = await env.LINKS_DB.prepare(
+      'SELECT id, owner_user, item_type, label, summary, payload_json, deleted_at, expires_at FROM links_recycle_bin WHERE id = ? AND owner_user = ? LIMIT 1'
+    )
+      .bind(id, ownerUser)
+      .first<{
+        id: string;
+        owner_user: string;
+        item_type: string;
+        label: string;
+        summary: string;
+        payload_json: string;
+        deleted_at: string;
+        expires_at: string;
+      }>();
+    if (!row) return null;
+    let parsedPayload: Record<string, unknown> = {};
+    try {
+      parsedPayload = JSON.parse(row.payload_json || '{}');
+    } catch {
+      parsedPayload = {};
+    }
+    return {
+      id: row.id,
+      ownerUser: row.owner_user,
+      itemType:
+        row.item_type === 'bio_page' || row.item_type === 'shortlink'
+          ? row.item_type
+          : 'bio_link',
+      label: row.label,
+      summary: row.summary,
+      payload: parsedPayload,
+      deletedAt: row.deleted_at,
+      expiresAt: row.expires_at,
+    };
+  }
+
+  if (env.LINKS_KV) {
+    const item = await env.LINKS_KV.get<RecycleBinRecord>(
+      `recycle:${ownerUser}:${id}`,
+      'json'
+    );
+    if (!item || new Date(item.expiresAt).getTime() <= Date.now()) {
+      return null;
+    }
+    return item;
+  }
+
+  return null;
+}
+
+async function hardDeleteRecycleBinItem(
+  env: WorkerEnv,
+  ownerUser: string,
+  id: string
+): Promise<void> {
+  if (env.LINKS_DB) {
+    await env.LINKS_DB.prepare(
+      'DELETE FROM links_recycle_bin WHERE id = ? AND owner_user = ?'
+    )
+      .bind(id, ownerUser)
+      .run();
+  }
+  if (env.LINKS_KV) {
+    await env.LINKS_KV.delete(`recycle:${ownerUser}:${id}`);
+  }
+}
+
+async function emptyRecycleBinForOwner(
+  env: WorkerEnv,
+  ownerUser: string
+): Promise<number> {
+  let purgedCount = 0;
+  if (env.LINKS_DB) {
+    const countRow = await env.LINKS_DB.prepare(
+      'SELECT COUNT(*) as total FROM links_recycle_bin WHERE owner_user = ?'
+    )
+      .bind(ownerUser)
+      .first<{ total: number }>();
+    purgedCount = Number(countRow?.total) || 0;
+    await env.LINKS_DB.prepare('DELETE FROM links_recycle_bin WHERE owner_user = ?')
+      .bind(ownerUser)
+      .run();
+  }
+  if (env.LINKS_KV) {
+    const listed = await env.LINKS_KV.list({ prefix: `recycle:${ownerUser}:`, limit: 200 });
+    purgedCount = Math.max(purgedCount, listed.keys.length);
+    await Promise.allSettled(listed.keys.map((k) => env.LINKS_KV!.delete(k.name)));
+  }
+  return purgedCount;
+}
+
 async function handleApiRequest(
   request: Request,
   url: URL,
@@ -1592,6 +1941,16 @@ async function handleApiRequest(
     }
 
     const senderUser = sanitizeHandle(String(parsed.data.senderUser || 'fadhil'));
+    const senderReserved = checkReservedUsername(senderUser);
+    if (senderReserved.isReserved) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: `Username "${senderReserved.canonical}" dicadangkan untuk sistem resmi @${primaryDomain} dan tidak dapat digunakan untuk mengirim email.`,
+        },
+        403
+      );
+    }
     const rawFrom = stripHeaderInjection(
       String(parsed.data.fromAddress || `${senderUser}@${primaryDomain}`),
       254
@@ -1889,6 +2248,7 @@ async function handleApiRequest(
     }
     const ownerParam = url.searchParams.get('owner')?.trim();
     const ownerUser = ownerParam ? sanitizeHandle(ownerParam) : null;
+    const mode = url.searchParams.get('mode') === 'recycle' ? 'recycle' : 'permanent';
     const result = await deleteShortlinkRecord(env, slug, ownerUser);
     if (result.forbidden) {
       return jsonResponse(
@@ -1896,24 +2256,289 @@ async function handleApiRequest(
         403
       );
     }
+    let recycleRecord: RecycleBinRecord | null = null;
+    if (result.deleted && result.record && mode === 'recycle' && ownerUser) {
+      recycleRecord = await addItemToRecycleBin(
+        env,
+        ownerUser,
+        'shortlink',
+        `${primaryDomain}/s/${result.record.slug}`,
+        result.record.title || result.record.targetUrl,
+        result.record as unknown as Record<string, unknown>
+      );
+    }
     return jsonResponse({
       ok: true,
       storageEngine: getLinksStorageEngine(env),
       deletedSlug: slug,
       deleted: result.deleted,
+      mode,
+      movedToRecycleBin: Boolean(recycleRecord),
+      recycleId: recycleRecord?.id || null,
     });
   }
 
-  // 7. Multi-Page Link-in-Bio API (`/api/links/bio/:username` & `/api/links/bio-click`)
+  // 7. Recycle Bin API (14-Day Auto-Purge) for All VZ Links Items
+  if (url.pathname === '/api/links/recycle-bin' && request.method === 'GET') {
+    const ownerParam = url.searchParams.get('owner')?.trim() || '';
+    if (!ownerParam) {
+      return jsonResponse({ ok: false, error: 'Parameter owner diperlukan.' }, 400);
+    }
+    const ownerUser = sanitizeHandle(ownerParam);
+    const items = await listRecycleBinItems(env, ownerUser);
+    return jsonResponse({
+      ok: true,
+      storageEngine: getLinksStorageEngine(env),
+      retentionDays: 14,
+      items,
+    });
+  }
+
+  if (url.pathname === '/api/links/recycle-bin' && request.method === 'POST') {
+    const parsed = await readBoundedJson<{
+      ownerUser?: string;
+      itemType?: RecycleBinItemType;
+      label?: string;
+      summary?: string;
+      payload?: Record<string, unknown>;
+    }>(request);
+    if (!parsed.ok) {
+      return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
+    }
+    const ownerUser = sanitizeHandle(String(parsed.data.ownerUser || ''));
+    const itemType = parsed.data.itemType;
+    if (itemType !== 'bio_link' && itemType !== 'bio_page' && itemType !== 'shortlink') {
+      return jsonResponse({ ok: false, error: 'Tipe item Recycle Bin tidak valid.' }, 400);
+    }
+    const record = await addItemToRecycleBin(
+      env,
+      ownerUser,
+      itemType,
+      String(parsed.data.label || itemType),
+      String(parsed.data.summary || ''),
+      parsed.data.payload && typeof parsed.data.payload === 'object' ? parsed.data.payload : {}
+    );
+    return jsonResponse({ ok: true, record }, 201);
+  }
+
+  if (url.pathname === '/api/links/recycle-bin/restore' && request.method === 'POST') {
+    const parsed = await readBoundedJson<{ ownerUser?: string; id?: string }>(request);
+    if (!parsed.ok) {
+      return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
+    }
+    const ownerUser = sanitizeHandle(String(parsed.data.ownerUser || ''));
+    const itemId = String(parsed.data.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+    if (!itemId) {
+      return jsonResponse({ ok: false, error: 'ID item tidak valid.' }, 400);
+    }
+
+    const item = await getRecycleBinItem(env, ownerUser, itemId);
+    if (!item) {
+      return jsonResponse(
+        { ok: false, error: 'Item tidak ditemukan atau sudah kedaluwarsa (> 14 hari).' },
+        404
+      );
+    }
+
+    if (item.itemType === 'shortlink') {
+      const rawPayload = item.payload as Partial<ShortlinkRecord>;
+      const safeTarget = sanitizeExternalUrl(String(rawPayload.targetUrl || ''), {
+        allowMailto: false,
+        blockPrivateHosts: true,
+      });
+      if (!safeTarget) {
+        await hardDeleteRecycleBinItem(env, ownerUser, itemId);
+        return jsonResponse({ ok: false, error: 'URL shortlink tidak valid untuk dipulihkan.' }, 400);
+      }
+      let targetSlug = sanitizeShortlinkSlugInput(String(rawPayload.slug || '')) || generateShortlinkCode(6);
+      const conflict = await getShortlinkRecord(env, targetSlug);
+      if (conflict) {
+        targetSlug = generateShortlinkCode(7);
+      }
+      const restored: ShortlinkRecord = {
+        slug: targetSlug,
+        ownerUser,
+        title: stripHeaderInjection(String(rawPayload.title || ''), 120),
+        targetUrl: safeTarget,
+        isCustomSlug: Boolean(rawPayload.isCustomSlug && !conflict),
+        clicks: Math.max(0, Number(rawPayload.clicks) || 0),
+        createdAt:
+          typeof rawPayload.createdAt === 'string' && rawPayload.createdAt
+            ? rawPayload.createdAt
+            : new Date().toISOString(),
+        lastClickedAt:
+          typeof rawPayload.lastClickedAt === 'string' ? rawPayload.lastClickedAt : null,
+      };
+      await saveShortlinkRecord(env, restored);
+      await hardDeleteRecycleBinItem(env, ownerUser, itemId);
+      return jsonResponse({
+        ok: true,
+        itemType: 'shortlink',
+        restoredSlug: restored.slug,
+        record: restored,
+      });
+    }
+
+    // Restoring Bio Link or Bio Page respects the 3-day bio delete cooldown
+    const cooldown = await getBioDeleteCooldown(env, ownerUser);
+    if (cooldown.active) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: 'Profil Bio sedang dalam masa tunggu 3 hari pasca penghapusan permanen.',
+          cooldown,
+        },
+        429
+      );
+    }
+
+    const existing = await getBioWorkspaceFromStorage(env, ownerUser);
+    if (!existing) {
+      return jsonResponse(
+        { ok: false, error: 'Simpan profil Bio utama terlebih dahulu sebelum memulihkan item ini.' },
+        400
+      );
+    }
+
+    if (item.itemType === 'bio_page') {
+      const pagePayload = item.payload as Partial<BioPageRecord>;
+      const baseSlug = sanitizePageSlug(String(pagePayload.pageSlug || '')) || `page-${Date.now().toString(36).slice(-4)}`;
+      let finalSlug = baseSlug;
+      if (existing.pages.some((p) => p.pageSlug === finalSlug)) {
+        finalSlug = `${baseSlug.slice(0, 32)}-${Date.now().toString(36).slice(-4)}`;
+      }
+      const restoredPage: BioPageRecord = {
+        id: `page-${ownerUser}-${finalSlug}-${Date.now().toString(36)}`,
+        pageSlug: finalSlug,
+        title: String(pagePayload.title || `/${finalSlug}`).slice(0, 80),
+        description: String(pagePayload.description || '').slice(0, 260),
+        avatarUrl: sanitizeBioAvatarUrl(pagePayload.avatarUrl || ''),
+        themeId: isValidBioThemeId(pagePayload.themeId) ? pagePayload.themeId : 'midnight_slate',
+        buttonStyle: isValidButtonStyle(pagePayload.buttonStyle) ? pagePayload.buttonStyle : 'rounded',
+        showSocials: pagePayload.showSocials !== false,
+        isPublished: true,
+        links: Array.isArray(pagePayload.links) ? (pagePayload.links as BioLinkItem[]) : [],
+        updatedAt: new Date().toISOString(),
+      };
+      const updated = await saveBioWorkspaceToStorage(env, ownerUser, {
+        ...existing,
+        pages: [...existing.pages, restoredPage],
+      });
+      await hardDeleteRecycleBinItem(env, ownerUser, itemId);
+      return jsonResponse({ ok: true, itemType: 'bio_page', data: updated });
+    }
+
+    // itemType === 'bio_link'
+    const linkPayload = item.payload as { pageSlug?: string; link?: Partial<BioLinkItem> };
+    const desiredSlug = typeof linkPayload.pageSlug === 'string' ? linkPayload.pageSlug : '';
+    const linkData = linkPayload.link || (item.payload as Partial<BioLinkItem>);
+    const targetPage =
+      existing.pages.find((p) => p.pageSlug === desiredSlug) || existing.pages[0];
+    const restoredLink: BioLinkItem = {
+      id: `lnk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      title: String(linkData.title || item.label || 'Tautan').slice(0, 100),
+      subtitle: String(linkData.subtitle || '').slice(0, 140),
+      url: String(linkData.url || ''),
+      sortOrder: targetPage.links.length,
+      enabled: true,
+      clicks: Math.max(0, Number(linkData.clicks) || 0),
+    };
+    const nextPages = existing.pages.map((p) =>
+      p.pageSlug === targetPage.pageSlug
+        ? { ...p, links: [...p.links, restoredLink] }
+        : p
+    );
+    const updated = await saveBioWorkspaceToStorage(env, ownerUser, {
+      ...existing,
+      pages: nextPages,
+    });
+    await hardDeleteRecycleBinItem(env, ownerUser, itemId);
+    return jsonResponse({ ok: true, itemType: 'bio_link', data: updated });
+  }
+
+  if (url.pathname === '/api/links/recycle-bin' && request.method === 'DELETE') {
+    const ownerParam = url.searchParams.get('owner')?.trim() || '';
+    if (!ownerParam) {
+      return jsonResponse({ ok: false, error: 'Parameter owner diperlukan.' }, 400);
+    }
+    const ownerUser = sanitizeHandle(ownerParam);
+    const purgedCount = await emptyRecycleBinForOwner(env, ownerUser);
+    return jsonResponse({ ok: true, purgedCount });
+  }
+
+  if (url.pathname.startsWith('/api/links/recycle-bin/') && request.method === 'DELETE') {
+    const ownerParam = url.searchParams.get('owner')?.trim() || '';
+    if (!ownerParam) {
+      return jsonResponse({ ok: false, error: 'Parameter owner diperlukan.' }, 400);
+    }
+    const ownerUser = sanitizeHandle(ownerParam);
+    const itemId = url.pathname
+      .replace('/api/links/recycle-bin/', '')
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .slice(0, 80);
+    if (!itemId) {
+      return jsonResponse({ ok: false, error: 'ID item tidak valid.' }, 400);
+    }
+    await hardDeleteRecycleBinItem(env, ownerUser, itemId);
+    return jsonResponse({ ok: true, deletedId: itemId });
+  }
+
+  // 8. Multi-Page Link-in-Bio API (`/api/links/bio/:username`, `/status`, DELETE, `/bio-click`)
+  if (
+    url.pathname.startsWith('/api/links/bio/') &&
+    url.pathname.endsWith('/status') &&
+    request.method === 'PATCH'
+  ) {
+    const trimmed = url.pathname
+      .replace('/api/links/bio/', '')
+      .replace(/\/status$/, '');
+    const username = sanitizeHandle(decodeURIComponent(trimmed || ''));
+    const reserved = checkReservedUsername(username);
+    if (reserved.isReserved) {
+      return jsonResponse(
+        { ok: false, error: `Username "${reserved.canonical}" dicadangkan untuk sistem.` },
+        403
+      );
+    }
+    const parsed = await readBoundedJson<{ isDeactivated?: boolean }>(request);
+    if (!parsed.ok) {
+      return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
+    }
+    const existing = await getBioWorkspaceFromStorage(env, username);
+    if (!existing) {
+      return jsonResponse(
+        { ok: false, error: 'Profil Bio belum tersimpan di server.' },
+        404
+      );
+    }
+    const isDeactivated = parsed.data.isDeactivated === true;
+    const saved = await saveBioWorkspaceToStorage(env, username, {
+      ...existing,
+      isDeactivated,
+      deactivatedAt: isDeactivated ? new Date().toISOString() : null,
+    });
+    return jsonResponse({
+      ok: true,
+      storageEngine: getLinksStorageEngine(env),
+      data: saved,
+    });
+  }
+
   if (url.pathname.startsWith('/api/links/bio/') && request.method === 'GET') {
     const rawUser = decodeURIComponent(url.pathname.replace('/api/links/bio/', '').split('/')[0] || '');
     const username = sanitizeHandle(rawUser);
-    const data = await getBioWorkspaceFromStorage(env, username);
+    const reserved = checkReservedUsername(username);
+    const [data, cooldown] = await Promise.all([
+      getBioWorkspaceFromStorage(env, username),
+      getBioDeleteCooldown(env, username),
+    ]);
     return jsonResponse({
       ok: true,
       storageEngine: getLinksStorageEngine(env),
       configured: Boolean(data),
       username,
+      reserved: reserved.isReserved,
+      cooldown,
       data,
     });
   }
@@ -1921,6 +2546,28 @@ async function handleApiRequest(
   if (url.pathname.startsWith('/api/links/bio/') && request.method === 'PUT') {
     const rawUser = decodeURIComponent(url.pathname.replace('/api/links/bio/', '').split('/')[0] || '');
     const username = sanitizeHandle(rawUser);
+    const reserved = checkReservedUsername(username);
+    if (reserved.isReserved) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: `Username "${reserved.canonical}" dicadangkan untuk sistem resmi ${primaryDomain} dan tidak dapat diklaim.`,
+        },
+        403
+      );
+    }
+    const cooldown = await getBioDeleteCooldown(env, username);
+    if (cooldown.active) {
+      return jsonResponse(
+        {
+          ok: false,
+          error:
+            'Profil Bio sedang dalam masa tunggu 3 hari pasca penghapusan permanen untuk mencegah penyalahgunaan database.',
+          cooldown,
+        },
+        429
+      );
+    }
     const parsed = await readBoundedJson<Record<string, unknown>>(request);
     if (!parsed.ok) {
       return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
@@ -1930,7 +2577,21 @@ async function handleApiRequest(
       ok: true,
       storageEngine: getLinksStorageEngine(env),
       configured: true,
+      cooldown: { active: false, deletedAt: null, unlockAt: null, remainingMs: 0 },
       data: saved,
+    });
+  }
+
+  if (url.pathname.startsWith('/api/links/bio/') && request.method === 'DELETE') {
+    const rawUser = decodeURIComponent(url.pathname.replace('/api/links/bio/', '').split('/')[0] || '');
+    const username = sanitizeHandle(rawUser);
+    const cooldown = await hardDeleteBioProfileAndSetCooldown(env, username);
+    return jsonResponse({
+      ok: true,
+      storageEngine: getLinksStorageEngine(env),
+      deleted: true,
+      username,
+      cooldown,
     });
   }
 
@@ -1955,7 +2616,7 @@ async function handleApiRequest(
     return jsonResponse({ ok: true, clicks });
   }
 
-  // 8. Dedicated Bio Link AVIF Avatar API (`/api/links/avatar/:username` & `/:pageSlug`)
+  // 9. Dedicated Bio Link AVIF Avatar API (`/api/links/avatar/:username` & `/:pageSlug`)
   //    Primary: Cloudflare R2 (`LINKS_MEDIA_R2`) -> Fallback: D1 (`bio_avatars`) -> KV (`LINKS_KV`)
   if (url.pathname.startsWith('/api/links/avatar/')) {
     const rest = url.pathname.replace('/api/links/avatar/', '').replace(/\/+$/, '');
@@ -1997,6 +2658,24 @@ async function handleApiRequest(
     }
 
     if (request.method === 'PUT') {
+      const reserved = checkReservedUsername(username);
+      if (reserved.isReserved) {
+        return jsonResponse(
+          { ok: false, error: `Username "${reserved.canonical}" dicadangkan untuk sistem.` },
+          403
+        );
+      }
+      const cooldown = await getBioDeleteCooldown(env, username);
+      if (cooldown.active) {
+        return jsonResponse(
+          {
+            ok: false,
+            error: 'Profil Bio sedang dalam masa tunggu 3 hari pasca penghapusan permanen.',
+            cooldown,
+          },
+          429
+        );
+      }
       const bin = await readBoundedBinary(request, AVATAR_MAX_BYTES);
       if (!bin.ok) {
         return jsonResponse({ ok: false, error: bin.error }, bin.status);

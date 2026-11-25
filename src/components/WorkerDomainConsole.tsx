@@ -12,13 +12,23 @@ import {
   RefreshCw,
   Send,
   Server,
+  ShieldAlert,
   ShieldCheck,
   Terminal,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import { getOrSeedDomains, saveDomainOption } from '../utils/localMailDb';
 import { sanitizeDomain, type MailDomainOption } from '../utils/mailIdentity';
+import {
+  ALL_RESERVED_USERNAMES,
+  RESERVED_USERNAMES_BY_CATEGORY,
+  checkReservedUsername,
+  generateAuth0PostLoginAction,
+  generateAuth0PreUserRegistrationAction,
+  getReservedCategoryLabel,
+  type ReservedCategory,
+} from '../utils/reservedUsernames';
 
 interface WorkerDomainConsoleProps {
   lang: Language;
@@ -48,7 +58,12 @@ interface HealthSnapshot {
   timestamp?: string;
 }
 
-type SetupGuideTab = 'inbound' | 'cpanel' | 'api_cloudflare' | 'd1_upgrade';
+type SetupGuideTab =
+  | 'inbound'
+  | 'cpanel'
+  | 'api_cloudflare'
+  | 'd1_upgrade'
+  | 'reserved_auth0';
 
 const CPANEL_SECRET_FILE_SNIPPET = `<?php
 // Simpan DI LUAR public_html, misal: /home/<username_cpanel>/.vz_relay_secret.php
@@ -81,8 +96,11 @@ const D1_UPGRADE_CLI_CMD = `# 1. Buat database Cloudflare D1 gratis (5 GB storag
 npx wrangler d1 create vzlinks-db
 # -> Salin "database_id" dari output perintah di atas
 
-# 2. Terapkan tabel relasional Multi-Page Bio & Shortlink ke D1 produksi
+# 2. Terapkan tabel Multi-Page Bio, Shortlink, Recycle Bin 14h & Cooldown 3h
 npx wrangler d1 execute vzlinks-db --remote --file=cloudflare/schema.sql
+
+# (Jika D1 sudah ada sebelumnya, tambahkan kolom deactivate pada bio_profiles):
+npx wrangler d1 execute vzlinks-db --remote --command "ALTER TABLE bio_profiles ADD COLUMN is_deactivated INTEGER NOT NULL DEFAULT 0; ALTER TABLE bio_profiles ADD COLUMN deactivated_at TEXT;"
 
 # 3. Uncomment blok [[d1_databases]] di wrangler.toml & tempel database_id Anda,
 #    lalu deploy ulang Worker:
@@ -151,7 +169,21 @@ export function WorkerDomainConsole({
   const [health, setHealth] = useState<HealthSnapshot | null>(null);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [reservedTestInput, setReservedTestInput] = useState('ad.min@imy.li');
   const timerRef = useRef<number | null>(null);
+
+  const auth0PreRegScript = useMemo(
+    () => generateAuth0PreUserRegistrationAction(),
+    []
+  );
+  const auth0PostLoginScript = useMemo(
+    () => generateAuth0PostLoginAction(),
+    []
+  );
+  const reservedTestResult = useMemo(
+    () => checkReservedUsername(reservedTestInput),
+    [reservedTestInput]
+  );
 
   const loadDomains = useCallback(async () => {
     const list = await getOrSeedDomains();
@@ -552,6 +584,19 @@ export function WorkerDomainConsole({
               <Database className="w-3.5 h-3.5" />
               <span>4. D1, R2 &amp; Route imy.li/*</span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveGuideTab('reserved_auth0')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                activeGuideTab === 'reserved_auth0'
+                  ? 'bg-rose-600 text-white'
+                  : 'bg-slate-100 dark:bg-[#1B202B] text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-[#252C3B]'
+              }`}
+            >
+              <ShieldAlert className="w-3.5 h-3.5" />
+              <span>5. Reserved &amp; Auth0 Sync</span>
+            </button>
           </div>
         </div>
 
@@ -929,6 +974,167 @@ export function WorkerDomainConsole({
                       {R2_WRANGLER_BLOCK_SNIPPET}
                     </pre>
                   </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeGuideTab === 'reserved_auth0' && (
+            <div className="space-y-5">
+              <div className="p-3.5 rounded-lg bg-rose-50/70 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/50 text-xs text-rose-900 dark:text-rose-200 leading-relaxed">
+                <strong>Sinkronisasi Perlindungan Username Sistem (App + Worker + Auth0):</strong>{' '}
+                Daftar <span className="font-mono font-semibold">{ALL_RESERVED_USERNAMES.length}</span>{' '}
+                username sistem (seperti <span className="font-mono">admin</span>,{' '}
+                <span className="font-mono">webmaster</span>,{' '}
+                <span className="font-mono">noreply</span>,{' '}
+                <span className="font-mono">newsletter</span>,{' '}
+                <span className="font-mono">cs</span>,{' '}
+                <span className="font-mono">help</span>,{' '}
+                <span className="font-mono">support</span>) sudah aktif diblokir di Cloudflare Worker
+                dan UI aplikasi. Pasang kedua skrip <strong>Auth0 Action</strong> di bawah agar
+                pendaftaran akun SSO baru di <span className="font-mono">accounts.vz.gay</span> ikut
+                menolak username sistem dan variasi titik/strip (<span className="font-mono">ad.min</span>,{' '}
+                <span className="font-mono">no-reply</span>) sejak awal.
+              </div>
+
+              {/* Interactive Reserved Username Canonical Tester */}
+              <div className="p-4 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-3">
+                <div className="text-xs font-semibold text-slate-900 dark:text-white">
+                  {lang === 'id'
+                    ? 'Uji Normalisasi Kanonik Username Sistem'
+                    : 'Test Canonical Reserved Username Normalization'}
+                </div>
+                <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
+                  <input
+                    type="text"
+                    value={reservedTestInput}
+                    onChange={(e) => setReservedTestInput(e.target.value)}
+                    placeholder="Contoh: ad.min, no-reply@imy.li, webmaster, cs"
+                    className="flex-1 px-3 py-2 text-xs font-mono bg-white dark:bg-[#13161C] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  />
+                  <div
+                    className={`px-3 py-2 rounded-lg text-xs font-mono font-semibold border shrink-0 ${
+                      reservedTestResult.isReserved
+                        ? 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-900/60 text-rose-700 dark:text-rose-300'
+                        : 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-900/60 text-emerald-700 dark:text-emerald-300'
+                    }`}
+                  >
+                    {reservedTestResult.isReserved
+                      ? `BLOCKED (${reservedTestResult.canonical})`
+                      : `ALLOWED (${reservedTestResult.canonical || '—'})`}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                  {['ad.min@imy.li', 'no-reply', 'web.master', 'newsletter', 'cs', 'support', 'fadhil'].map(
+                    (sample) => (
+                      <button
+                        key={sample}
+                        type="button"
+                        onClick={() => setReservedTestInput(sample)}
+                        className="px-2 py-1 font-mono bg-slate-100 dark:bg-[#191E28] hover:bg-slate-200 dark:hover:bg-[#232A38] text-slate-700 dark:text-slate-300 rounded cursor-pointer"
+                      >
+                        {sample}
+                      </button>
+                    )
+                  )}
+                </div>
+                {reservedTestResult.isReserved && reservedTestResult.category && (
+                  <div className="text-[11px] text-rose-600 dark:text-rose-400">
+                    {lang === 'id' ? 'Kategori terdeteksi:' : 'Matched category:'}{' '}
+                    <strong>{getReservedCategoryLabel(reservedTestResult.category, lang)}</strong>{' '}
+                    (<span className="font-mono">{reservedTestResult.matchedTerm}</span>)
+                  </div>
+                )}
+              </div>
+
+              {/* Categorized Reserved List Summary */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {(Object.keys(RESERVED_USERNAMES_BY_CATEGORY) as ReservedCategory[]).map(
+                  (cat) => (
+                    <div
+                      key={cat}
+                      className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1.5"
+                    >
+                      <div className="text-xs font-semibold text-slate-900 dark:text-white flex items-center justify-between gap-2">
+                        <span>{getReservedCategoryLabel(cat, lang)}</span>
+                        <span className="font-mono text-[11px] text-slate-500 tabular-nums">
+                          {RESERVED_USERNAMES_BY_CATEGORY[cat].length}
+                        </span>
+                      </div>
+                      <div className="text-[11px] font-mono text-slate-600 dark:text-slate-400 leading-relaxed">
+                        {RESERVED_USERNAMES_BY_CATEGORY[cat].join(', ')}
+                      </div>
+                    </div>
+                  )
+                )}
+              </div>
+
+              {/* Step-by-step Auth0 Deployment Instructions */}
+              <ol className="space-y-2 text-xs sm:text-sm text-slate-700 dark:text-slate-300 list-decimal pl-5">
+                <li>
+                  Buka <strong>Auth0 Dashboard</strong> → menu kiri{' '}
+                  <strong className="text-slate-900 dark:text-white">
+                    Actions → Flows → Pre User Registration
+                  </strong>{' '}
+                  → klik <strong>+ Create Action (Build from scratch)</strong> → tempel skrip{' '}
+                  <span className="font-mono">vz-block-reserved-usernames</span> di kiri, Deploy,
+                  lalu drag ke Flow.
+                </li>
+                <li>
+                  Buka{' '}
+                  <strong className="text-slate-900 dark:text-white">
+                    Actions → Flows → Login (Post-Login)
+                  </strong>{' '}
+                  → tambahkan skrip kedua di kanan untuk menandai klaim token{' '}
+                  <span className="font-mono">https://vz.gay/reserved_username</span> bagi akun
+                  sosial (Google/GitHub) yang kebetulan memiliki prefix email sistem.
+                </li>
+              </ol>
+
+              {/* Copyable Auth0 Action Scripts */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="rounded-lg border border-slate-200 dark:border-[#232732] overflow-hidden">
+                  <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1016] border-b border-slate-200 dark:border-[#232732] flex items-center justify-between text-xs">
+                    <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-slate-800 dark:text-slate-200">
+                      <ShieldAlert className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />
+                      <span>Auth0 Action 1: Pre-User Registration</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCopy('Auth0 Pre-User Registration Action', auth0PreRegScript)
+                      }
+                      className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </button>
+                  </div>
+                  <pre className="p-3.5 text-[11px] font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-800 dark:text-slate-200 overflow-x-auto max-h-80 leading-relaxed">
+                    {auth0PreRegScript}
+                  </pre>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 dark:border-[#232732] overflow-hidden">
+                  <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1016] border-b border-slate-200 dark:border-[#232732] flex items-center justify-between text-xs">
+                    <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-slate-800 dark:text-slate-200">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                      <span>Auth0 Action 2: Post-Login Guard</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCopy('Auth0 Post-Login Action', auth0PostLoginScript)
+                      }
+                      className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </button>
+                  </div>
+                  <pre className="p-3.5 text-[11px] font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-800 dark:text-slate-200 overflow-x-auto max-h-80 leading-relaxed">
+                    {auth0PostLoginScript}
+                  </pre>
                 </div>
               </div>
             </div>

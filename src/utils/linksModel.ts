@@ -214,9 +214,39 @@ export interface BioWorkspaceData {
   avatarUrl: string;
   socials: Partial<Record<SocialPlatformId, string>>;
   pages: BioPageRecord[];
+  isDeactivated?: boolean;
+  deactivatedAt?: string | null;
   updatedAt: string;
   configured: boolean;
 }
+
+export interface BioDeleteCooldownInfo {
+  active: boolean;
+  deletedAt: string | null;
+  unlockAt: string | null;
+  remainingMs: number;
+}
+
+export type RecycleBinItemType = 'bio_link' | 'bio_page' | 'shortlink';
+
+export interface RecycleBinRecord {
+  id: string;
+  ownerUser: string;
+  itemType: RecycleBinItemType;
+  label: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  deletedAt: string;
+  expiresAt: string;
+}
+
+export const BIO_DELETE_COOLDOWN_DAYS = 3;
+export const BIO_DELETE_COOLDOWN_SECONDS = BIO_DELETE_COOLDOWN_DAYS * 24 * 60 * 60;
+export const BIO_DELETE_COOLDOWN_MS = BIO_DELETE_COOLDOWN_SECONDS * 1000;
+
+export const RECYCLE_BIN_RETENTION_DAYS = 14;
+export const RECYCLE_BIN_TTL_SECONDS = RECYCLE_BIN_RETENTION_DAYS * 24 * 60 * 60;
+export const RECYCLE_BIN_RETENTION_MS = RECYCLE_BIN_TTL_SECONDS * 1000;
 
 export interface ShortlinkRecord {
   slug: string;
@@ -240,6 +270,9 @@ export const RESERVED_PAGE_SLUGS = new Set([
   'admin',
   'login',
   'logout',
+  'terms',
+  'privacy',
+  'legal',
   'sw.js',
   'favicon.svg',
   'robots.txt',
@@ -430,6 +463,8 @@ export function createEmptyBioWorkspace(
         updatedAt: now,
       },
     ],
+    isDeactivated: false,
+    deactivatedAt: null,
     updatedAt: now,
     configured: false,
   };
@@ -534,6 +569,14 @@ export function sanitizeBioWorkspaceInput(
     cleanPages.sort((a, b) => (a.pageSlug === '' ? -1 : b.pageSlug === '' ? 1 : 0));
   }
 
+  const isDeactivated = obj.isDeactivated === true;
+  const deactivatedAt =
+    isDeactivated && typeof obj.deactivatedAt === 'string' && obj.deactivatedAt.trim()
+      ? obj.deactivatedAt.trim().slice(0, 64)
+      : isDeactivated
+        ? now
+        : null;
+
   return {
     username,
     displayName,
@@ -542,6 +585,8 @@ export function sanitizeBioWorkspaceInput(
     avatarUrl: safeAvatar,
     socials,
     pages: cleanPages,
+    isDeactivated,
+    deactivatedAt,
     updatedAt: now,
     configured: true,
   };

@@ -5,6 +5,7 @@ import {
   HardDrive,
   Lock,
   Mail,
+  ShieldAlert,
   ShieldCheck,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -14,6 +15,7 @@ import {
   generateAliasExamples,
   resolveCanonicalEmail,
 } from '../utils/mailIdentity';
+import { checkReservedUsername } from '../utils/reservedUsernames';
 import type { ActiveHostView } from './MailLinksTopBar';
 
 interface MailLandingGateProps {
@@ -36,10 +38,53 @@ export function MailLandingGate({
   const [testInput, setTestInput] = useState(
     `${user.slice(0, 2)}.${user.slice(2) || 'id'}+github@${domain}`
   );
+  const [legalAccepted, setLegalAccepted] = useState(false);
+
+  const reservedCheck = session.isAuthenticated
+    ? checkReservedUsername(session.username)
+    : { isReserved: false, canonical: '', matchedWord: null, category: null };
 
   useEffect(() => {
     setTestInput(`${user.slice(0, 2)}.${user.slice(2) || 'id'}+github@${domain}`);
   }, [user, domain]);
+
+  useEffect(() => {
+    if (!session.isAuthenticated || !session.username) {
+      setLegalAccepted(false);
+      return;
+    }
+    try {
+      const saved = window.localStorage.getItem(
+        `vz_legal_consent_mail_v1:${session.username}`
+      );
+      setLegalAccepted(saved === 'accepted');
+    } catch {
+      setLegalAccepted(false);
+    }
+  }, [session.isAuthenticated, session.username]);
+
+  const handleToggleConsent = (checked: boolean) => {
+    setLegalAccepted(checked);
+    if (session.isAuthenticated && session.username) {
+      try {
+        if (checked) {
+          window.localStorage.setItem(
+            `vz_legal_consent_mail_v1:${session.username}`,
+            'accepted'
+          );
+        } else {
+          window.localStorage.removeItem(
+            `vz_legal_consent_mail_v1:${session.username}`
+          );
+        }
+      } catch {
+        // Ignore storage errors
+      }
+    }
+  };
+
+  const canActivate =
+    session.isAuthenticated && !reservedCheck.isReserved && legalAccepted;
 
   const resolved = resolveCanonicalEmail(testInput, [domain, 'vz.gay']);
   const aliasExamples = generateAliasExamples(user, domain);
@@ -91,17 +136,105 @@ export function MailLandingGate({
                   </span>
                 </div>
 
-                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                  {lang === 'id'
-                    ? `Satu akun SSO digunakan untuk seluruh layanan ekosistem vz.gay. Anda bebas memilih apakah ingin membuat kotak surat ${user}@${domain} sekarang atau tidak (serupa akun Microsoft Live yang dapat dipakai tanpa membuat Outlook/Hotmail).`
-                    : `One SSO account works across all vz.gay services. Choosing to create a ${user}@${domain} mailbox is completely optional (just like registering a Microsoft account without creating an Outlook inbox).`}
-                </p>
+                {reservedCheck.isReserved ? (
+                  <div className="p-3.5 rounded-lg bg-rose-50 dark:bg-rose-950/35 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-800 dark:text-rose-200 space-y-1.5">
+                    <div className="font-semibold flex items-center gap-1.5">
+                      <ShieldAlert className="w-4 h-4 shrink-0" />
+                      <span>
+                        {lang === 'id'
+                          ? `Username sistem "${session.username}" dilindungi (Reserved)`
+                          : `System username "${session.username}" is reserved`}
+                      </span>
+                    </div>
+                    <p className="leading-relaxed">
+                      {lang === 'id'
+                        ? `Alamat ${session.username}@${domain} dicadangkan khusus untuk operasional resmi sistem (seperti admin, webmaster, noreply, cs, support). Ganti username akun SSO Anda di myaccount.vz.gay untuk mengaktifkan kotak surat pribadi.`
+                        : `Address ${session.username}@${domain} is reserved for official system operations (e.g., admin, webmaster, noreply, support). Update your SSO username on myaccount.vz.gay to activate a personal mailbox.`}
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                      {lang === 'id'
+                        ? `Satu akun SSO digunakan untuk seluruh layanan ekosistem vz.gay. Anda bebas memilih apakah ingin membuat kotak surat ${user}@${domain} sekarang atau tidak (serupa akun Microsoft Live yang dapat dipakai tanpa membuat Outlook/Hotmail).`
+                        : `One SSO account works across all vz.gay services. Choosing to create a ${user}@${domain} mailbox is completely optional (just like registering a Microsoft account without creating an Outlook inbox).`}
+                    </p>
+
+                    <label className="flex items-start gap-2.5 p-3 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={legalAccepted}
+                        onChange={(e) => handleToggleConsent(e.target.checked)}
+                        className="mt-0.5 rounded border-slate-300 text-blue-600 focus:ring-blue-600 shrink-0"
+                      />
+                      <span className="leading-relaxed">
+                        {lang === 'id' ? (
+                          <>
+                            Saya menyetujui{' '}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                onSelectHost('terms');
+                              }}
+                              className="font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                            >
+                              Syarat &amp; Ketentuan
+                            </button>{' '}
+                            dan{' '}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                onSelectHost('privacy');
+                              }}
+                              className="font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                            >
+                              Kebijakan Privasi
+                            </button>{' '}
+                            VZ Mail &amp; VZ Links, termasuk kepatuhan kebijakan TLD{' '}
+                            <span className="font-mono">.gay</span> (anti-kebencian) &amp; ccTLD{' '}
+                            <span className="font-mono">.li</span> (anti-spam/phishing).
+                          </>
+                        ) : (
+                          <>
+                            I agree to the VZ Mail &amp; VZ Links{' '}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                onSelectHost('terms');
+                              }}
+                              className="font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                            >
+                              Terms of Service
+                            </button>{' '}
+                            and{' '}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                onSelectHost('privacy');
+                              }}
+                              className="font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                            >
+                              Privacy Policy
+                            </button>
+                            , including <span className="font-mono">.gay</span> Rights Protections
+                            Policy and SWITCH <span className="font-mono">.li</span> anti-abuse rules.
+                          </>
+                        )}
+                      </span>
+                    </label>
+                  </>
+                )}
 
                 <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2.5 sm:gap-3 pt-1">
                   <button
                     type="button"
+                    disabled={!canActivate}
                     onClick={onActivateMail}
-                    className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-45 disabled:cursor-not-allowed rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <Mail className="w-4 h-4 shrink-0" />
                     <span className="truncate">
@@ -420,8 +553,9 @@ export function MailLandingGate({
                 <td className="py-2.5 pl-4 text-right font-sans">
                   <button
                     type="button"
+                    disabled={session.isAuthenticated && !canActivate}
                     onClick={onActivateMail}
-                    className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                    className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
                   >
                     {lang === 'id' ? 'Aktifkan Sekarang' : 'Activate Now'}
                   </button>

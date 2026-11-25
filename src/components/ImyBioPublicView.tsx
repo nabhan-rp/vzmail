@@ -149,6 +149,56 @@ export function ImyBioPublicView({
     );
   }
 
+  // Temporary deactivation state (owner deactivated Bio without deleting data)
+  if (user && workspace && workspace.isDeactivated) {
+    return (
+      <div className="min-h-[calc(100vh-112px)] flex items-center justify-center px-4 py-14">
+        <div className="w-full max-w-md bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-2xl p-7 text-center space-y-5">
+          <div className="w-12 h-12 rounded-xl bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-900/60 flex items-center justify-center mx-auto">
+            <Globe className="w-6 h-6" />
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="text-xs font-mono text-slate-500">
+              {pageSlug ? `${user}.${domain}/${pageSlug}` : `${user}.${domain}`}
+            </div>
+            <h1 className="text-lg font-bold text-slate-900 dark:text-white font-display">
+              {lang === 'id'
+                ? 'Halaman Bio Dinonaktifkan Sementara'
+                : 'Bio Page Temporarily Deactivated'}
+            </h1>
+            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+              {isOwner
+                ? lang === 'id'
+                  ? `Halaman ${user}.${domain} dan semua sub-halamannya saat ini disembunyikan dari publik. Seluruh tautan Anda masih aman tersimpan dan dapat diaktifkan kembali kapan saja di Studio Bio.`
+                  : `Your ${user}.${domain} profile and sub-pages are currently hidden from public visitors. All your data remains safely stored and can be reactivated anytime in Bio Studio.`
+                : lang === 'id'
+                  ? `Pemilik ${user}.${domain} sedang menonaktifkan halaman ini untuk sementara waktu.`
+                  : `The owner of ${user}.${domain} has temporarily deactivated this page.`}
+            </p>
+          </div>
+
+          {isOwner && (
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={() => onSelectHost('links.vz.gay')}
+                className="min-h-[40px] px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                <span>
+                  {lang === 'id'
+                    ? 'Aktifkan Kembali di Studio Bio'
+                    : 'Reactivate in Bio Studio'}
+                </span>
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // Honest unconfigured / empty state (zero mock or demo data)
   if (!user || !workspace || !activePage) {
     const requestedPath = user

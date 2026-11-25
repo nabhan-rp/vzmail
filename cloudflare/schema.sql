@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS bio_profiles (
   bio TEXT NOT NULL DEFAULT '',
   avatar_url TEXT NOT NULL DEFAULT '',
   socials_json TEXT NOT NULL DEFAULT '{}',
+  is_deactivated INTEGER NOT NULL DEFAULT 0,
+  deactivated_at TEXT,
   updated_at TEXT NOT NULL
 );
 
@@ -67,7 +69,26 @@ CREATE TABLE IF NOT EXISTS shortlinks (
   last_clicked_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS links_recycle_bin (
+  id TEXT PRIMARY KEY,
+  owner_user TEXT NOT NULL,
+  item_type TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL,
+  deleted_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bio_delete_cooldowns (
+  username TEXT PRIMARY KEY,
+  deleted_at TEXT NOT NULL,
+  unlock_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_bio_pages_user ON bio_pages(username, page_slug);
 CREATE INDEX IF NOT EXISTS idx_bio_links_page ON bio_links(page_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_bio_avatars_user ON bio_avatars(username, page_slug);
 CREATE INDEX IF NOT EXISTS idx_shortlinks_owner_created ON shortlinks(owner_user, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_recycle_bin_owner ON links_recycle_bin(owner_user, deleted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_recycle_bin_expires ON links_recycle_bin(expires_at);

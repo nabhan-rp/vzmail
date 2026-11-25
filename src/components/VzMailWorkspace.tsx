@@ -16,6 +16,7 @@ import {
   RefreshCw,
   Search,
   Send,
+  ShieldAlert,
   ShieldCheck,
   Star,
   Table2,
@@ -47,6 +48,8 @@ import {
   serializeToEml,
   triggerBrowserDownload,
 } from '../utils/mailVaultCrypto';
+import { checkReservedUsername } from '../utils/reservedUsernames';
+import { ConfirmActionModal } from './ConfirmActionModal';
 import type { ActiveHostView } from './MailLinksTopBar';
 
 interface VzMailWorkspaceProps {
@@ -148,6 +151,13 @@ export function VzMailWorkspace({
   const [expandedHeaderIds, setExpandedHeaderIds] = useState<Record<string, boolean>>({});
   const [quickReplyText, setQuickReplyText] = useState('');
   const [sendingQuickReply, setSendingQuickReply] = useState(false);
+  const [pendingPermanentDeleteMsg, setPendingPermanentDeleteMsg] =
+    useState<LocalMailMessage | null>(null);
+  const [deletingLocalMsg, setDeletingLocalMsg] = useState(false);
+  const reservedMailCheck = useMemo(
+    () => checkReservedUsername(user),
+    [user]
+  );
 
   // Ephemeral Edge Transit Queue state
   const [edgePackets, setEdgePackets] = useState<EphemeralEdgePacket[]>([]);
@@ -1216,6 +1226,22 @@ export function VzMailWorkspace({
 
   return (
     <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-4 sm:py-6 space-y-4">
+      {reservedMailCheck.isReserved && (
+        <div className="bg-rose-50 dark:bg-rose-950/40 text-rose-800 dark:text-rose-200 border border-rose-200 dark:border-rose-900/60 rounded-lg px-4 py-3 text-xs flex items-start gap-2.5">
+          <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
+          <div className="leading-relaxed">
+            <strong>
+              {lang === 'id'
+                ? `Username sistem "${user}" dilindungi (Reserved):`
+                : `System username "${user}" is reserved:`}
+            </strong>{' '}
+            {lang === 'id'
+              ? `Pengiriman email keluar dari ${user}@${domain} diblokir otomatis di server untuk melindungi alamat resmi sistem. Ganti username di myaccount.vz.gay.`
+              : `Outbound email sending from ${user}@${domain} is blocked server-side to protect official system addresses. Update your username on myaccount.vz.gay.`}
+          </div>
+        </div>
+      )}
+
       {/* Toast Notification */}
       {toastNotice && (
         <div className="bg-slate-900 dark:bg-blue-950 text-white border border-slate-700 dark:border-blue-800 rounded-lg px-4 py-2.5 text-xs flex items-center justify-between gap-3">
@@ -2072,7 +2098,7 @@ export function VzMailWorkspace({
                         <button
                           type="button"
                           onClick={() =>
-                            handlePermanentLocalDelete(activeClassicMessage.id)
+                            setPendingPermanentDeleteMsg(activeClassicMessage)
                           }
                           className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-md cursor-pointer"
                         >
@@ -2391,6 +2417,45 @@ export function VzMailWorkspace({
           </div>
         </div>
       )}
+
+      <ConfirmActionModal
+        isOpen={Boolean(pendingPermanentDeleteMsg)}
+        lang={lang}
+        tone="danger"
+        title={
+          lang === 'id'
+            ? 'Hapus permanen email ini dari perangkat?'
+            : 'Permanently delete this email from device?'
+        }
+        description={
+          lang === 'id'
+            ? 'Pesan ini akan dihapus secara permanen dari database IndexedDB lokal perangkat Anda dan tidak dapat dipulihkan kembali (kecuali Anda memiliki cadangan MyVault).'
+            : 'This message will be permanently erased from your device local IndexedDB database and cannot be recovered (unless you have a MyVault backup).'
+        }
+        details={
+          pendingPermanentDeleteMsg
+            ? `${pendingPermanentDeleteMsg.subject || '(No Subject)'} — ${pendingPermanentDeleteMsg.from.address}`
+            : undefined
+        }
+        confirmLabel={
+          lang === 'id' ? 'Ya, Hapus Permanen' : 'Yes, Delete Permanently'
+        }
+        loading={deletingLocalMsg}
+        onConfirm={async () => {
+          if (!pendingPermanentDeleteMsg) return;
+          setDeletingLocalMsg(true);
+          try {
+            await handlePermanentLocalDelete(pendingPermanentDeleteMsg.id);
+          } finally {
+            setDeletingLocalMsg(false);
+            setPendingPermanentDeleteMsg(null);
+          }
+        }}
+        onCancel={() => {
+          if (deletingLocalMsg) return;
+          setPendingPermanentDeleteMsg(null);
+        }}
+      />
     </div>
   );
 }

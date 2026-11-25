@@ -28,7 +28,9 @@ export type ActiveHostView =
   | 'links.vz.gay'
   | 'bio_public'
   | 'shortlinks'
-  | 'worker_console';
+  | 'worker_console'
+  | 'terms'
+  | 'privacy';
 
 interface MailLinksTopBarProps {
   lang: Language;
@@ -888,24 +890,42 @@ export function MailLinksTopBar({
             </div>
 
             {/* Drawer Footer Links */}
-            <div className="px-4 py-3 border-t border-slate-200 dark:border-[#232732] bg-[#FAFAFA] dark:bg-[#0B0D11] flex items-center justify-between text-xs text-slate-600 dark:text-slate-400 shrink-0">
-              <a
-                href="https://myaccount.vz.gay"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 font-mono hover:text-blue-600 dark:hover:text-blue-400"
-              >
-                <span>myaccount.vz.gay</span>
-                <ExternalLink className="w-3 h-3" />
-              </a>
-              <a
-                href="https://vz.gay"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-slate-900 dark:hover:text-white"
-              >
-                vz.gay
-              </a>
+            <div className="px-4 py-3 border-t border-slate-200 dark:border-[#232732] bg-[#FAFAFA] dark:bg-[#0B0D11] space-y-2 text-xs text-slate-600 dark:text-slate-400 shrink-0">
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleNavigateFromDrawer('terms')}
+                  className="hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer"
+                >
+                  {lang === 'id' ? 'Syarat & Ketentuan' : 'Terms of Service'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleNavigateFromDrawer('privacy')}
+                  className="hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer"
+                >
+                  {lang === 'id' ? 'Kebijakan Privasi' : 'Privacy Policy'}
+                </button>
+              </div>
+              <div className="flex items-center justify-between pt-2 border-t border-slate-200/70 dark:border-[#232732]">
+                <a
+                  href="https://myaccount.vz.gay"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 font-mono hover:text-blue-600 dark:hover:text-blue-400"
+                >
+                  <span>myaccount.vz.gay</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+                <a
+                  href="https://vz.gay"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-slate-900 dark:hover:text-white"
+                >
+                  vz.gay
+                </a>
+              </div>
             </div>
           </div>
         </div>

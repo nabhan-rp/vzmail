@@ -17,14 +17,25 @@ import {
 } from './src/utils/mailSecurity.ts';
 import {
   AVATAR_MAX_BYTES,
+  BIO_DELETE_COOLDOWN_MS,
+  RECYCLE_BIN_RETENTION_MS,
   detectValidatedAvatarMime,
   generateShortlinkCode,
+  isValidBioThemeId,
+  isValidButtonStyle,
+  sanitizeBioAvatarUrl,
   sanitizeBioWorkspaceInput,
   sanitizePageSlug,
   sanitizeShortlinkSlugInput,
+  type BioDeleteCooldownInfo,
+  type BioLinkItem,
+  type BioPageRecord,
   type BioWorkspaceData,
+  type RecycleBinItemType,
+  type RecycleBinRecord,
   type ShortlinkRecord,
 } from './src/utils/linksModel.ts';
+import { checkReservedUsername } from './src/utils/reservedUsernames.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,6 +68,35 @@ const localBioAvatars: Map<
   string,
   { bytes: Buffer; contentType: 'image/avif' | 'image/webp'; updatedAt: string }
 > = new Map();
+const localRecycleBin: Map<string, RecycleBinRecord> = new Map();
+const localBioDeleteCooldowns: Map<string, { deletedAt: string; unlockAt: string }> = new Map();
+
+function pruneExpiredLocalRecycleBin(): void {
+  const now = Date.now();
+  for (const [id, rec] of localRecycleBin.entries()) {
+    if (new Date(rec.expiresAt).getTime() <= now) {
+      localRecycleBin.delete(id);
+    }
+  }
+}
+
+function getLocalBioCooldown(username: string): BioDeleteCooldownInfo {
+  const rec = localBioDeleteCooldowns.get(username);
+  if (!rec) {
+    return { active: false, deletedAt: null, unlockAt: null, remainingMs: 0 };
+  }
+  const remainingMs = new Date(rec.unlockAt).getTime() - Date.now();
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+    localBioDeleteCooldowns.delete(username);
+    return { active: false, deletedAt: null, unlockAt: null, remainingMs: 0 };
+  }
+  return {
+    active: true,
+    deletedAt: rec.deletedAt,
+    unlockAt: rec.unlockAt,
+    remainingMs,
+  };
+}
 
 let totalPurgedSinceBoot = 0;
 
@@ -317,6 +357,14 @@ async function startServer() {
     pruneExpiredAndBoundQueue();
 
     const senderUser = sanitizeHandle(String(req.body?.senderUser || 'fadhil'));
+    const senderReserved = checkReservedUsername(senderUser);
+    if (senderReserved.isReserved) {
+      res.status(403).json({
+        ok: false,
+        error: `Username "${senderReserved.canonical}" dicadangkan untuk sistem resmi @imy.li.`,
+      });
+      return;
+    }
     const rawFrom = stripHeaderInjection(
       String(req.body?.fromAddress || `${senderUser}@imy.li`),
       254
@@ -531,6 +579,7 @@ async function startServer() {
     const existing = localShortlinks.get(slug);
     const ownerParam = String(req.query.owner || '').trim();
     const ownerUser = ownerParam ? sanitizeHandle(ownerParam) : null;
+    const mode = req.query.mode === 'recycle' ? 'recycle' : 'permanent';
     if (existing && existing.ownerUser && ownerUser && existing.ownerUser !== ownerUser) {
       res.status(403).json({
         ok: false,
@@ -539,23 +588,296 @@ async function startServer() {
       return;
     }
     const deleted = localShortlinks.delete(slug);
-    res.json({ ok: true, storageEngine: 'local-dev-memory', deletedSlug: slug, deleted });
+    let recycleId: string | null = null;
+    if (deleted && existing && mode === 'recycle' && ownerUser) {
+      pruneExpiredLocalRecycleBin();
+      const now = new Date();
+      const rec: RecycleBinRecord = {
+        id: generateSecureId('rb'),
+        ownerUser,
+        itemType: 'shortlink',
+        label: `imy.li/s/${existing.slug}`,
+        summary: existing.title || existing.targetUrl,
+        payload: existing as unknown as Record<string, unknown>,
+        deletedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + RECYCLE_BIN_RETENTION_MS).toISOString(),
+      };
+      localRecycleBin.set(rec.id, rec);
+      recycleId = rec.id;
+    }
+    res.json({
+      ok: true,
+      storageEngine: 'local-dev-memory',
+      deletedSlug: slug,
+      deleted,
+      mode,
+      movedToRecycleBin: Boolean(recycleId),
+      recycleId,
+    });
+  });
+
+  // Recycle Bin API (14-Day Auto-Purge)
+  app.get('/api/links/recycle-bin', (req, res) => {
+    pruneExpiredLocalRecycleBin();
+    const ownerParam = String(req.query.owner || '').trim();
+    if (!ownerParam) {
+      res.status(400).json({ ok: false, error: 'Parameter owner diperlukan.' });
+      return;
+    }
+    const ownerUser = sanitizeHandle(ownerParam);
+    const items = Array.from(localRecycleBin.values())
+      .filter((r) => r.ownerUser === ownerUser)
+      .sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
+    res.json({
+      ok: true,
+      storageEngine: 'local-dev-memory',
+      retentionDays: 14,
+      items,
+    });
+  });
+
+  app.post('/api/links/recycle-bin', (req, res) => {
+    pruneExpiredLocalRecycleBin();
+    const ownerUser = sanitizeHandle(String(req.body?.ownerUser || ''));
+    const itemType = req.body?.itemType as RecycleBinItemType;
+    if (itemType !== 'bio_link' && itemType !== 'bio_page' && itemType !== 'shortlink') {
+      res.status(400).json({ ok: false, error: 'Tipe item Recycle Bin tidak valid.' });
+      return;
+    }
+    const now = new Date();
+    const record: RecycleBinRecord = {
+      id: generateSecureId('rb'),
+      ownerUser,
+      itemType,
+      label: String(req.body?.label || itemType).slice(0, 140),
+      summary: String(req.body?.summary || '').slice(0, 260),
+      payload:
+        req.body?.payload && typeof req.body.payload === 'object' ? req.body.payload : {},
+      deletedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + RECYCLE_BIN_RETENTION_MS).toISOString(),
+    };
+    localRecycleBin.set(record.id, record);
+    res.status(201).json({ ok: true, record });
+  });
+
+  app.post('/api/links/recycle-bin/restore', (req, res) => {
+    pruneExpiredLocalRecycleBin();
+    const ownerUser = sanitizeHandle(String(req.body?.ownerUser || ''));
+    const id = String(req.body?.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+    const item = localRecycleBin.get(id);
+    if (!item || item.ownerUser !== ownerUser) {
+      res.status(404).json({
+        ok: false,
+        error: 'Item tidak ditemukan atau sudah kedaluwarsa (> 14 hari).',
+      });
+      return;
+    }
+
+    if (item.itemType === 'shortlink') {
+      const rawPayload = item.payload as Partial<ShortlinkRecord>;
+      const safeTarget = sanitizeExternalUrl(String(rawPayload.targetUrl || ''), {
+        allowMailto: false,
+        blockPrivateHosts: true,
+      });
+      if (!safeTarget) {
+        localRecycleBin.delete(id);
+        res.status(400).json({ ok: false, error: 'URL shortlink tidak valid.' });
+        return;
+      }
+      let targetSlug =
+        sanitizeShortlinkSlugInput(String(rawPayload.slug || '')) || generateShortlinkCode(6);
+      const conflict = localShortlinks.has(targetSlug);
+      if (conflict) targetSlug = generateShortlinkCode(7);
+      const restored: ShortlinkRecord = {
+        slug: targetSlug,
+        ownerUser,
+        title: stripHeaderInjection(String(rawPayload.title || ''), 120),
+        targetUrl: safeTarget,
+        isCustomSlug: Boolean(rawPayload.isCustomSlug && !conflict),
+        clicks: Math.max(0, Number(rawPayload.clicks) || 0),
+        createdAt:
+          typeof rawPayload.createdAt === 'string' && rawPayload.createdAt
+            ? rawPayload.createdAt
+            : new Date().toISOString(),
+        lastClickedAt:
+          typeof rawPayload.lastClickedAt === 'string' ? rawPayload.lastClickedAt : null,
+      };
+      localShortlinks.set(restored.slug, restored);
+      localRecycleBin.delete(id);
+      res.json({ ok: true, itemType: 'shortlink', restoredSlug: restored.slug, record: restored });
+      return;
+    }
+
+    const cooldown = getLocalBioCooldown(ownerUser);
+    if (cooldown.active) {
+      res.status(429).json({
+        ok: false,
+        error: 'Profil Bio sedang dalam masa tunggu 3 hari pasca penghapusan permanen.',
+        cooldown,
+      });
+      return;
+    }
+
+    const existing = localBioWorkspaces.get(ownerUser);
+    if (!existing) {
+      res.status(400).json({
+        ok: false,
+        error: 'Simpan profil Bio utama terlebih dahulu sebelum memulihkan item ini.',
+      });
+      return;
+    }
+
+    if (item.itemType === 'bio_page') {
+      const pagePayload = item.payload as Partial<BioPageRecord>;
+      const baseSlug =
+        sanitizePageSlug(String(pagePayload.pageSlug || '')) ||
+        `page-${Date.now().toString(36).slice(-4)}`;
+      let finalSlug = baseSlug;
+      if (existing.pages.some((p) => p.pageSlug === finalSlug)) {
+        finalSlug = `${baseSlug.slice(0, 32)}-${Date.now().toString(36).slice(-4)}`;
+      }
+      const restoredPage: BioPageRecord = {
+        id: `page-${ownerUser}-${finalSlug}-${Date.now().toString(36)}`,
+        pageSlug: finalSlug,
+        title: String(pagePayload.title || `/${finalSlug}`).slice(0, 80),
+        description: String(pagePayload.description || '').slice(0, 260),
+        avatarUrl: sanitizeBioAvatarUrl(pagePayload.avatarUrl || ''),
+        themeId: isValidBioThemeId(pagePayload.themeId) ? pagePayload.themeId : 'midnight_slate',
+        buttonStyle: isValidButtonStyle(pagePayload.buttonStyle) ? pagePayload.buttonStyle : 'rounded',
+        showSocials: pagePayload.showSocials !== false,
+        isPublished: true,
+        links: Array.isArray(pagePayload.links) ? (pagePayload.links as BioLinkItem[]) : [],
+        updatedAt: new Date().toISOString(),
+      };
+      const updated = sanitizeBioWorkspaceInput(ownerUser, {
+        ...existing,
+        pages: [...existing.pages, restoredPage],
+      });
+      localBioWorkspaces.set(ownerUser, updated);
+      localRecycleBin.delete(id);
+      res.json({ ok: true, itemType: 'bio_page', data: updated });
+      return;
+    }
+
+    const linkPayload = item.payload as { pageSlug?: string; link?: Partial<BioLinkItem> };
+    const desiredSlug = typeof linkPayload.pageSlug === 'string' ? linkPayload.pageSlug : '';
+    const linkData = linkPayload.link || (item.payload as Partial<BioLinkItem>);
+    const targetPage =
+      existing.pages.find((p) => p.pageSlug === desiredSlug) || existing.pages[0];
+    const restoredLink: BioLinkItem = {
+      id: `lnk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      title: String(linkData.title || item.label || 'Tautan').slice(0, 100),
+      subtitle: String(linkData.subtitle || '').slice(0, 140),
+      url: String(linkData.url || ''),
+      sortOrder: targetPage.links.length,
+      enabled: true,
+      clicks: Math.max(0, Number(linkData.clicks) || 0),
+    };
+    const nextPages = existing.pages.map((p) =>
+      p.pageSlug === targetPage.pageSlug
+        ? { ...p, links: [...p.links, restoredLink] }
+        : p
+    );
+    const updated = sanitizeBioWorkspaceInput(ownerUser, { ...existing, pages: nextPages });
+    localBioWorkspaces.set(ownerUser, updated);
+    localRecycleBin.delete(id);
+    res.json({ ok: true, itemType: 'bio_link', data: updated });
+  });
+
+  app.delete('/api/links/recycle-bin', (req, res) => {
+    const ownerParam = String(req.query.owner || '').trim();
+    if (!ownerParam) {
+      res.status(400).json({ ok: false, error: 'Parameter owner diperlukan.' });
+      return;
+    }
+    const ownerUser = sanitizeHandle(ownerParam);
+    let purgedCount = 0;
+    for (const [id, rec] of localRecycleBin.entries()) {
+      if (rec.ownerUser === ownerUser) {
+        localRecycleBin.delete(id);
+        purgedCount += 1;
+      }
+    }
+    res.json({ ok: true, purgedCount });
+  });
+
+  app.delete('/api/links/recycle-bin/:id', (req, res) => {
+    const ownerParam = String(req.query.owner || '').trim();
+    if (!ownerParam) {
+      res.status(400).json({ ok: false, error: 'Parameter owner diperlukan.' });
+      return;
+    }
+    const ownerUser = sanitizeHandle(ownerParam);
+    const id = String(req.params.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+    const existing = localRecycleBin.get(id);
+    if (existing && existing.ownerUser === ownerUser) {
+      localRecycleBin.delete(id);
+    }
+    res.json({ ok: true, deletedId: id });
+  });
+
+  app.patch('/api/links/bio/:username/status', (req, res) => {
+    const username = sanitizeHandle(String(req.params.username || ''));
+    const reserved = checkReservedUsername(username);
+    if (reserved.isReserved) {
+      res.status(403).json({
+        ok: false,
+        error: `Username "${reserved.canonical}" dicadangkan untuk sistem.`,
+      });
+      return;
+    }
+    const existing = localBioWorkspaces.get(username);
+    if (!existing) {
+      res.status(404).json({ ok: false, error: 'Profil Bio belum tersimpan di server.' });
+      return;
+    }
+    const isDeactivated = req.body?.isDeactivated === true;
+    const saved: BioWorkspaceData = {
+      ...existing,
+      isDeactivated,
+      deactivatedAt: isDeactivated ? new Date().toISOString() : null,
+      updatedAt: new Date().toISOString(),
+    };
+    localBioWorkspaces.set(username, saved);
+    res.json({ ok: true, storageEngine: 'local-dev-memory', data: saved });
   });
 
   app.get('/api/links/bio/:username', (req, res) => {
     const username = sanitizeHandle(String(req.params.username || ''));
+    const reserved = checkReservedUsername(username);
     const data = localBioWorkspaces.get(username) || null;
+    const cooldown = getLocalBioCooldown(username);
     res.json({
       ok: true,
       storageEngine: 'local-dev-memory',
       configured: Boolean(data),
       username,
+      reserved: reserved.isReserved,
+      cooldown,
       data,
     });
   });
 
   app.put('/api/links/bio/:username', (req, res) => {
     const username = sanitizeHandle(String(req.params.username || ''));
+    const reserved = checkReservedUsername(username);
+    if (reserved.isReserved) {
+      res.status(403).json({
+        ok: false,
+        error: `Username "${reserved.canonical}" dicadangkan untuk sistem resmi imy.li dan tidak dapat diklaim.`,
+      });
+      return;
+    }
+    const cooldown = getLocalBioCooldown(username);
+    if (cooldown.active) {
+      res.status(429).json({
+        ok: false,
+        error:
+          'Profil Bio sedang dalam masa tunggu 3 hari pasca penghapusan permanen untuk mencegah penyalahgunaan database.',
+        cooldown,
+      });
+      return;
+    }
     const existing = localBioWorkspaces.get(username);
     const existingClicks = new Map<string, number>();
     if (existing) {
@@ -571,7 +893,34 @@ async function startServer() {
       ok: true,
       storageEngine: 'local-dev-memory',
       configured: true,
+      cooldown: { active: false, deletedAt: null, unlockAt: null, remainingMs: 0 },
       data: saved,
+    });
+  });
+
+  app.delete('/api/links/bio/:username', (req, res) => {
+    const username = sanitizeHandle(String(req.params.username || ''));
+    localBioWorkspaces.delete(username);
+    for (const key of Array.from(localBioAvatars.keys())) {
+      if (key.startsWith(`avatars/${username}/`)) {
+        localBioAvatars.delete(key);
+      }
+    }
+    const now = new Date();
+    const deletedAt = now.toISOString();
+    const unlockAt = new Date(now.getTime() + BIO_DELETE_COOLDOWN_MS).toISOString();
+    localBioDeleteCooldowns.set(username, { deletedAt, unlockAt });
+    res.json({
+      ok: true,
+      storageEngine: 'local-dev-memory',
+      deleted: true,
+      username,
+      cooldown: {
+        active: true,
+        deletedAt,
+        unlockAt,
+        remainingMs: BIO_DELETE_COOLDOWN_MS,
+      },
     });
   });
 
@@ -643,6 +992,23 @@ async function startServer() {
     const resolved = resolveAvatarKey(String(req.params.username || ''), req.params.pageSlug);
     if (!resolved) {
       res.status(400).json({ ok: false, error: 'Parameter avatar tidak valid.' });
+      return;
+    }
+    const reserved = checkReservedUsername(resolved.username);
+    if (reserved.isReserved) {
+      res.status(403).json({
+        ok: false,
+        error: `Username "${reserved.canonical}" dicadangkan untuk sistem.`,
+      });
+      return;
+    }
+    const cooldown = getLocalBioCooldown(resolved.username);
+    if (cooldown.active) {
+      res.status(429).json({
+        ok: false,
+        error: 'Profil Bio sedang dalam masa tunggu 3 hari pasca penghapusan permanen.',
+        cooldown,
+      });
       return;
     }
     const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);

@@ -1,9 +1,11 @@
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   Camera,
   Check,
   CheckCircle2,
+  Clock,
   Copy,
   ExternalLink,
   Eye,
@@ -12,10 +14,14 @@ import {
   Globe,
   Link2,
   Palette,
+  PauseCircle,
+  PlayCircle,
   Plus,
+  RefreshCw,
   RotateCcw,
   Save,
   Scissors,
+  ShieldAlert,
   Trash2,
   Upload,
   User,
@@ -29,18 +35,25 @@ import {
   type EncodedAvatarResult,
 } from '../utils/avatarEncoder';
 import {
+  BIO_DELETE_COOLDOWN_DAYS,
   BIO_THEMES,
+  RECYCLE_BIN_RETENTION_DAYS,
   SOCIAL_PLATFORMS,
   createEmptyBioWorkspace,
   sanitizePageSlug,
   type BioButtonStyle,
+  type BioDeleteCooldownInfo,
   type BioLinkItem,
   type BioPageRecord,
   type BioThemeId,
   type BioWorkspaceData,
+  type RecycleBinItemType,
+  type RecycleBinRecord,
   type SocialPlatformId,
 } from '../utils/linksModel';
+import { checkReservedUsername } from '../utils/reservedUsernames';
 import { BioAvatarCropModal } from './BioAvatarCropModal';
+import { ConfirmActionModal } from './ConfirmActionModal';
 import type { ActiveHostView } from './MailLinksTopBar';
 import { SocialIconGlyph } from './SocialIconGlyph';
 
@@ -53,7 +66,22 @@ interface VzLinksWorkspaceProps {
   onDeactivateLinks: () => void;
 }
 
-type EditorTab = 'links' | 'profile_socials' | 'theme';
+type EditorTab =
+  | 'links'
+  | 'profile_socials'
+  | 'theme'
+  | 'recycle_bin'
+  | 'settings_danger';
+
+type PendingConfirmAction =
+  | { kind: 'delete_link'; link: BioLinkItem }
+  | { kind: 'delete_avatar'; scope: 'main' | string }
+  | { kind: 'delete_subpage'; page: BioPageRecord }
+  | { kind: 'deactivate_bio' }
+  | { kind: 'permanent_delete_bio' }
+  | { kind: 'purge_recycle_item'; item: RecycleBinRecord }
+  | { kind: 'empty_recycle_bin' }
+  | null;
 
 function formatStorageBadge(engine: string): string {
   if (engine === 'cloudflare-d1') return 'Cloudflare D1';
@@ -68,6 +96,41 @@ function formatMediaStorageBadge(engine: string): string {
   if (engine === 'cloudflare-kv') return 'Cloudflare KV (Fallback)';
   if (engine === 'local-dev-memory') return 'Local Dev';
   return 'Edge Storage';
+}
+
+function formatCooldownCountdown(
+  unlockAtIso: string | null,
+  nowMs: number,
+  lang: Language
+): string {
+  if (!unlockAtIso) return '';
+  const diffMs = Math.max(0, Date.parse(unlockAtIso) - nowMs);
+  if (diffMs <= 0) {
+    return lang === 'id' ? 'Selesai — silakan muat ulang' : 'Ready — please reload';
+  }
+  const totalSec = Math.floor(diffMs / 1000);
+  const days = Math.floor(totalSec / 86400);
+  const hours = Math.floor((totalSec % 86400) / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  if (lang === 'id') {
+    return `${days}h ${String(hours).padStart(2, '0')}j ${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}d`;
+  }
+  return `${days}d ${String(hours).padStart(2, '0')}h ${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`;
+}
+
+function formatRecycleRemaining(
+  expiresAtIso: string,
+  nowMs: number,
+  lang: Language
+): string {
+  const diffMs = Math.max(0, Date.parse(expiresAtIso) - nowMs);
+  const days = Math.ceil(diffMs / (24 * 60 * 60 * 1000));
+  if (days <= 1) {
+    const hours = Math.max(1, Math.ceil(diffMs / (60 * 60 * 1000)));
+    return lang === 'id' ? `Sisa ${hours} jam` : `${hours}h left`;
+  }
+  return lang === 'id' ? `Sisa ${days} hari` : `${days}d left`;
 }
 
 export function VzLinksWorkspace({
@@ -126,13 +189,70 @@ export function VzLinksWorkspace({
   const [copiedUrl, setCopiedUrl] = useState(false);
   const statusTimerRef = useRef<number | null>(null);
 
+  // Reserved handle check, 3-day permanent delete cooldown, Recycle Bin & confirmation dialogs
+  const localReserved = useMemo(
+    () => checkReservedUsername(username),
+    [username]
+  );
+  const [serverReserved, setServerReserved] = useState(false);
+  const isReservedHandle = localReserved.isReserved || serverReserved;
+
+  const [cooldown, setCooldown] = useState<BioDeleteCooldownInfo>({
+    active: false,
+    deletedAt: null,
+    unlockAt: null,
+    remainingMs: 0,
+  });
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  const [recycleItems, setRecycleItems] = useState<RecycleBinRecord[]>([]);
+  const [loadingRecycle, setLoadingRecycle] = useState(false);
+  const [recycleFilter, setRecycleFilter] = useState<'all' | RecycleBinItemType>('all');
+  const [recycleActionId, setRecycleActionId] = useState<string | null>(null);
+
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmAction>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [togglingDeactivate, setTogglingDeactivate] = useState(false);
+
+  const isCooldownLocked = useMemo(() => {
+    if (!cooldown.active || !cooldown.unlockAt) return false;
+    return Date.parse(cooldown.unlockAt) > nowMs;
+  }, [cooldown, nowMs]);
+
+  useEffect(() => {
+    const intervalMs = isCooldownLocked ? 1000 : 30000;
+    const id = window.setInterval(() => setNowMs(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [isCooldownLocked]);
+
   const flashStatus = (type: 'ok' | 'error', text: string) => {
     setStatusMessage({ type, text });
     if (statusTimerRef.current !== null) {
       window.clearTimeout(statusTimerRef.current);
     }
-    statusTimerRef.current = window.setTimeout(() => setStatusMessage(null), 3600);
+    statusTimerRef.current = window.setTimeout(() => setStatusMessage(null), 4200);
   };
+
+  const loadRecycleBin = useCallback(async () => {
+    setLoadingRecycle(true);
+    try {
+      const res = await fetch(
+        `/api/links/recycle-bin?owner=${encodeURIComponent(username)}`,
+        { cache: 'no-store' }
+      );
+      const json = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        items?: RecycleBinRecord[];
+      } | null;
+      if (res.ok && json?.ok) {
+        setRecycleItems(Array.isArray(json.items) ? json.items : []);
+      }
+    } catch {
+      // Preserve existing list on transient error
+    } finally {
+      setLoadingRecycle(false);
+    }
+  }, [username]);
 
   const loadWorkspace = useCallback(async () => {
     setLoading(true);
@@ -143,12 +263,18 @@ export function VzLinksWorkspace({
       const json = (await res.json().catch(() => null)) as {
         ok?: boolean;
         configured?: boolean;
+        reserved?: boolean;
+        cooldown?: BioDeleteCooldownInfo;
         storageEngine?: string;
         data?: BioWorkspaceData | null;
       } | null;
 
       if (res.ok && json?.ok) {
         if (json.storageEngine) setStorageEngine(json.storageEngine);
+        setServerReserved(Boolean(json.reserved));
+        if (json.cooldown) {
+          setCooldown(json.cooldown);
+        }
         if (json.configured && json.data) {
           setWorkspace(json.data);
           setHasUnsaved(false);
@@ -175,12 +301,13 @@ export function VzLinksWorkspace({
 
   useEffect(() => {
     void loadWorkspace();
+    void loadRecycleBin();
     return () => {
       if (statusTimerRef.current !== null) {
         window.clearTimeout(statusTimerRef.current);
       }
     };
-  }, [loadWorkspace]);
+  }, [loadWorkspace, loadRecycleBin]);
 
   const activePage: BioPageRecord = useMemo(() => {
     return (
@@ -242,11 +369,15 @@ export function VzLinksWorkspace({
       const json = (await res.json().catch(() => null)) as {
         ok?: boolean;
         error?: string;
+        cooldown?: BioDeleteCooldownInfo;
         storageEngine?: string;
         data?: BioWorkspaceData;
       } | null;
 
       if (!res.ok || !json?.ok || !json.data) {
+        if (json?.cooldown) {
+          setCooldown(json.cooldown);
+        }
         flashStatus(
           'error',
           json?.error ||
@@ -474,14 +605,76 @@ export function VzLinksWorkspace({
     setAddingPage(false);
   };
 
-  const handleDeleteSubpage = (slug: string) => {
-    if (!slug) return; // Root page cannot be deleted
-    updateWorkspace((prev) => ({
-      ...prev,
-      pages: prev.pages.filter((p) => p.pageSlug !== slug),
-    }));
-    if (activePageSlug === slug) {
-      setActivePageSlug('');
+  const pushToRecycleBin = async (
+    itemType: RecycleBinItemType,
+    label: string,
+    summary: string,
+    payload: unknown
+  ) => {
+    try {
+      const res = await fetch('/api/links/recycle-bin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ownerUser: username,
+          itemType,
+          label,
+          summary,
+          payload,
+        }),
+      });
+      if (res.ok) {
+        await loadRecycleBin();
+      }
+    } catch {
+      // Non-blocking fallback
+    }
+  };
+
+  const executeDeleteSubpage = async (
+    page: BioPageRecord,
+    moveToRecycleBin: boolean
+  ) => {
+    if (!page.pageSlug) return;
+    setConfirmBusy(true);
+    try {
+      if (moveToRecycleBin) {
+        await pushToRecycleBin(
+          'bio_page',
+          `/${page.pageSlug} (${page.title || page.pageSlug})`,
+          `${page.links.length} ${lang === 'id' ? 'tautan' : 'links'} · ${username}.${domain}/${page.pageSlug}`,
+          { page }
+        );
+      }
+
+      if (page.avatarUrl && !moveToRecycleBin) {
+        await fetch(
+          `/api/links/avatar/${encodeURIComponent(username)}/${encodeURIComponent(page.pageSlug)}`,
+          { method: 'DELETE' }
+        ).catch(() => {});
+      }
+
+      const nextWorkspace: BioWorkspaceData = {
+        ...workspace,
+        pages: workspace.pages.filter((p) => p.pageSlug !== page.pageSlug),
+      };
+      setWorkspace(nextWorkspace);
+      if (activePageSlug === page.pageSlug) {
+        setActivePageSlug('');
+      }
+      await persistWorkspace(
+        nextWorkspace,
+        moveToRecycleBin
+          ? lang === 'id'
+            ? `Sub-halaman /${page.pageSlug} dihapus dari halaman aktif & disimpan di Recycle Bin (14 hari).`
+            : `Sub-page /${page.pageSlug} removed from live pages & moved to Recycle Bin (14 days).`
+          : lang === 'id'
+            ? `Sub-halaman /${page.pageSlug} telah dihapus permanen dari database.`
+            : `Sub-page /${page.pageSlug} has been permanently deleted from the database.`
+      );
+    } finally {
+      setConfirmBusy(false);
+      setPendingConfirm(null);
     }
   };
 
@@ -547,14 +740,245 @@ export function VzLinksWorkspace({
     }));
   };
 
-  const handleDeleteLink = (linkId: string) => {
-    updateActivePage((page) => ({
-      ...page,
-      links: page.links
-        .filter((l) => l.id !== linkId)
-        .map((l, idx) => ({ ...l, sortOrder: idx })),
-    }));
+  const executeDeleteLink = async (
+    link: BioLinkItem,
+    moveToRecycleBin: boolean
+  ) => {
+    setConfirmBusy(true);
+    try {
+      if (moveToRecycleBin) {
+        await pushToRecycleBin(
+          'bio_link',
+          link.title,
+          `${link.url} (${activePage.pageSlug ? `/${activePage.pageSlug}` : 'Halaman Utama'})`,
+          { pageSlug: activePage.pageSlug, link }
+        );
+      }
+
+      const nextWorkspace: BioWorkspaceData = {
+        ...workspace,
+        pages: workspace.pages.map((p) =>
+          p.pageSlug === activePage.pageSlug
+            ? {
+                ...p,
+                links: p.links
+                  .filter((l) => l.id !== link.id)
+                  .map((l, idx) => ({ ...l, sortOrder: idx })),
+              }
+            : p
+        ),
+      };
+      setWorkspace(nextWorkspace);
+      await persistWorkspace(
+        nextWorkspace,
+        moveToRecycleBin
+          ? lang === 'id'
+            ? `Tautan "${link.title}" dihapus dari Bio & dipindahkan ke Recycle Bin (14 hari).`
+            : `Link "${link.title}" removed from Bio & moved to Recycle Bin (14 days).`
+          : lang === 'id'
+            ? `Tautan "${link.title}" dihapus permanen dari database.`
+            : `Link "${link.title}" permanently deleted from the database.`
+      );
+    } finally {
+      setConfirmBusy(false);
+      setPendingConfirm(null);
+    }
   };
+
+  const handleSetBioDeactivated = async (nextDeactivated: boolean) => {
+    setTogglingDeactivate(true);
+    setConfirmBusy(true);
+    try {
+      const res = await fetch(
+        `/api/links/bio/${encodeURIComponent(username)}/status`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ isDeactivated: nextDeactivated }),
+        }
+      );
+      const json = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        data?: BioWorkspaceData;
+      } | null;
+
+      if (!res.ok || !json?.ok) {
+        flashStatus(
+          'error',
+          json?.error ||
+            (lang === 'id'
+              ? 'Gagal memperbarui status publikasi Bio.'
+              : 'Failed to update Bio publication status.')
+        );
+        return;
+      }
+
+      if (json.data) {
+        setWorkspace(json.data);
+        setHasUnsaved(false);
+      } else {
+        setWorkspace((prev) => ({
+          ...prev,
+          isDeactivated: nextDeactivated,
+          deactivatedAt: nextDeactivated ? new Date().toISOString() : null,
+        }));
+      }
+
+      flashStatus(
+        'ok',
+        nextDeactivated
+          ? lang === 'id'
+            ? `Bio ${username}.${domain} dinonaktifkan sementara. Halaman disembunyikan dari publik tanpa menghapus data di database.`
+            : `Bio ${username}.${domain} temporarily deactivated. Public visitors cannot view it, while your data stays safe.`
+          : lang === 'id'
+            ? `Bio ${username}.${domain} telah diaktifkan kembali dan tayang publik.`
+            : `Bio ${username}.${domain} has been reactivated and is live again.`
+      );
+    } finally {
+      setTogglingDeactivate(false);
+      setConfirmBusy(false);
+      setPendingConfirm(null);
+    }
+  };
+
+  const handlePermanentDeleteBio = async () => {
+    setConfirmBusy(true);
+    try {
+      const res = await fetch(
+        `/api/links/bio/${encodeURIComponent(username)}`,
+        { method: 'DELETE' }
+      );
+      const json = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        cooldown?: BioDeleteCooldownInfo;
+      } | null;
+
+      if (!res.ok || !json?.ok) {
+        flashStatus(
+          'error',
+          json?.error ||
+            (lang === 'id'
+              ? 'Gagal menghapus permanen profil Bio dari database.'
+              : 'Failed to permanently delete Bio profile from database.')
+        );
+        return;
+      }
+
+      setWorkspace(
+        createEmptyBioWorkspace(username, {
+          displayName: session.name || username,
+        })
+      );
+      setActivePageSlug('');
+      setHasUnsaved(false);
+      if (json.cooldown) {
+        setCooldown(json.cooldown);
+      }
+      flashStatus(
+        'ok',
+        lang === 'id'
+          ? `Seluruh profil, halaman, tautan & foto AVIF ${username}.${domain} telah dihapus permanen dari database. Masa tunggu aktivasi ulang: ${BIO_DELETE_COOLDOWN_DAYS} hari.`
+          : `All profile data, pages, links & AVIF photos for ${username}.${domain} have been permanently erased. Cooldown before re-creation: ${BIO_DELETE_COOLDOWN_DAYS} days.`
+      );
+    } finally {
+      setConfirmBusy(false);
+      setPendingConfirm(null);
+    }
+  };
+
+  const handleRestoreRecycleItem = async (item: RecycleBinRecord) => {
+    setRecycleActionId(item.id);
+    try {
+      const res = await fetch('/api/links/recycle-bin/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: item.id, ownerUser: username }),
+      });
+      const json = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        cooldown?: BioDeleteCooldownInfo;
+      } | null;
+
+      if (!res.ok || !json?.ok) {
+        if (json?.cooldown) setCooldown(json.cooldown);
+        flashStatus(
+          'error',
+          json?.error ||
+            (lang === 'id'
+              ? 'Gagal memulihkan item dari Recycle Bin.'
+              : 'Failed to restore item from Recycle Bin.')
+        );
+        return;
+      }
+
+      await loadRecycleBin();
+      if (item.itemType === 'bio_link' || item.itemType === 'bio_page') {
+        await loadWorkspace();
+      }
+      flashStatus(
+        'ok',
+        lang === 'id'
+          ? `"${item.label}" berhasil dipulihkan dari Recycle Bin.`
+          : `"${item.label}" has been restored from Recycle Bin.`
+      );
+    } finally {
+      setRecycleActionId(null);
+    }
+  };
+
+  const executePurgeRecycleItem = async (item: RecycleBinRecord) => {
+    setConfirmBusy(true);
+    setRecycleActionId(item.id);
+    try {
+      const res = await fetch(
+        `/api/links/recycle-bin/${encodeURIComponent(item.id)}?owner=${encodeURIComponent(username)}`,
+        { method: 'DELETE' }
+      );
+      if (res.ok) {
+        setRecycleItems((prev) => prev.filter((x) => x.id !== item.id));
+        flashStatus(
+          'ok',
+          lang === 'id'
+            ? `"${item.label}" dihapus permanen dari database.`
+            : `"${item.label}" permanently erased from the database.`
+        );
+      }
+    } finally {
+      setConfirmBusy(false);
+      setRecycleActionId(null);
+      setPendingConfirm(null);
+    }
+  };
+
+  const executeEmptyRecycleBin = async () => {
+    setConfirmBusy(true);
+    try {
+      const res = await fetch(
+        `/api/links/recycle-bin?owner=${encodeURIComponent(username)}`,
+        { method: 'DELETE' }
+      );
+      if (res.ok) {
+        setRecycleItems([]);
+        flashStatus(
+          'ok',
+          lang === 'id'
+            ? 'Seluruh Recycle Bin berhasil dikosongkan permanen dari database.'
+            : 'Recycle Bin permanently emptied from the database.'
+        );
+      }
+    } finally {
+      setConfirmBusy(false);
+      setPendingConfirm(null);
+    }
+  };
+
+  const filteredRecycleItems = useMemo(() => {
+    if (recycleFilter === 'all') return recycleItems;
+    return recycleItems.filter((item) => item.itemType === recycleFilter);
+  }, [recycleItems, recycleFilter]);
 
   const handleUpdateSocial = (platformId: SocialPlatformId, value: string) => {
     updateWorkspace((prev) => ({
@@ -633,8 +1057,8 @@ export function VzLinksWorkspace({
           <button
             type="button"
             onClick={() => void handleSaveToServer()}
-            disabled={saving || loading}
-            className="min-h-[40px] px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            disabled={saving || loading || isReservedHandle || isCooldownLocked}
+            className="min-h-[40px] px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Save className="w-3.5 h-3.5" />
             <span>
@@ -649,6 +1073,79 @@ export function VzLinksWorkspace({
           </button>
         </div>
       </div>
+
+      {/* Reserved System Username Block Banner */}
+      {isReservedHandle && (
+        <div className="px-4 py-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/35 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-800 dark:text-rose-200 flex items-start gap-2.5">
+          <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
+          <div className="space-y-1 leading-relaxed">
+            <div className="font-semibold">
+              {lang === 'id'
+                ? `Username sistem "${username}" dilindungi (Reserved)`
+                : `System username "${username}" is reserved`}
+            </div>
+            <p>
+              {lang === 'id'
+                ? `Subdomain ${username}.${domain} dicadangkan khusus untuk operasional sistem resmi dan tidak dapat dipublikasikan oleh akun pribadi. Ganti username di myaccount.vz.gay.`
+                : `Subdomain ${username}.${domain} is reserved for official system operations and cannot be published by personal accounts. Update your username on myaccount.vz.gay.`}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* 3-Day Anti-Brute-Force Permanent Delete Cooldown Banner */}
+      {isCooldownLocked && (
+        <div className="px-4 py-4 rounded-xl bg-amber-50 dark:bg-amber-950/35 border border-amber-200 dark:border-amber-900/60 text-xs text-amber-900 dark:text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <Clock className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+            <div className="space-y-1 leading-relaxed">
+              <div className="font-semibold">
+                {lang === 'id'
+                  ? `Masa Tunggu Aktivasi Ulang Bio Aktif (${BIO_DELETE_COOLDOWN_DAYS} Hari)`
+                  : `Bio Re-Creation Cooldown Active (${BIO_DELETE_COOLDOWN_DAYS} Days)`}
+              </div>
+              <p>
+                {lang === 'id'
+                  ? `Anda baru saja menghapus permanen profil ${username}.${domain} dari database. Untuk mencegah penyalahgunaan penulisan ulang database (brute-force D1/KV), pembuatan ulang Bio dikunci hingga masa tunggu selesai.`
+                  : `You recently permanently erased ${username}.${domain} from the database. To prevent brute-force D1/KV rewrite abuse, recreating your Bio is locked until the cooldown expires.`}
+              </p>
+            </div>
+          </div>
+          <div className="px-3 py-2 rounded-lg bg-white/80 dark:bg-[#0B0D11] border border-amber-300 dark:border-amber-800/70 font-mono font-bold text-amber-900 dark:text-amber-300 tabular-nums whitespace-nowrap shrink-0 self-start sm:self-center">
+            {formatCooldownCountdown(cooldown.unlockAt, nowMs, lang)}
+          </div>
+        </div>
+      )}
+
+      {/* Temporary Deactivation Banner */}
+      {workspace.isDeactivated && !isCooldownLocked && (
+        <div className="px-4 py-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60 text-xs text-amber-900 dark:text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <PauseCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+            <div className="space-y-0.5 leading-relaxed">
+              <div className="font-semibold">
+                {lang === 'id'
+                  ? `Bio ${username}.${domain} sedang dinonaktifkan sementara`
+                  : `Bio ${username}.${domain} is temporarily deactivated`}
+              </div>
+              <p>
+                {lang === 'id'
+                  ? 'Halaman utama dan semua sub-halaman disembunyikan dari publik, namun seluruh data tetap tersimpan aman di database.'
+                  : 'Your main page and sub-pages are hidden from public visitors while all your stored data remains safe.'}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={togglingDeactivate}
+            onClick={() => void handleSetBioDeactivated(false)}
+            className="min-h-[36px] px-3.5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer self-start sm:self-center"
+          >
+            <PlayCircle className="w-3.5 h-3.5" />
+            <span>{lang === 'id' ? 'Aktifkan Kembali Bio' : 'Reactivate Bio'}</span>
+          </button>
+        </div>
+      )}
 
       {statusMessage && (
         <div
@@ -670,6 +1167,7 @@ export function VzLinksWorkspace({
             {workspace.pages.map((page) => {
               const isSelected = page.pageSlug === activePage.pageSlug;
               const isRoot = page.pageSlug === '';
+              const isSubpageHidden = !isRoot && page.isPublished === false;
               return (
                 <div key={page.id} className="inline-flex items-center">
                   <button
@@ -678,10 +1176,16 @@ export function VzLinksWorkspace({
                     className={`min-h-[36px] px-3 py-1.5 text-xs font-mono font-semibold rounded-lg border transition-colors inline-flex items-center gap-1.5 cursor-pointer ${
                       isSelected
                         ? 'bg-blue-600 text-white border-blue-600'
-                        : 'bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-700 dark:text-slate-300 border-slate-200 dark:border-[#2A303D] hover:border-blue-500/60'
+                        : isSubpageHidden
+                          ? 'bg-slate-100 dark:bg-[#141720] text-slate-500 border-dashed border-slate-300 dark:border-[#2A303D]'
+                          : 'bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-700 dark:text-slate-300 border-slate-200 dark:border-[#2A303D] hover:border-blue-500/60'
                     }`}
                   >
-                    <Globe className="w-3.5 h-3.5 shrink-0" />
+                    {isSubpageHidden ? (
+                      <EyeOff className="w-3.5 h-3.5 shrink-0" />
+                    ) : (
+                      <Globe className="w-3.5 h-3.5 shrink-0" />
+                    )}
                     <span>
                       {isRoot
                         ? lang === 'id'
@@ -690,7 +1194,8 @@ export function VzLinksWorkspace({
                         : `/${page.pageSlug}`}
                     </span>
                     <span className="opacity-70 text-[10px] tabular-nums">
-                      ({page.links.length})
+                      ({page.links.length}
+                      {isSubpageHidden ? ' · Off' : ''})
                     </span>
                   </button>
                 </div>
@@ -838,6 +1343,39 @@ export function VzLinksWorkspace({
               <Palette className="w-3.5 h-3.5" />
               <span>{lang === 'id' ? 'Tema Halaman' : 'Page Theme'}</span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setEditorTab('recycle_bin');
+                void loadRecycleBin();
+              }}
+              className={`px-3.5 py-2.5 text-xs font-semibold border-b-2 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer ${
+                editorTab === 'recycle_bin'
+                  ? 'border-blue-600 text-blue-600 dark:text-blue-400'
+                  : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>
+                Recycle Bin ({recycleItems.length})
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setEditorTab('settings_danger')}
+              className={`px-3.5 py-2.5 text-xs font-semibold border-b-2 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer ${
+                editorTab === 'settings_danger'
+                  ? 'border-rose-600 text-rose-600 dark:text-rose-400'
+                  : 'border-transparent text-slate-500 hover:text-rose-600 dark:hover:text-rose-400'
+              }`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>
+                {lang === 'id' ? 'Pengaturan & Bahaya' : 'Settings & Danger'}
+              </span>
+            </button>
           </div>
 
           <div className="p-5 sm:p-6 space-y-6">
@@ -854,7 +1392,7 @@ export function VzLinksWorkspace({
               <>
                 {/* Page Metadata Settings */}
                 <div className="space-y-3 pb-5 border-b border-slate-200 dark:border-[#232732]">
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
                       {activePage.pageSlug === ''
                         ? lang === 'id'
@@ -865,14 +1403,52 @@ export function VzLinksWorkspace({
                           : `Sub-Page Settings (/${activePage.pageSlug})`}
                     </div>
                     {activePage.pageSlug !== '' && (
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteSubpage(activePage.pageSlug)}
-                        className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:underline cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>{lang === 'id' ? 'Hapus Halaman' : 'Delete Page'}</span>
-                      </button>
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateActivePage((p) => ({
+                              ...p,
+                              isPublished: p.isPublished === false ? true : false,
+                            }))
+                          }
+                          className={`inline-flex items-center gap-1 text-xs font-semibold cursor-pointer ${
+                            activePage.isPublished === false
+                              ? 'text-emerald-600 dark:text-emerald-400 hover:underline'
+                              : 'text-amber-600 dark:text-amber-400 hover:underline'
+                          }`}
+                        >
+                          {activePage.isPublished === false ? (
+                            <>
+                              <PlayCircle className="w-3.5 h-3.5" />
+                              <span>
+                                {lang === 'id' ? 'Aktifkan Sub-Halaman' : 'Publish Sub-Page'}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <PauseCircle className="w-3.5 h-3.5" />
+                              <span>
+                                {lang === 'id' ? 'Nonaktifkan Sementara' : 'Deactivate Temporarily'}
+                              </span>
+                            </>
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPendingConfirm({
+                              kind: 'delete_subpage',
+                              page: activePage,
+                            })
+                          }
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:underline cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>{lang === 'id' ? 'Hapus Halaman' : 'Delete Page'}</span>
+                        </button>
+                      </div>
                     )}
                   </div>
 
@@ -992,8 +1568,8 @@ export function VzLinksWorkspace({
                         <button
                           type="button"
                           onClick={() => subpageAvatarInputRef.current?.click()}
-                          disabled={uploadingAvatar}
-                          className="min-h-[34px] px-3 py-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 bg-blue-50/80 dark:bg-blue-950/30 hover:bg-blue-100 dark:hover:bg-blue-950/50 border border-blue-200 dark:border-blue-900/60 rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                          disabled={uploadingAvatar || isCooldownLocked || isReservedHandle}
+                          className="min-h-[34px] px-3 py-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 bg-blue-50/80 dark:bg-blue-950/30 hover:bg-blue-100 dark:hover:bg-blue-950/50 disabled:opacity-50 border border-blue-200 dark:border-blue-900/60 rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
                         >
                           <Camera className="w-3.5 h-3.5" />
                           <span>
@@ -1011,7 +1587,10 @@ export function VzLinksWorkspace({
                           <button
                             type="button"
                             onClick={() =>
-                              void handleDeleteAvatar(activePage.pageSlug)
+                              setPendingConfirm({
+                                kind: 'delete_avatar',
+                                scope: activePage.pageSlug,
+                              })
                             }
                             disabled={deletingAvatarScope === activePage.pageSlug}
                             className="min-h-[34px] px-3 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 bg-white dark:bg-[#151922] hover:bg-slate-100 dark:hover:bg-[#1E2430] border border-slate-200 dark:border-[#2A303E] rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
@@ -1168,7 +1747,9 @@ export function VzLinksWorkspace({
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleDeleteLink(link.id)}
+                              onClick={() =>
+                                setPendingConfirm({ kind: 'delete_link', link })
+                              }
                               aria-label="Delete link"
                               className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 rounded-md hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
                             >
@@ -1295,7 +1876,7 @@ export function VzLinksWorkspace({
                         <button
                           type="button"
                           onClick={() => mainAvatarInputRef.current?.click()}
-                          disabled={uploadingAvatar}
+                          disabled={uploadingAvatar || isCooldownLocked || isReservedHandle}
                           className="min-h-[36px] px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
                         >
                           <Upload className="w-3.5 h-3.5" />
@@ -1313,7 +1894,12 @@ export function VzLinksWorkspace({
                         {workspace.avatarUrl && (
                           <button
                             type="button"
-                            onClick={() => void handleDeleteAvatar('main')}
+                            onClick={() =>
+                              setPendingConfirm({
+                                kind: 'delete_avatar',
+                                scope: 'main',
+                              })
+                            }
                             disabled={deletingAvatarScope === 'main'}
                             className="min-h-[36px] px-3 py-2 text-xs font-medium text-rose-600 dark:text-rose-400 bg-rose-50/70 dark:bg-rose-950/30 hover:bg-rose-100 dark:hover:bg-rose-950/50 border border-rose-200 dark:border-rose-900/50 rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
                           >
@@ -1400,7 +1986,7 @@ export function VzLinksWorkspace({
                   </div>
                 </div>
               </div>
-            ) : (
+            ) : editorTab === 'theme' ? (
               /* Theme & Button Style per Page */
               <div className="space-y-6">
                 <div className="space-y-2.5">
@@ -1478,6 +2064,353 @@ export function VzLinksWorkspace({
                       </button>
                     ))}
                   </div>
+                </div>
+              </div>
+            ) : editorTab === 'recycle_bin' ? (
+              /* Recycle Bin Tab (14-Day Auto-Purge from D1 / KV) */
+              <div className="space-y-5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200 dark:border-[#232732]">
+                  <div className="space-y-1">
+                    <div className="text-sm font-bold text-slate-900 dark:text-white font-display">
+                      {lang === 'id'
+                        ? `Recycle Bin VZ Links (Retensi ${RECYCLE_BIN_RETENTION_DAYS} Hari)`
+                        : `VZ Links Recycle Bin (${RECYCLE_BIN_RETENTION_DAYS}-Day Retention)`}
+                    </div>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                      {lang === 'id'
+                        ? `Tautan Bio, sub-halaman, dan shortlink ${domain}/s/ yang dihapus disimpan sementara selama ${RECYCLE_BIN_RETENTION_DAYS} hari sebelum dihapus permanen secara otomatis dari database Cloudflare.`
+                        : `Deleted Bio links, sub-pages, and ${domain}/s/ shortlinks are held for ${RECYCLE_BIN_RETENTION_DAYS} days before being permanently auto-purged from Cloudflare storage.`}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => void loadRecycleBin()}
+                      disabled={loadingRecycle}
+                      className="min-h-[34px] px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 hover:bg-slate-200 dark:bg-[#1B202B] dark:hover:bg-[#242B3A] rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${loadingRecycle ? 'animate-spin' : ''}`}
+                      />
+                      <span>{lang === 'id' ? 'Segarkan' : 'Refresh'}</span>
+                    </button>
+
+                    {recycleItems.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPendingConfirm({ kind: 'empty_recycle_bin' })
+                        }
+                        className="min-h-[34px] px-3 py-1.5 text-xs font-semibold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/35 hover:bg-rose-100 dark:hover:bg-rose-950/60 border border-rose-200 dark:border-rose-900/60 rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>
+                          {lang === 'id' ? 'Kosongkan Semua' : 'Empty Bin'}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Filter Buttons */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(
+                    [
+                      { id: 'all', label: lang === 'id' ? 'Semua' : 'All' },
+                      {
+                        id: 'bio_link',
+                        label: lang === 'id' ? 'Tautan Bio' : 'Bio Links',
+                      },
+                      {
+                        id: 'bio_page',
+                        label: lang === 'id' ? 'Sub-Halaman' : 'Sub-Pages',
+                      },
+                      {
+                        id: 'shortlink',
+                        label: `Shortlink (${domain}/s/)`,
+                      },
+                    ] as { id: 'all' | RecycleBinItemType; label: string }[]
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setRecycleFilter(f.id)}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors cursor-pointer ${
+                        recycleFilter === f.id
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-600 dark:text-slate-300 border-slate-200 dark:border-[#232732] hover:border-slate-400'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+
+                {loadingRecycle ? (
+                  <div className="space-y-2.5">
+                    {[1, 2].map((n) => (
+                      <div
+                        key={n}
+                        className="h-16 rounded-xl bg-slate-100 dark:bg-[#191E28] animate-pulse"
+                      />
+                    ))}
+                  </div>
+                ) : filteredRecycleItems.length === 0 ? (
+                  <div className="p-8 rounded-xl border border-dashed border-slate-300 dark:border-[#2A303E] text-center space-y-1.5">
+                    <Trash2 className="w-6 h-6 text-slate-400 mx-auto" />
+                    <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                      {lang === 'id'
+                        ? 'Recycle Bin kosong'
+                        : 'Recycle Bin is empty'}
+                    </div>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      {lang === 'id'
+                        ? 'Item yang Anda hapus dari Bio maupun Shortlink akan muncul di sini hingga 14 hari.'
+                        : 'Deleted Bio items and shortlinks will appear here for up to 14 days.'}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {filteredRecycleItems.map((item) => {
+                      const typeLabel =
+                        item.itemType === 'bio_link'
+                          ? lang === 'id'
+                            ? 'Tautan Bio'
+                            : 'Bio Link'
+                          : item.itemType === 'bio_page'
+                            ? lang === 'id'
+                              ? 'Sub-Halaman'
+                              : 'Sub-Page'
+                            : 'Shortlink';
+                      const isItemBusy = recycleActionId === item.id;
+                      return (
+                        <div
+                          key={item.id}
+                          className="p-3.5 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                        >
+                          <div className="min-w-0 space-y-0.5">
+                            <div className="flex items-center gap-2 text-xs">
+                              <span className="font-mono text-[11px] font-semibold text-blue-600 dark:text-blue-400">
+                                {typeLabel}
+                              </span>
+                              <span aria-hidden="true" className="text-slate-400">
+                                ·
+                              </span>
+                              <span className="font-mono text-[11px] text-amber-600 dark:text-amber-400 tabular-nums">
+                                {formatRecycleRemaining(item.expiresAt, nowMs, lang)}
+                              </span>
+                            </div>
+                            <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                              {item.label}
+                            </div>
+                            {item.summary && (
+                              <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate">
+                                {item.summary}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              disabled={isItemBusy}
+                              onClick={() => void handleRestoreRecycleItem(item)}
+                              className="min-h-[34px] px-3 py-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 border border-emerald-200 dark:border-emerald-900/60 rounded-lg inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>{lang === 'id' ? 'Pulihkan' : 'Restore'}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={isItemBusy}
+                              onClick={() =>
+                                setPendingConfirm({
+                                  kind: 'purge_recycle_item',
+                                  item,
+                                })
+                              }
+                              className="min-h-[34px] px-3 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 bg-white dark:bg-[#151922] hover:bg-rose-50 dark:hover:bg-rose-950/40 border border-slate-200 dark:border-[#2A303E] rounded-lg inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>
+                                {lang === 'id' ? 'Hapus Permanen' : 'Delete Forever'}
+                              </span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* Settings & Danger Zone Tab (Temporary Deactivate + Permanent DB Erase with 3-Day Cooldown) */
+              <div className="space-y-6">
+                {/* 1. Temporary Deactivation (Main Bio + Sub-Pages) */}
+                <div className="p-4 sm:p-5 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="text-sm font-bold text-slate-900 dark:text-white font-display">
+                        {lang === 'id'
+                          ? `Nonaktifkan Sementara Bio (${username}.${domain})`
+                          : `Temporarily Deactivate Bio (${username}.${domain})`}
+                      </div>
+                      <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                        {lang === 'id'
+                          ? 'Menyembunyikan halaman utama dan semua sub-halaman dari pengunjung publik tanpa menghapus data atau foto AVIF Anda di database. Dapat diaktifkan kembali kapan saja tanpa masa tunggu.'
+                          : 'Hides your main Bio and all sub-pages from public visitors without deleting your database records or AVIF photos. Can be reactivated anytime with no cooldown.'}
+                      </p>
+                    </div>
+
+                    {workspace.isDeactivated ? (
+                      <button
+                        type="button"
+                        disabled={togglingDeactivate || isCooldownLocked}
+                        onClick={() => void handleSetBioDeactivated(false)}
+                        className="min-h-[38px] px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        <PlayCircle className="w-4 h-4" />
+                        <span>
+                          {lang === 'id' ? 'Aktifkan Kembali Bio' : 'Reactivate Bio'}
+                        </span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={togglingDeactivate || isCooldownLocked || isReservedHandle}
+                        onClick={() =>
+                          setPendingConfirm({ kind: 'deactivate_bio' })
+                        }
+                        className="min-h-[38px] px-4 py-2 text-xs font-semibold text-amber-800 dark:text-amber-200 bg-amber-100 hover:bg-amber-200 dark:bg-amber-950/50 dark:hover:bg-amber-900/60 border border-amber-300 dark:border-amber-800/70 disabled:opacity-50 rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        <PauseCircle className="w-4 h-4" />
+                        <span>
+                          {lang === 'id'
+                            ? 'Nonaktifkan Sementara'
+                            : 'Temporarily Deactivate'}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Per-Subpage Publish/Hide Controls */}
+                  {workspace.pages.filter((p) => p.pageSlug !== '').length > 0 && (
+                    <div className="pt-3 border-t border-slate-200 dark:border-[#232732] space-y-2">
+                      <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        {lang === 'id'
+                          ? 'Status Publikasi Per Sub-Halaman (/$PAGE)'
+                          : 'Per Sub-Page Visibility (/$PAGE)'}
+                      </div>
+                      <div className="space-y-2">
+                        {workspace.pages
+                          .filter((p) => p.pageSlug !== '')
+                          .map((sub) => {
+                            const isPub = sub.isPublished !== false;
+                            return (
+                              <div
+                                key={sub.id}
+                                className="px-3 py-2.5 rounded-lg bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] flex items-center justify-between gap-3 text-xs"
+                              >
+                                <div className="min-w-0">
+                                  <div className="font-mono font-semibold text-slate-900 dark:text-white truncate">
+                                    {username}.{domain}/{sub.pageSlug}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500">
+                                    {isPub
+                                      ? lang === 'id'
+                                        ? 'Tayang Publik'
+                                        : 'Publicly Visible'
+                                      : lang === 'id'
+                                        ? 'Dinonaktifkan Sementara (Data Aman)'
+                                        : 'Temporarily Hidden (Data Preserved)'}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={saving || isCooldownLocked}
+                                  onClick={() => {
+                                    const nextWs: BioWorkspaceData = {
+                                      ...workspace,
+                                      pages: workspace.pages.map((p) =>
+                                        p.pageSlug === sub.pageSlug
+                                          ? { ...p, isPublished: !isPub }
+                                          : p
+                                      ),
+                                    };
+                                    setWorkspace(nextWs);
+                                    void persistWorkspace(
+                                      nextWs,
+                                      !isPub
+                                        ? lang === 'id'
+                                          ? `Sub-halaman /${sub.pageSlug} kembali tayang publik.`
+                                          : `Sub-page /${sub.pageSlug} is publicly visible again.`
+                                        : lang === 'id'
+                                          ? `Sub-halaman /${sub.pageSlug} dinonaktifkan sementara (data tetap tersimpan).`
+                                          : `Sub-page /${sub.pageSlug} temporarily hidden (data preserved).`
+                                    );
+                                  }}
+                                  className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors shrink-0 cursor-pointer ${
+                                    isPub
+                                      ? 'text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900/60 hover:bg-amber-100'
+                                      : 'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/60 hover:bg-emerald-100'
+                                  }`}
+                                >
+                                  {isPub
+                                    ? lang === 'id'
+                                      ? 'Nonaktifkan'
+                                      : 'Deactivate'
+                                    : lang === 'id'
+                                      ? 'Aktifkan'
+                                      : 'Activate'}
+                                </button>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* 2. Permanent Bio Profile Deletion (Real DB Wipe + 3-Day Anti-Brute-Force Cooldown) */}
+                <div className="p-4 sm:p-5 rounded-xl bg-rose-50/60 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-900/60 space-y-4">
+                  <div className="space-y-1.5">
+                    <div className="text-sm font-bold text-rose-800 dark:text-rose-200 font-display flex items-center gap-2">
+                      <ShieldAlert className="w-4 h-4 shrink-0" />
+                      <span>
+                        {lang === 'id'
+                          ? `Hapus Permanen Profil & Semua Data Bio (${username}.${domain})`
+                          : `Permanently Delete Bio Profile & All Data (${username}.${domain})`}
+                      </span>
+                    </div>
+                    <p className="text-xs text-rose-900/85 dark:text-rose-200/85 leading-relaxed">
+                      {lang === 'id'
+                        ? `Tindakan ini menghapus secara nyata (hard DELETE) seluruh profil utama, semua sub-halaman /$PAGE, daftar tautan, ikon sosmed, serta berkas foto profil AVIF dari Cloudflare D1, KV, dan R2 (tidak masuk Recycle Bin).`
+                        : `This executes a real hard DELETE of your main profile, all /$PAGE sub-pages, links, social icons, and AVIF photos across Cloudflare D1, KV, and R2 (bypasses Recycle Bin).`}
+                    </p>
+                    <p className="text-xs text-rose-900/85 dark:text-rose-200/85 leading-relaxed">
+                      {lang === 'id'
+                        ? `Sesuai kebijakan anti-penyalahgunaan database, setelah dihapus permanen akun Anda akan memasuki masa tunggu (cooldown) selama ${BIO_DELETE_COOLDOWN_DAYS} hari (72 jam) sebelum dapat membuat ulang halaman Bio.`
+                        : `To protect database integrity from brute-force rewrites, a mandatory ${BIO_DELETE_COOLDOWN_DAYS}-day (72-hour) cooldown applies before you can recreate your Bio page.`}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={isCooldownLocked || isReservedHandle}
+                    onClick={() =>
+                      setPendingConfirm({ kind: 'permanent_delete_bio' })
+                    }
+                    className="min-h-[40px] px-4 py-2 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-45 disabled:cursor-not-allowed rounded-lg inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    <span>
+                      {lang === 'id'
+                        ? `Hapus Permanen ${username}.${domain}`
+                        : `Permanently Delete ${username}.${domain}`}
+                    </span>
+                  </button>
                 </div>
               </div>
             )}
@@ -1622,6 +2555,269 @@ export function VzLinksWorkspace({
         }}
         onConfirm={handleConfirmCroppedAvatar}
       />
+
+      {/* Universal Deletion & Danger Confirmation Modal (Yes/Cancel + GitHub Type-to-Confirm) */}
+      {(() => {
+        if (!pendingConfirm) return null;
+
+        if (pendingConfirm.kind === 'delete_link') {
+          const { link } = pendingConfirm;
+          return (
+            <ConfirmActionModal
+              isOpen
+              lang={lang}
+              tone="warning"
+              title={
+                lang === 'id'
+                  ? `Hapus tautan "${link.title}"?`
+                  : `Delete link "${link.title}"?`
+              }
+              description={
+                lang === 'id'
+                  ? `Tautan akan segera dihapus dari halaman Bio aktif Anda. Anda dapat memindahkannya ke Recycle Bin (${RECYCLE_BIN_RETENTION_DAYS} hari sebelum terhapus otomatis) atau langsung menghapusnya permanen dari database.`
+                  : `This link will be removed from your live Bio page immediately. Move it to the Recycle Bin (${RECYCLE_BIN_RETENTION_DAYS}-day auto-purge) or erase it permanently right now.`
+              }
+              details={link.url}
+              confirmLabel={
+                lang === 'id'
+                  ? `Pindah ke Recycle Bin (${RECYCLE_BIN_RETENTION_DAYS} hari)`
+                  : `Move to Recycle Bin (${RECYCLE_BIN_RETENTION_DAYS} days)`
+              }
+              secondaryAction={{
+                label:
+                  lang === 'id'
+                    ? 'Hapus Permanen Sekarang'
+                    : 'Delete Permanently Now',
+                tone: 'danger',
+                onClick: () => void executeDeleteLink(link, false),
+              }}
+              loading={confirmBusy}
+              onConfirm={() => void executeDeleteLink(link, true)}
+              onCancel={() => {
+                if (!confirmBusy) setPendingConfirm(null);
+              }}
+            />
+          );
+        }
+
+        if (pendingConfirm.kind === 'delete_avatar') {
+          const { scope } = pendingConfirm;
+          const isMain = scope === 'main';
+          return (
+            <ConfirmActionModal
+              isOpen
+              lang={lang}
+              tone="danger"
+              title={
+                isMain
+                  ? lang === 'id'
+                    ? 'Hapus foto profil utama Bio?'
+                    : 'Delete main Bio profile photo?'
+                  : lang === 'id'
+                    ? `Hapus foto khusus sub-halaman /${scope}?`
+                    : `Remove custom photo for /${scope}?`
+              }
+              description={
+                isMain
+                  ? lang === 'id'
+                    ? 'File AVIF foto profil utama Bio akan dihapus permanen dari penyimpanan Cloudflare (R2/D1/KV). Foto akun SSO myaccount.vz.gay Anda tidak terpengaruh.'
+                    : 'The main Bio AVIF photo file will be permanently deleted from Cloudflare storage (R2/D1/KV). Your myaccount.vz.gay SSO avatar is unaffected.'
+                  : lang === 'id'
+                    ? `Foto khusus untuk /${scope} akan dihapus dari penyimpanan dan sub-halaman ini akan kembali mewarisi foto profil utama Bio.`
+                    : `The custom photo for /${scope} will be deleted from storage and this sub-page will inherit your main Bio photo again.`
+              }
+              confirmLabel={lang === 'id' ? 'Ya, Hapus Foto' : 'Yes, Remove Photo'}
+              loading={deletingAvatarScope === scope}
+              onConfirm={async () => {
+                await handleDeleteAvatar(scope);
+                setPendingConfirm(null);
+              }}
+              onCancel={() => {
+                if (!deletingAvatarScope) setPendingConfirm(null);
+              }}
+            />
+          );
+        }
+
+        if (pendingConfirm.kind === 'delete_subpage') {
+          const { page } = pendingConfirm;
+          const phrase =
+            lang === 'id'
+              ? `hapus /${page.pageSlug}`
+              : `delete /${page.pageSlug}`;
+          return (
+            <ConfirmActionModal
+              isOpen
+              lang={lang}
+              tone="danger"
+              title={
+                lang === 'id'
+                  ? `Hapus sub-halaman ${username}.${domain}/${page.pageSlug}?`
+                  : `Delete sub-page ${username}.${domain}/${page.pageSlug}?`
+              }
+              description={
+                lang === 'id'
+                  ? `Sub-halaman /${page.pageSlug} beserta ${page.links.length} tautan di dalamnya akan langsung ditarik dari publik. Anda dapat menyimpannya di Recycle Bin selama ${RECYCLE_BIN_RETENTION_DAYS} hari atau langsung menghapus permanen dari database.`
+                  : `Sub-page /${page.pageSlug} and its ${page.links.length} link(s) will immediately be removed from public view. You can move it to Recycle Bin for ${RECYCLE_BIN_RETENTION_DAYS} days or delete it permanently.`
+              }
+              requireTypedText={phrase}
+              confirmLabel={
+                lang === 'id'
+                  ? `Pindah ke Recycle Bin (${RECYCLE_BIN_RETENTION_DAYS} hari)`
+                  : `Move to Recycle Bin (${RECYCLE_BIN_RETENTION_DAYS} days)`
+              }
+              secondaryAction={{
+                label:
+                  lang === 'id'
+                    ? 'Hapus Permanen dari DB'
+                    : 'Delete Permanently from DB',
+                tone: 'danger',
+                onClick: () => void executeDeleteSubpage(page, false),
+              }}
+              loading={confirmBusy}
+              onConfirm={() => void executeDeleteSubpage(page, true)}
+              onCancel={() => {
+                if (!confirmBusy) setPendingConfirm(null);
+              }}
+            />
+          );
+        }
+
+        if (pendingConfirm.kind === 'deactivate_bio') {
+          const phrase =
+            lang === 'id'
+              ? `nonaktifkan ${username}.${domain}`
+              : `deactivate ${username}.${domain}`;
+          return (
+            <ConfirmActionModal
+              isOpen
+              lang={lang}
+              tone="warning"
+              title={
+                lang === 'id'
+                  ? `Nonaktifkan sementara ${username}.${domain}?`
+                  : `Temporarily deactivate ${username}.${domain}?`
+              }
+              description={
+                lang === 'id'
+                  ? `Halaman utama ${username}.${domain} dan seluruh sub-halaman /$PAGE akan disembunyikan dari publik. Seluruh tautan, ikon sosmed, dan foto AVIF tetap tersimpan aman di database dan dapat diaktifkan kembali kapan saja.`
+                  : `Your main page ${username}.${domain} and all /$PAGE sub-pages will be hidden from public visitors. All links, social icons, and AVIF photos remain safely stored and can be reactivated anytime.`
+              }
+              requireTypedText={phrase}
+              confirmLabel={
+                lang === 'id'
+                  ? 'Nonaktifkan Sementara Bio'
+                  : 'Temporarily Deactivate Bio'
+              }
+              loading={confirmBusy}
+              onConfirm={() => void handleSetBioDeactivated(true)}
+              onCancel={() => {
+                if (!confirmBusy) setPendingConfirm(null);
+              }}
+            />
+          );
+        }
+
+        if (pendingConfirm.kind === 'permanent_delete_bio') {
+          const phrase =
+            lang === 'id'
+              ? `hapus ${username}.${domain}`
+              : `delete ${username}.${domain}`;
+          return (
+            <ConfirmActionModal
+              isOpen
+              lang={lang}
+              tone="danger"
+              title={
+                lang === 'id'
+                  ? `Hapus permanen seluruh profil & data ${username}.${domain}?`
+                  : `Permanently delete ${username}.${domain} and all data?`
+              }
+              description={
+                lang === 'id'
+                  ? `Seluruh profil, semua sub-halaman /$PAGE, daftar tautan, ikon sosmed, dan foto profil AVIF akan dihapus permanen dari Cloudflare D1, KV, dan R2 (tidak dapat dibatalkan). Anda harus menunggu ${BIO_DELETE_COOLDOWN_DAYS} hari sebelum dapat mengaktifkan ulang Bio.`
+                  : `Your entire profile, all /$PAGE sub-pages, links, social icons, and AVIF photos will be permanently erased from Cloudflare D1, KV, and R2 (irreversible). A ${BIO_DELETE_COOLDOWN_DAYS}-day cooldown will apply before recreating your Bio.`
+              }
+              requireTypedText={phrase}
+              confirmLabel={
+                lang === 'id'
+                  ? 'Hapus Permanen dari Database'
+                  : 'Permanently Delete from Database'
+              }
+              loading={confirmBusy}
+              onConfirm={() => void handlePermanentDeleteBio()}
+              onCancel={() => {
+                if (!confirmBusy) setPendingConfirm(null);
+              }}
+            />
+          );
+        }
+
+        if (pendingConfirm.kind === 'purge_recycle_item') {
+          const { item } = pendingConfirm;
+          return (
+            <ConfirmActionModal
+              isOpen
+              lang={lang}
+              tone="danger"
+              title={
+                lang === 'id'
+                  ? `Hapus permanen "${item.label}" dari Recycle Bin?`
+                  : `Permanently delete "${item.label}" from Recycle Bin?`
+              }
+              description={
+                lang === 'id'
+                  ? 'Item ini akan langsung dihapus permanen dari database Cloudflare D1/KV dan tidak dapat dipulihkan lagi.'
+                  : 'This item will immediately be permanently erased from the Cloudflare D1/KV database and cannot be restored.'
+              }
+              details={item.summary || undefined}
+              confirmLabel={
+                lang === 'id' ? 'Ya, Hapus Permanen' : 'Yes, Delete Permanently'
+              }
+              loading={confirmBusy}
+              onConfirm={() => void executePurgeRecycleItem(item)}
+              onCancel={() => {
+                if (!confirmBusy) setPendingConfirm(null);
+              }}
+            />
+          );
+        }
+
+        if (pendingConfirm.kind === 'empty_recycle_bin') {
+          const phrase =
+            lang === 'id' ? 'kosongkan recycle bin' : 'empty recycle bin';
+          return (
+            <ConfirmActionModal
+              isOpen
+              lang={lang}
+              tone="danger"
+              title={
+                lang === 'id'
+                  ? `Kosongkan seluruh Recycle Bin (${recycleItems.length} item)?`
+                  : `Empty entire Recycle Bin (${recycleItems.length} items)?`
+              }
+              description={
+                lang === 'id'
+                  ? 'Seluruh tautan Bio, sub-halaman, dan shortlink yang berada di Recycle Bin akan dihapus permanen dari database Cloudflare secara langsung.'
+                  : 'All Bio links, sub-pages, and shortlinks currently in the Recycle Bin will be permanently erased from the Cloudflare database immediately.'
+              }
+              requireTypedText={phrase}
+              confirmLabel={
+                lang === 'id'
+                  ? 'Kosongkan Permanen Sekarang'
+                  : 'Empty Permanently Now'
+              }
+              loading={confirmBusy}
+              onConfirm={() => void executeEmptyRecycleBin()}
+              onCancel={() => {
+                if (!confirmBusy) setPendingConfirm(null);
+              }}
+            />
+          );
+        }
+
+        return null;
+      })()}
     </div>
   );
 }

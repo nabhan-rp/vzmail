@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import type { ShortlinkRecord } from '../utils/linksModel';
+import { ConfirmActionModal } from './ConfirmActionModal';
 import type { ActiveHostView } from './MailLinksTopBar';
 
 interface ShortlinkStudioProps {
@@ -76,6 +77,11 @@ export function ShortlinkStudio({
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedSlug, setCopiedSlug] = useState<string | null>(null);
   const [deletingSlug, setDeletingSlug] = useState<string | null>(null);
+  const [pendingDeleteItem, setPendingDeleteItem] = useState<ShortlinkRecord | null>(null);
+  const [deleteNotice, setDeleteNotice] = useState<{
+    text: string;
+    movedToRecycleBin: boolean;
+  } | null>(null);
 
   const copyTimerRef = useRef<number | null>(null);
   const urlInputRef = useRef<HTMLInputElement | null>(null);
@@ -201,32 +207,60 @@ export function ShortlinkStudio({
     }
   };
 
-  const handleDelete = async (item: ShortlinkRecord) => {
+  const executeDelete = async (
+    item: ShortlinkRecord,
+    mode: 'recycle' | 'permanent'
+  ) => {
     setDeletingSlug(item.slug);
     try {
       if (session.isAuthenticated && session.username) {
         const res = await fetch(
           `/api/links/shortlinks/${encodeURIComponent(item.slug)}?owner=${encodeURIComponent(
             session.username
-          )}`,
+          )}&mode=${mode}`,
           { method: 'DELETE' }
         );
-        if (res.ok) {
+        const json = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          movedToRecycleBin?: boolean;
+        } | null;
+
+        if (res.ok && json?.ok !== false) {
           setItems((prev) => prev.filter((x) => x.slug !== item.slug));
           if (createdRecord?.slug === item.slug) setCreatedRecord(null);
+          const moved = Boolean(json?.movedToRecycleBin);
+          setDeleteNotice({
+            movedToRecycleBin: moved,
+            text: moved
+              ? lang === 'id'
+                ? `Shortlink ${domain}/s/${item.slug} dihentikan dari redirect aktif & dipindahkan ke Recycle Bin (14 hari sebelum terhapus otomatis).`
+                : `Shortlink ${domain}/s/${item.slug} stopped redirecting and moved to Recycle Bin (auto-purged after 14 days).`
+              : lang === 'id'
+                ? `Shortlink ${domain}/s/${item.slug} telah dihapus permanen dari database.`
+                : `Shortlink ${domain}/s/${item.slug} has been permanently deleted from the database.`,
+          });
         }
       } else {
-        // Guest can delete their own anonymous shortlink created in this browser
-        await fetch(`/api/links/shortlinks/${encodeURIComponent(item.slug)}`, {
-          method: 'DELETE',
-        });
+        // Guest deletes anonymous shortlink permanently from DB
+        await fetch(
+          `/api/links/shortlinks/${encodeURIComponent(item.slug)}?mode=permanent`,
+          { method: 'DELETE' }
+        );
         const remaining = readGuestSlugs().filter((s) => s !== item.slug);
         writeGuestSlugs(remaining);
         setItems((prev) => prev.filter((x) => x.slug !== item.slug));
         if (createdRecord?.slug === item.slug) setCreatedRecord(null);
+        setDeleteNotice({
+          movedToRecycleBin: false,
+          text:
+            lang === 'id'
+              ? `Shortlink ${domain}/s/${item.slug} telah dihapus permanen dari database.`
+              : `Shortlink ${domain}/s/${item.slug} has been permanently deleted from the database.`,
+        });
       }
     } finally {
       setDeletingSlug(null);
+      setPendingDeleteItem(null);
     }
   };
 
@@ -460,6 +494,30 @@ export function ShortlinkStudio({
 
       {/* Shortlinks History & Real Click Stats */}
       <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl overflow-hidden">
+        {deleteNotice && (
+          <div className="px-5 py-3 bg-amber-50/80 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-900/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-amber-900 dark:text-amber-200">
+            <span>{deleteNotice.text}</span>
+            <div className="flex items-center gap-3 shrink-0">
+              {deleteNotice.movedToRecycleBin && (
+                <button
+                  type="button"
+                  onClick={() => onSelectHost('links.vz.gay')}
+                  className="font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                >
+                  {lang === 'id' ? 'Buka Recycle Bin di Studio Bio' : 'Open Recycle Bin in Bio Studio'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setDeleteNotice(null)}
+                className="text-slate-500 hover:text-slate-900 dark:hover:text-white cursor-pointer"
+              >
+                {lang === 'id' ? 'Tutup' : 'Dismiss'}
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="px-5 py-4 border-b border-slate-200 dark:border-[#232732] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="space-y-0.5">
             <h2 className="text-base font-bold text-slate-900 dark:text-white font-display">
@@ -616,7 +674,7 @@ export function ShortlinkStudio({
                         </a>
                         <button
                           type="button"
-                          onClick={() => void handleDelete(item)}
+                          onClick={() => setPendingDeleteItem(item)}
                           disabled={deletingSlug === item.slug}
                           aria-label={`Delete ${item.slug}`}
                           className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 rounded-md hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer disabled:opacity-50"
@@ -632,6 +690,69 @@ export function ShortlinkStudio({
           </div>
         )}
       </section>
+
+      {/* Simple Yes/Cancel Confirmation Modal (No typing required for shortlinks) */}
+      <ConfirmActionModal
+        isOpen={Boolean(pendingDeleteItem)}
+        lang={lang}
+        tone={session.isAuthenticated ? 'warning' : 'danger'}
+        title={
+          pendingDeleteItem
+            ? lang === 'id'
+              ? `Hapus shortlink ${domain}/s/${pendingDeleteItem.slug}?`
+              : `Delete shortlink ${domain}/s/${pendingDeleteItem.slug}?`
+            : ''
+        }
+        description={
+          pendingDeleteItem
+            ? session.isAuthenticated
+              ? lang === 'id'
+                ? `Tautan ${domain}/s/${pendingDeleteItem.slug} akan langsung dihapus dari rute redirect aktif sehingga tidak dapat diakses lagi. Anda dapat memindahkannya ke Recycle Bin (14 hari sebelum terhapus otomatis dari database) atau langsung menghapusnya permanen sekarang.`
+                : `Shortlink ${domain}/s/${pendingDeleteItem.slug} will immediately be removed from live edge redirects. You can move it to the Recycle Bin (auto-purged from the database after 14 days) or permanently delete it right now.`
+              : lang === 'id'
+                ? `Tautan ${domain}/s/${pendingDeleteItem.slug} akan langsung dihapus secara permanen dari database Cloudflare dan berhenti dialihkan seketika.`
+                : `Shortlink ${domain}/s/${pendingDeleteItem.slug} will be permanently erased from the Cloudflare database and stop redirecting immediately.`
+            : ''
+        }
+        details={
+          pendingDeleteItem
+            ? `${domain}/s/${pendingDeleteItem.slug} → ${pendingDeleteItem.targetUrl}`
+            : undefined
+        }
+        confirmLabel={
+          session.isAuthenticated
+            ? lang === 'id'
+              ? 'Pindah ke Recycle Bin (14 hari)'
+              : 'Move to Recycle Bin (14 days)'
+            : lang === 'id'
+              ? 'Ya, Hapus Permanen'
+              : 'Yes, Delete Permanently'
+        }
+        secondaryAction={
+          session.isAuthenticated && pendingDeleteItem
+            ? {
+                label:
+                  lang === 'id'
+                    ? 'Hapus Permanen dari DB'
+                    : 'Delete Permanently from DB',
+                tone: 'danger',
+                onClick: () => void executeDelete(pendingDeleteItem, 'permanent'),
+              }
+            : undefined
+        }
+        loading={Boolean(pendingDeleteItem && deletingSlug === pendingDeleteItem.slug)}
+        onConfirm={() => {
+          if (!pendingDeleteItem) return;
+          void executeDelete(
+            pendingDeleteItem,
+            session.isAuthenticated ? 'recycle' : 'permanent'
+          );
+        }}
+        onCancel={() => {
+          if (deletingSlug) return;
+          setPendingDeleteItem(null);
+        }}
+      />
     </div>
   );
 }
