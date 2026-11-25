@@ -51,6 +51,7 @@ import {
 import { checkReservedUsername } from '../utils/reservedUsernames';
 import { ConfirmActionModal } from './ConfirmActionModal';
 import type { ActiveHostView } from './MailLinksTopBar';
+import { MailSearchGroundingDrawer } from './MailSearchGroundingDrawer';
 
 interface VzMailWorkspaceProps {
   lang: Language;
@@ -154,6 +155,28 @@ export function VzMailWorkspace({
   const [pendingPermanentDeleteMsg, setPendingPermanentDeleteMsg] =
     useState<LocalMailMessage | null>(null);
   const [deletingLocalMsg, setDeletingLocalMsg] = useState(false);
+  const [groundingDrawer, setGroundingDrawer] = useState<{
+    open: boolean;
+    email: string;
+    name: string;
+    subject: string;
+  }>({
+    open: false,
+    email: '',
+    name: '',
+    subject: '',
+  });
+  const openSearchGrounding = useCallback(
+    (email = '', name = '', subject = '') => {
+      setGroundingDrawer({
+        open: true,
+        email,
+        name,
+        subject,
+      });
+    },
+    []
+  );
   const reservedMailCheck = useMemo(
     () => checkReservedUsername(user),
     [user]
@@ -1384,6 +1407,35 @@ export function VzMailWorkspace({
 
           <button
             type="button"
+            onClick={() => {
+              if (viewMode === 'conversational' && activeThread) {
+                openSearchGrounding(
+                  activeThread.peerAddress,
+                  activeThread.peerName,
+                  activeThread.latestMessage.subject
+                );
+              } else if (activeClassicMessage) {
+                openSearchGrounding(
+                  activeClassicMessage.from.address,
+                  activeClassicMessage.from.name,
+                  activeClassicMessage.subject
+                );
+              } else {
+                openSearchGrounding(searchQuery.trim(), '', '');
+              }
+            }}
+            className="min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+            <span>
+              {lang === 'id'
+                ? 'Verifikasi & VZ Search'
+                : 'Verify & VZ Search'}
+            </span>
+          </button>
+
+          <button
+            type="button"
             onClick={onOpenVault}
             className="min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232A38] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
@@ -1605,6 +1657,24 @@ export function VzMailWorkspace({
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openSearchGrounding(
+                              activeThread.peerAddress,
+                              activeThread.peerName,
+                              activeThread.latestMessage.subject
+                            )
+                          }
+                          className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          <span>
+                            {lang === 'id'
+                              ? 'Verifikasi Pengirim'
+                              : 'Verify Sender'}
+                          </span>
+                        </button>
                         <button
                           type="button"
                           onClick={() => {
@@ -2057,6 +2127,24 @@ export function VzMailWorkspace({
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
+                        onClick={() =>
+                          openSearchGrounding(
+                            activeClassicMessage.from.address,
+                            activeClassicMessage.from.name,
+                            activeClassicMessage.subject
+                          )
+                        }
+                        className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 rounded-md inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        <span>
+                          {lang === 'id'
+                            ? 'Verifikasi Pengirim & Cari'
+                            : 'Verify Sender & Search'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => {
                           setComposeTo(
                             activeClassicMessage.direction === 'inbound'
@@ -2454,6 +2542,28 @@ export function VzMailWorkspace({
         onCancel={() => {
           if (deletingLocalMsg) return;
           setPendingPermanentDeleteMsg(null);
+        }}
+      />
+
+      <MailSearchGroundingDrawer
+        isOpen={groundingDrawer.open}
+        lang={lang}
+        initialSenderEmail={groundingDrawer.email}
+        initialSenderName={groundingDrawer.name}
+        initialSubject={groundingDrawer.subject}
+        allMessages={messages}
+        onClose={() =>
+          setGroundingDrawer((prev) => ({ ...prev, open: false }))
+        }
+        onSelectMessage={(msg) => {
+          setActiveFolder(msg.folder);
+          setSelectedPlusTag(null);
+          if (viewMode === 'conversational') {
+            setSelectedThreadId(msg.threadId);
+          } else {
+            setSelectedMessageId(msg.id);
+          }
+          setMobileShowDetail(true);
         }}
       />
     </div>

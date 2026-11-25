@@ -476,6 +476,7 @@ export default function App() {
                 pageSlug={bioPageSlug}
                 onChangePageSlug={handleChangeBioPageSlug}
                 onSelectHost={handleSelectHost}
+                onLoginWithAuth0={loginWithAuth0}
               />
             )}
 

@@ -1,4 +1,4 @@
-import { ArrowLeft, Edit3, ExternalLink, Globe, Link2 } from 'lucide-react';
+import { ArrowLeft, Edit3, ExternalLink, Globe, Link2, LogIn, Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
@@ -20,6 +20,7 @@ interface ImyBioPublicViewProps {
   pageSlug?: string;
   onChangePageSlug?: (nextSlug: string) => void;
   onSelectHost: (host: ActiveHostView) => void;
+  onLoginWithAuth0?: () => void;
 }
 
 export function ImyBioPublicView({
@@ -29,13 +30,20 @@ export function ImyBioPublicView({
   pageSlug = '',
   onChangePageSlug,
   onSelectHost,
+  onLoginWithAuth0,
 }: ImyBioPublicViewProps) {
   const user = useMemo(() => {
     if (overrideUser && overrideUser.trim()) {
-      return sanitizeHandle(overrideUser);
+      const cleaned = sanitizeHandle(overrideUser);
+      if (cleaned && cleaned !== 'username') {
+        return cleaned;
+      }
     }
     if (session.isAuthenticated && session.username) {
-      return sanitizeHandle(session.username);
+      const cleaned = sanitizeHandle(session.username);
+      if (cleaned && cleaned !== 'username') {
+        return cleaned;
+      }
     }
     return '';
   }, [overrideUser, session.isAuthenticated, session.username]);
@@ -149,6 +157,96 @@ export function ImyBioPublicView({
     );
   }
 
+  // Default placeholder tab (username.imy.li while unauthenticated): invite user to sign in & create their own Bio page
+  if (!user) {
+    return (
+      <div className="min-h-[calc(100vh-112px)] flex items-center justify-center px-4 py-14">
+        <div className="w-full max-w-lg bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-2xl p-7 sm:p-8 text-center space-y-6">
+          <div className="w-12 h-12 rounded-xl bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-900/60 flex items-center justify-center mx-auto">
+            <Sparkles className="w-6 h-6" />
+          </div>
+
+          <div className="space-y-2">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-100 dark:bg-[#1B202B] text-xs font-mono text-blue-600 dark:text-blue-400">
+              <span>https://username.{domain}</span>
+              <span aria-hidden="true">·</span>
+              <span>/$PAGE</span>
+            </div>
+            <h1 className="text-xl font-bold text-slate-900 dark:text-white font-display">
+              {lang === 'id'
+                ? 'Buat Halaman Link-in-Bio Anda Sendiri'
+                : 'Create Your Own Link-in-Bio Page'}
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+              {lang === 'id'
+                ? `Masuk dengan akun SSO Universal (accounts.vz.gay) untuk mengklaim subdomain pribadi namaanda.${domain} beserta sub-halaman tak terbatas (namaanda.${domain}/$PAGE), tema per halaman, foto profil AVIF, dan pasangan 1:1 dengan email namaanda@${domain}.`
+                : `Sign in with your Universal SSO account (accounts.vz.gay) to claim your personal yourname.${domain} subdomain with unlimited sub-pages (yourname.${domain}/$PAGE), per-page color themes, AVIF profile photo, and 1:1 pairing with yourname@${domain}.`}
+            </p>
+          </div>
+
+          <div className="p-3.5 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] text-left space-y-2 text-xs">
+            <div className="flex items-center justify-between gap-2 font-mono">
+              <span className="text-slate-500">
+                {lang === 'id' ? 'Subdomain Utama:' : 'Primary Subdomain:'}
+              </span>
+              <span className="text-slate-900 dark:text-white font-semibold">
+                https://username.{domain}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2 font-mono">
+              <span className="text-slate-500">
+                {lang === 'id' ? 'Multi-Page Gratis:' : 'Free Multi-Page:'}
+              </span>
+              <span className="text-emerald-600 dark:text-emerald-400">
+                username.{domain}/promo, /event, /links
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2 font-mono">
+              <span className="text-slate-500">
+                {lang === 'id' ? 'Pasangan Email 1:1:' : '1:1 Paired Email:'}
+              </span>
+              <span className="text-blue-600 dark:text-blue-400">
+                username@{domain}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => {
+                if (onLoginWithAuth0) {
+                  onLoginWithAuth0();
+                } else {
+                  onSelectHost('links.vz.gay');
+                }
+              }}
+              className="w-full sm:w-auto min-h-[42px] px-5 py-2.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg inline-flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <LogIn className="w-4 h-4" />
+              <span>
+                {lang === 'id'
+                  ? 'Masuk & Buat Link Bio Sendiri'
+                  : 'Sign In & Create Your Bio Link'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onSelectHost('links.vz.gay')}
+              className="w-full sm:w-auto min-h-[42px] px-4 py-2.5 text-xs font-semibold text-slate-800 dark:text-slate-100 bg-slate-100 hover:bg-slate-200 dark:bg-[#1B202B] dark:hover:bg-[#242B3A] rounded-lg inline-flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Link2 className="w-3.5 h-3.5" />
+              <span>
+                {lang === 'id' ? 'Ke Studio VZ Links' : 'Go to VZ Links Studio'}
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Temporary deactivation state (owner deactivated Bio without deleting data)
   if (user && workspace && workspace.isDeactivated) {
     return (
@@ -199,13 +297,11 @@ export function ImyBioPublicView({
     );
   }
 
-  // Honest unconfigured / empty state (zero mock or demo data)
-  if (!user || !workspace || !activePage) {
-    const requestedPath = user
-      ? pageSlug
-        ? `${user}.${domain}/${pageSlug}`
-        : `${user}.${domain}`
-      : `username.${domain}`;
+  // Honest unconfigured / empty state for a specific user handle (zero mock or demo data)
+  if (!workspace || !activePage) {
+    const requestedPath = pageSlug
+      ? `${user}.${domain}/${pageSlug}`
+      : `${user}.${domain}`;
 
     return (
       <div className="min-h-[calc(100vh-112px)] flex items-center justify-center px-4 py-14">

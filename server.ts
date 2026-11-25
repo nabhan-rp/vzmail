@@ -1068,6 +1068,108 @@ async function startServer() {
   app.delete('/api/links/avatar/:username', handleDeleteAvatar);
   app.delete('/api/links/avatar/:username/:pageSlug', handleDeleteAvatar);
 
+  // Non-AI VZ Search Grounding Proxy (`GET /api/mail/vz-search?q=...&page=...`)
+  app.get('/api/mail/vz-search', async (req, res) => {
+    const rawQ = String(req.query.q || '').trim().slice(0, 240);
+    const rawPage = parseInt(String(req.query.page || '1'), 10);
+    const page = Number.isFinite(rawPage) ? Math.min(20, Math.max(1, rawPage)) : 1;
+
+    if (!rawQ) {
+      res.status(400).json({ ok: false, error: 'Parameter pencarian q diperlukan.' });
+      return;
+    }
+
+    const searchPageUrl = `https://search.vz.gay/?q=${encodeURIComponent(rawQ)}&page=${page}`;
+    try {
+      const upstream = await fetch(
+        `https://search.vz.gay/api/search?q=${encodeURIComponent(rawQ)}&page=${page}`,
+        {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+            'User-Agent': 'VZMail-SearchGrounding/1.0 (+https://mail.vz.gay)',
+          },
+        }
+      );
+      const data = (await upstream.json().catch(() => null)) as {
+        results?: Array<{
+          title?: string;
+          url?: string;
+          description?: string;
+          siteName?: string;
+          favicon?: string;
+          age?: string;
+        }>;
+        hasMore?: boolean;
+        spellcheckSuggestion?: string | null;
+        suggestion?: string | null;
+        error?: string;
+      } | null;
+
+      if (!upstream.ok || !data) {
+        res.status(502).json({
+          ok: false,
+          query: rawQ,
+          page,
+          searchUrl: searchPageUrl,
+          error: data?.error || 'Tidak dapat memuat hasil dari search.vz.gay saat ini.',
+        });
+        return;
+      }
+
+      const rawItems = Array.isArray(data.results) ? data.results.slice(0, 15) : [];
+      const results = rawItems
+        .map((item) => {
+          const safeUrl = sanitizeExternalUrl(String(item.url || ''), {
+            allowMailto: false,
+            blockPrivateHosts: true,
+          });
+          if (!safeUrl) return null;
+          const cleanSnippet = String(item.description || '')
+            .replace(/<[^>]+>/g, '')
+            .replace(/&quot;/g, '"')
+            .replace(/&#x27;|&#39;/g, "'")
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .slice(0, 360);
+          return {
+            title: stripHeaderInjection(String(item.title || safeUrl), 180),
+            url: safeUrl,
+            description: cleanSnippet,
+            siteName: stripHeaderInjection(String(item.siteName || ''), 80),
+            favicon: sanitizeExternalUrl(String(item.favicon || ''), {
+              allowMailto: false,
+              blockPrivateHosts: true,
+            }),
+            age: stripHeaderInjection(String(item.age || ''), 40),
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+
+      res.json({
+        ok: true,
+        query: rawQ,
+        page,
+        searchUrl: searchPageUrl,
+        hasMore: Boolean(data.hasMore),
+        spellcheckSuggestion:
+          typeof (data.spellcheckSuggestion || data.suggestion) === 'string'
+            ? String(data.spellcheckSuggestion || data.suggestion).slice(0, 160)
+            : null,
+        results,
+      });
+    } catch {
+      res.status(502).json({
+        ok: false,
+        query: rawQ,
+        page,
+        searchUrl: searchPageUrl,
+        error: 'Gagal menghubungi layanan search.vz.gay.',
+      });
+    }
+  });
+
   app.get('/s/:slug', (req, res, next) => {
     const slug = sanitizeSlug(String(req.params.slug || ''));
     const record = localShortlinks.get(slug);
