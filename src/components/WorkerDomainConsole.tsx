@@ -1,13 +1,20 @@
 import {
+  Activity,
   CheckCircle2,
   Copy,
   Download,
   Globe,
+  Inbox,
+  KeyRound,
+  Mail,
   Plus,
+  RefreshCw,
+  Send,
   Server,
   ShieldCheck,
+  Terminal,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import { getOrSeedDomains, saveDomainOption } from '../utils/localMailDb';
 import { sanitizeDomain, type MailDomainOption } from '../utils/mailIdentity';
@@ -17,60 +24,53 @@ interface WorkerDomainConsoleProps {
   username: string;
 }
 
-const WORKER_DEPLOY_SNIPPET = `// cloudflare/worker-mail-links.ts (2-in-1 Worker: mail.vz.gay + links.vz.gay + *.imy.li)
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const host = url.hostname.toLowerCase();
+interface HealthSnapshot {
+  ok: boolean;
+  service: string;
+  primaryDomain?: string;
+  outboundProviderMode?: string;
+  activeOutboundProvider?: string;
+  bindings?: {
+    mailTransitKv?: boolean;
+    linksKv?: boolean;
+    sendEmail?: boolean;
+    cpanelRelay?: boolean;
+    resendApi?: boolean;
+    brevoApi?: boolean;
+    assets?: boolean;
+    relayAuthProtected?: boolean;
+  };
+  timestamp?: string;
+}
 
-    // 1. Ephemeral Relay & Shortlink API (/api/health, /api/mail/*, /api/links/*)
-    if (url.pathname.startsWith('/api/')) {
-      return handleApiRequest(request, url, env);
-    }
+type SetupGuideTab = 'inbound' | 'cpanel' | 'api_cloudflare';
 
-    // 2. Validated HTTP 301 Shortlink Redirector: imy.li/s/$URL
-    if (url.pathname.startsWith('/s/')) {
-      const slug = sanitizeSlug(url.pathname.replace(/^\\/s\\//, '').split('/')[0] || '');
-      const target = slug && env.LINKS_KV ? await env.LINKS_KV.get(\`short:\${slug}\`, 'text') : null;
-      const safeTarget = target ? sanitizeExternalUrl(target, { blockPrivateHosts: true }) : null;
-      if (safeTarget) return Response.redirect(safeTarget, 301);
-    }
+const CPANEL_SECRET_FILE_SNIPPET = `<?php
+// Simpan DI LUAR public_html, misal: /home/<username_cpanel>/.vz_relay_secret.php
+// Ubah izin file (chmod) menjadi 0600
+return [
+  'secret' => 'GANTI_DENGAN_TOKEN_ACAK_MINIMAL_32_KARAKTER_YANG_SAMA_DI_WRANGLER',
+];`;
 
-    // 3. Wildcard Static Link-in-Bio: $USERNAME.imy.li (Zero Cookie Collision + Strict CSP)
-    const isBioSubdomain = host.endsWith('.imy.li') && host !== 'www.imy.li' && host !== 'mail.imy.li';
-    const resp = await env.ASSETS.fetch(request);
-    return applyHtmlSecurityHeaders(resp, { isBioSubdomain, isHttps: url.protocol === 'https:' });
-  },
+const CPANEL_WRANGLER_SECRETS_CMD = `# 1. Set URL relay HTTPS di server cPanel karya.kreasi.org
+npx wrangler secret put CPANEL_RELAY_URL
+# Contoh isi: https://relay.karya.kreasi.org/cloudflare_imy_mail_links_relay.php
 
-  // 4. Inbound Cloudflare Email Routing -> Memory-Safe Bounded Stream -> Ephemeral KV Queue
-  async email(message, env, ctx) {
-    if (message.rawSize > 10 * 1024 * 1024) {
-      message.setReject('Message exceeds 10 MB ephemeral relay size limit.');
-      return;
-    }
-    const resolved = canonicalizeImyRecipient(message.to);
-    const id = \`cf-in-\${crypto.randomUUID()}\`;
-    const { text } = await readBoundedStreamText(message.raw, 256 * 1024);
+# 2. Set token rahasia yang SAMA persis dengan .vz_relay_secret.php
+npx wrangler secret put CPANEL_RELAY_SECRET
 
-    if (env.MAIL_TRANSIT_KV) {
-      await env.MAIL_TRANSIT_KV.put(
-        \`q:\${resolved.canonicalUser}:\${id}\`,
-        JSON.stringify({
-          id,
-          canonicalUser: resolved.canonicalUser,
-          fromAddress: message.from,
-          toAddress: message.to,
-          plusTag: resolved.plusTag,
-          dotNormalized: resolved.dotNormalized,
-          subject: message.headers.get('subject') || '(No Subject)',
-          bodyText: extractReadableBodyFromRawMime(text),
-          receivedAt: new Date().toISOString(),
-        }),
-        { expirationTtl: 72 * 3600 }
-      );
-    }
-  }
-};`;
+# 3. Build (otomatis rename *.php.txt -> *.php di dist/) & deploy Worker
+npm run cf:deploy`;
+
+const API_WRANGLER_SECRETS_CMD = `# Opsi B1 — Resend Gratis (3.000 email/bulan, 100/hari):
+npx wrangler secret put RESEND_API_KEY
+
+# Opsi B2 — Brevo Gratis (300 email/hari):
+npx wrangler secret put BREVO_API_KEY
+
+# Opsi B3 — Cloudflare Email Sending (Workers Paid $5/bln):
+# Uncomment [[send_email]] di wrangler.toml lalu jalankan:
+npm run cf:deploy`;
 
 const WRANGLER_ROUTES_SNIPPET = `name = "vzmail"
 main = "cloudflare/worker-mail-links.ts"
@@ -84,39 +84,30 @@ not_found_handling = "single-page-application"
 run_worker_first = [
   "/*",
   "!/assets/*",
+  "!/icons/*",
   "!/favicon.svg",
-  "!/og-banner.jpg",
-  "!/robots.txt",
-  "!/sitemap.xml",
-  "!/cloudflare_imy_mail_links_relay.php.txt"
+  "!/cloudflare_imy_mail_links_relay.php"
 ]
 
-[observability]
-enabled = true
-[observability.logs]
-enabled = true
-[observability.traces]
-enabled = true
-head_sampling_rate = 0.1
+routes = [
+  { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
+  { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
+  { pattern = "imy.li/*", zone_name = "imy.li" },
+  { pattern = "*.imy.li/*", zone_name = "imy.li" }
+]
 
-# Uncomment after zones & bindings are created in Cloudflare Dashboard:
-# routes = [
-#   { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
-#   { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
-#   { pattern = "imy.li/*", zone_name = "imy.li" },
-#   { pattern = "*.imy.li/*", zone_name = "imy.li" }
-# ]
-#
-# [[send_email]]
-# name = "SEND_EMAIL"
-#
-# [[kv_namespaces]]
-# binding = "MAIL_TRANSIT_KV"
-# id = "<EPHEMERAL_TRANSIT_KV_ID>"
-#
-# [[kv_namespaces]]
-# binding = "LINKS_KV"
-# id = "<SHORTLINKS_KV_ID>"`;
+[vars]
+PRIMARY_MAIL_DOMAIN = "imy.li"
+DAILY_OUTBOUND_LIMIT = "25"
+OUTBOUND_PROVIDER = "auto"
+
+[[kv_namespaces]]
+binding = "MAIL_TRANSIT_KV"
+id = "b330955476094cc2820053732cbb4471"
+
+[[kv_namespaces]]
+binding = "LINKS_KV"
+id = "9fb255e46c7b4501922aa6881c806493"`;
 
 export function WorkerDomainConsole({
   lang,
@@ -125,28 +116,52 @@ export function WorkerDomainConsole({
   const [domains, setDomains] = useState<MailDomainOption[]>([]);
   const [newDomainInput, setNewDomainInput] = useState('');
   const [copiedMsg, setCopiedMsg] = useState<string | null>(null);
+  const [activeGuideTab, setActiveGuideTab] = useState<SetupGuideTab>('cpanel');
+  const [health, setHealth] = useState<HealthSnapshot | null>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthError, setHealthError] = useState<string | null>(null);
   const timerRef = useRef<number | null>(null);
 
-  const loadDomains = async () => {
+  const loadDomains = useCallback(async () => {
     const list = await getOrSeedDomains();
     setDomains(list);
-  };
+  }, []);
+
+  const fetchLiveHealth = useCallback(async () => {
+    setHealthLoading(true);
+    setHealthError(null);
+    try {
+      const res = await fetch('/api/health', { cache: 'no-store' });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as HealthSnapshot;
+      setHealth(data);
+    } catch (err) {
+      setHealthError(
+        err instanceof Error ? err.message : 'Gagal menghubungi /api/health'
+      );
+    } finally {
+      setHealthLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    loadDomains();
+    void loadDomains();
+    void fetchLiveHealth();
     return () => {
       if (timerRef.current !== null) {
         window.clearTimeout(timerRef.current);
       }
     };
-  }, []);
+  }, [loadDomains, fetchLiveHealth]);
 
   const flashCopied = (text: string) => {
     setCopiedMsg(text);
     if (timerRef.current !== null) {
       window.clearTimeout(timerRef.current);
     }
-    timerRef.current = window.setTimeout(() => setCopiedMsg(null), 3000);
+    timerRef.current = window.setTimeout(() => setCopiedMsg(null), 3200);
   };
 
   const handleToggleDomainStatus = async (item: MailDomainOption) => {
@@ -195,8 +210,79 @@ export function WorkerDomainConsole({
 
   const handleCopy = (label: string, code: string) => {
     navigator.clipboard?.writeText(code).catch(() => {});
-    flashCopied(`${label} disalin ke clipboard.`);
+    flashCopied(
+      lang === 'id'
+        ? `${label} disalin ke clipboard.`
+        : `${label} copied to clipboard.`
+    );
   };
+
+  const dnsBlueprintRows = [
+    {
+      type: 'MX',
+      host: 'imy.li',
+      value: 'route1.mx.cloudflare.net (prio 10) · route2/route3',
+      copyValue: 'route1.mx.cloudflare.net',
+      note:
+        lang === 'id'
+          ? 'Email MASUK 100% ke Cloudflare Worker `email()` (0 byte di cPanel)'
+          : 'Inbound email 100% routed to Cloudflare Worker `email()` (0 bytes on cPanel)',
+      accent: 'blue',
+    },
+    {
+      type: 'TXT (SPF)',
+      host: 'imy.li',
+      value: 'v=spf1 include:_spf.mx.cloudflare.net a:karya.kreasi.org ~all',
+      copyValue: 'v=spf1 include:_spf.mx.cloudflare.net a:karya.kreasi.org ~all',
+      note:
+        lang === 'id'
+          ? 'Izinkan Cloudflare & Exim cPanel karya.kreasi.org kirim atas nama @imy.li'
+          : 'Authorizes Cloudflare & cPanel Exim (karya.kreasi.org) to send as @imy.li',
+      accent: 'blue',
+    },
+    {
+      type: 'TXT (DKIM)',
+      host: 'default._domainkey.imy.li',
+      value: 'v=DKIM1; k=rsa; p=<SALIN_PUBLIC_KEY_DARI_CPANEL_EMAIL_DELIVERABILITY>',
+      copyValue: 'default._domainkey',
+      note:
+        lang === 'id'
+          ? 'Ambil dari cPanel > Email Deliverability > Manage imy.li agar lolos inbox Gmail'
+          : 'Copy from cPanel > Email Deliverability > Manage imy.li for Gmail DKIM PASS',
+      accent: 'blue',
+    },
+    {
+      type: 'TXT (DMARC)',
+      host: '_dmarc.imy.li',
+      value: 'v=DMARC1; p=quarantine; adkim=r; aspf=r;',
+      copyValue: 'v=DMARC1; p=quarantine; adkim=r; aspf=r;',
+      note:
+        lang === 'id'
+          ? 'Mulai p=quarantine saat uji kirim, naikkan ke p=reject setelah DKIM/SPF PASS'
+          : 'Start with p=quarantine during testing, tighten to p=reject after DKIM/SPF PASS',
+      accent: 'blue',
+    },
+    {
+      type: 'CNAME',
+      host: '*.imy.li & imy.li',
+      value: 'vzmail.workers.dev (Proxied Orange Cloud)',
+      copyValue: 'vzmail.workers.dev',
+      note:
+        lang === 'id'
+          ? 'Trafik web, bio & shortlink 100% di Cloudflare Worker (tidak menyentuh cPanel)'
+          : 'Web, bio & shortlinks 100% handled on Cloudflare Worker (never hits cPanel)',
+      accent: 'emerald',
+    },
+  ];
+
+  const activeProviderBadge = (() => {
+    const p = health?.activeOutboundProvider || 'none';
+    if (p === 'cpanel_relay') return 'cPanel Relay (karya.kreasi.org)';
+    if (p === 'resend') return 'Resend API';
+    if (p === 'brevo') return 'Brevo API';
+    if (p === 'cloudflare') return 'Cloudflare SEND_EMAIL';
+    return lang === 'id' ? 'Belum Dikonfigurasi (Simulasi)' : 'Not Configured (Simulation)';
+  })();
 
   return (
     <div className="max-w-[1280px] mx-auto px-4 sm:px-6 py-8 space-y-8">
@@ -210,25 +296,490 @@ export function WorkerDomainConsole({
       {/* Header */}
       <div className="space-y-2">
         <div className="text-xs font-mono text-slate-500">
-          <span>2-in-1 Cloudflare Worker</span>
+          <span>Admin Console</span>
           <span aria-hidden="true"> · </span>
           <span>mail.vz.gay + links.vz.gay + *.imy.li</span>
           <span aria-hidden="true"> · </span>
-          <span>Zero VPS Architecture</span>
+          <span>Hybrid Zero-Storage Architecture</span>
         </div>
         <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 dark:text-white font-display">
           {lang === 'id'
-            ? 'Konsol Domain @imy.li, DNS Deliverability & Cloudflare Worker'
-            : '@imy.li Domain Registry, DNS Deliverability & Cloudflare Worker'}
+            ? 'Konsol Domain @imy.li, Setup Email Produksi & Cloudflare Worker'
+            : '@imy.li Domain Registry, Production Email Setup & Cloudflare Worker'}
         </h1>
-        <p className="text-sm text-slate-600 dark:text-slate-400 max-w-[75ch]">
+        <p className="text-sm text-slate-600 dark:text-slate-400 max-w-[78ch]">
           {lang === 'id'
-            ? 'Saat ini produksi berfokus pada @imy.li sebagai domain utama (reputasi SWITCH bersih). Anda dapat menambah atau mengaktifkan domain baru kapan saja seiring pertumbuhan pengguna, sambil menyebarkan mail.vz.gay dan links.vz.gay dari 1 Cloudflare Worker.'
-            : 'Production launches focused on @imy.li (clean SWITCH registry reputation). You can register and toggle additional domains anytime as the network grows while deploying mail.vz.gay and links.vz.gay from one unified Cloudflare Worker.'}
+            ? 'Panduan & diagnostik khusus administrator untuk menjalankan email @imy.li secara nyata: email masuk & web/links 100% di Cloudflare Worker, sedangkan pengiriman keluar mendukung cPanel/WHM karya.kreasi.org ($0 & 0 MB storage), Resend/Brevo gratis, atau Cloudflare Email Sending.'
+            : 'Administrator diagnostics and setup console for live @imy.li email: inbound mail and web/links run 100% on Cloudflare Workers, while outbound delivery supports cPanel/WHM karya.kreasi.org ($0 & 0 MB storage), free Resend/Brevo APIs, or Cloudflare Email Sending.'}
         </p>
       </div>
 
-      {/* Section 1: Extensible Live Domain Registry */}
+      {/* Section 0: Live Worker Health & Provider Diagnostics (/api/health) */}
+      <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+            <h2 className="text-base font-bold text-slate-900 dark:text-white font-display">
+              {lang === 'id'
+                ? 'Status Live Binding & Provider Email (/api/health)'
+                : 'Live Worker Bindings & Email Provider Status (/api/health)'}
+            </h2>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => void fetchLiveHealth()}
+            disabled={healthLoading}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 bg-slate-100 hover:bg-slate-200 dark:bg-[#1B202B] dark:hover:bg-[#242B3A] rounded-lg transition-colors cursor-pointer disabled:opacity-60"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 ${healthLoading ? 'animate-spin' : ''}`}
+            />
+            <span>{lang === 'id' ? 'Uji Status Live' : 'Check Live Status'}</span>
+          </button>
+        </div>
+
+        {healthError ? (
+          <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/50 text-xs text-rose-700 dark:text-rose-300 font-mono">
+            Error: {healthError}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
+            <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1">
+              <div className="text-[11px] text-slate-500">Inbound Transit KV</div>
+              <div className="font-mono font-semibold text-slate-900 dark:text-white">
+                MAIL_TRANSIT_KV
+              </div>
+              <div
+                className={`text-[11px] font-mono font-semibold ${
+                  health?.bindings?.mailTransitKv
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-amber-600 dark:text-amber-400'
+                }`}
+              >
+                {health?.bindings?.mailTransitKv ? 'Connected' : 'Not Bound'}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1">
+              <div className="text-[11px] text-slate-500">Links & Bio KV</div>
+              <div className="font-mono font-semibold text-slate-900 dark:text-white">
+                LINKS_KV
+              </div>
+              <div
+                className={`text-[11px] font-mono font-semibold ${
+                  health?.bindings?.linksKv
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-amber-600 dark:text-amber-400'
+                }`}
+              >
+                {health?.bindings?.linksKv ? 'Connected' : 'Not Bound'}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1">
+              <div className="text-[11px] text-slate-500">cPanel Relay ($0)</div>
+              <div className="font-mono font-semibold text-slate-900 dark:text-white">
+                karya.kreasi.org
+              </div>
+              <div
+                className={`text-[11px] font-mono font-semibold ${
+                  health?.bindings?.cpanelRelay
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-slate-500'
+                }`}
+              >
+                {health?.bindings?.cpanelRelay ? 'Secret Active' : 'Standby'}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1">
+              <div className="text-[11px] text-slate-500">API / CF Sending</div>
+              <div className="font-mono font-semibold text-slate-900 dark:text-white">
+                Resend · Brevo · CF
+              </div>
+              <div className="text-[11px] font-mono text-slate-600 dark:text-slate-300">
+                {health?.bindings?.resendApi
+                  ? 'Resend Active'
+                  : health?.bindings?.brevoApi
+                    ? 'Brevo Active'
+                    : health?.bindings?.sendEmail
+                      ? 'CF SEND_EMAIL Active'
+                      : 'Standby'}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-lg bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/50 space-y-1">
+              <div className="text-[11px] text-blue-700 dark:text-blue-300">
+                Jalur Kirim Aktif ({health?.outboundProviderMode || 'auto'})
+              </div>
+              <div className="font-mono font-bold text-blue-900 dark:text-blue-200 truncate">
+                {activeProviderBadge}
+              </div>
+              <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 truncate">
+                {health?.service || 'vzmail'}
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Section 1: Step-by-Step Interactive Setup Guide (Inbound + cPanel Hybrid + API/CF) */}
+      <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 dark:border-[#232732] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-0.5">
+            <div className="flex items-center gap-2">
+              <Mail className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+              <h2 className="text-base font-bold text-slate-900 dark:text-white font-display">
+                {lang === 'id'
+                  ? 'Panduan Step-by-Step Aktivasi Email Produksi (@imy.li)'
+                  : 'Step-by-Step Production Email Setup Guide (@imy.li)'}
+              </h2>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {lang === 'id'
+                ? 'Semua link, bio & email masuk 100% di Cloudflare Worker. Kirim keluar bebas pilih $0 via cPanel karya.kreasi.org atau Resend/Brevo gratis.'
+                : 'Web, bio, shortlinks & inbound mail stay 100% on Cloudflare Worker. Outbound works $0 via cPanel karya.kreasi.org or free Resend/Brevo.'}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setActiveGuideTab('inbound')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                activeGuideTab === 'inbound'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-100 dark:bg-[#1B202B] text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-[#252C3B]'
+              }`}
+            >
+              <Inbox className="w-3.5 h-3.5" />
+              <span>1. Email Masuk (CF)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveGuideTab('cpanel')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                activeGuideTab === 'cpanel'
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-slate-100 dark:bg-[#1B202B] text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-[#252C3B]'
+              }`}
+            >
+              <Server className="w-3.5 h-3.5" />
+              <span>2. Kirim via cPanel ($0)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveGuideTab('api_cloudflare')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                activeGuideTab === 'api_cloudflare'
+                  ? 'bg-violet-600 text-white'
+                  : 'bg-slate-100 dark:bg-[#1B202B] text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-[#252C3B]'
+              }`}
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>3. Resend / Brevo / CF Paid</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="p-6 space-y-5">
+          {activeGuideTab === 'inbound' && (
+            <div className="space-y-4">
+              <div className="p-3.5 rounded-lg bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/50 text-xs text-blue-900 dark:text-blue-200 leading-relaxed">
+                <strong>Gratis 100% Tanpa Batas Alamat:</strong> Email masuk ke{' '}
+                <span className="font-mono">*@imy.li</span> (termasuk semua alias{' '}
+                <span className="font-mono">.</span> dan{' '}
+                <span className="font-mono">+</span>) diterima langsung oleh
+                Cloudflare Email Routing → Worker{' '}
+                <span className="font-mono font-bold">vzmail</span> →{' '}
+                <span className="font-mono">MAIL_TRANSIT_KV</span> (TTL 72 jam) →
+                langsung terhapus saat browser menarik pesan.
+              </div>
+
+              <ol className="space-y-3 text-xs sm:text-sm text-slate-700 dark:text-slate-300 list-decimal pl-5">
+                <li>
+                  Buka Cloudflare Dashboard → menu kiri{' '}
+                  <strong className="text-slate-900 dark:text-white">
+                    Email Service → Email Routing
+                  </strong>{' '}
+                  → klik tombol biru{' '}
+                  <strong className="text-blue-600 dark:text-blue-400">
+                    + Onboard Domain
+                  </strong>{' '}
+                  dan pilih domain <span className="font-mono font-semibold">imy.li</span>.
+                </li>
+                <li>
+                  Setujui penambahan otomatis record{' '}
+                  <span className="font-mono font-semibold">MX</span> (
+                  <span className="font-mono">route1/2/3.mx.cloudflare.net</span>)
+                  dan <span className="font-mono font-semibold">SPF</span> oleh
+                  Cloudflare.
+                </li>
+                <li>
+                  Masuk ke tab{' '}
+                  <strong className="text-slate-900 dark:text-white">
+                    Routing rules → Catch-All Address
+                  </strong>
+                  , ubah status ke <strong>Active</strong>, pilih Action:{' '}
+                  <strong className="text-blue-600 dark:text-blue-400">
+                    Send to a Worker
+                  </strong>
+                  , lalu pilih Worker{' '}
+                  <span className="font-mono font-bold">vzmail</span>.
+                </li>
+                <li>
+                  Selesai! Kirim tes email dari Gmail ke{' '}
+                  <span className="font-mono font-semibold">
+                    {username}+test@imy.li
+                  </span>{' '}
+                  lalu klik <strong>Tarik &amp; Hapus dari Server</strong> di VZ Mail.
+                </li>
+              </ol>
+            </div>
+          )}
+
+          {activeGuideTab === 'cpanel' && (
+            <div className="space-y-5">
+              <div className="p-3.5 rounded-lg bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/50 text-xs text-emerald-900 dark:text-emerald-200 leading-relaxed">
+                <strong>Hybrid Zero-Storage (`karya.kreasi.org` + Cloudflare):</strong>{' '}
+                Ya, domain <span className="font-mono font-semibold">imy.li</span>{' '}
+                bisa ditambahkan di WHM/cPanel Anda (
+                <span className="font-mono">karya.kreasi.org:2087 / :2083</span>)
+                khusus sebagai <strong>mesin pengirim Exim + penanda tangan DKIM</strong>.
+                Karena MX &amp; trafik web tetap di Cloudflare dan relay PHP bersifat{' '}
+                <em>send-only</em> tanpa IMAP/Sent folder,{' '}
+                <strong>0 MB storage klien jajanserver.com akan terpakai</strong>.
+              </div>
+
+              <ol className="space-y-3 text-xs sm:text-sm text-slate-700 dark:text-slate-300 list-decimal pl-5">
+                <li>
+                  <strong>Tambahkan Domain `imy.li` di WHM / cPanel:</strong>{' '}
+                  Login ke <span className="font-mono">https://karya.kreasi.org:2083</span>{' '}
+                  (atau buat akun kecil di WHM <span className="font-mono">:2087</span>),
+                  tambahkan <span className="font-mono font-semibold">imy.li</span>{' '}
+                  sebagai Addon Domain. <em>Jangan</em> ubah DNS A/CNAME `imy.li` di
+                  Cloudflare agar web/bio/shortlink tetap 100% di Cloudflare Worker.
+                </li>
+                <li>
+                  <strong>WAJIB Set Remote Mail Exchanger:</strong> Di cPanel →{' '}
+                  <strong className="text-slate-900 dark:text-white">
+                    Email Routing
+                  </strong>{' '}
+                  → pilih domain <span className="font-mono font-semibold">imy.li</span> →
+                  pilih{' '}
+                  <strong className="text-emerald-600 dark:text-emerald-400">
+                    Remote Mail Exchanger
+                  </strong>{' '}
+                  lalu simpan. Ini mencegah Exim cPanel menyimpan email lokal.
+                </li>
+                <li>
+                  <strong>Salin Kunci DKIM cPanel ke Cloudflare DNS:</strong> Di
+                  cPanel →{' '}
+                  <strong className="text-slate-900 dark:text-white">
+                    Email Deliverability
+                  </strong>{' '}
+                  → klik <strong>Manage</strong> pada <span className="font-mono">imy.li</span>{' '}
+                  → salin record <span className="font-mono">default._domainkey</span>{' '}
+                  lalu tempel sebagai <strong>TXT</strong> di DNS Cloudflare `imy.li`, dan
+                  pastikan SPF mencantumkan{' '}
+                  <span className="font-mono">a:karya.kreasi.org</span>.
+                </li>
+                <li>
+                  <strong>Pasang Token Rahasia &amp; Skrip Relay PHP:</strong> Buat
+                  file rahasia di luar <span className="font-mono">public_html</span>{' '}
+                  (lihat kotak kode kiri), lalu unggah file{' '}
+                  <span className="font-mono font-semibold">
+                    cloudflare_imy_mail_links_relay.php
+                  </span>{' '}
+                  (otomatis ter-rename dari <span className="font-mono">.php.txt</span>{' '}
+                  saat <span className="font-mono">npm run build</span>) ke subdomain/folder
+                  HTTPS di cPanel Anda (misal{' '}
+                  <span className="font-mono">relay.karya.kreasi.org</span>).
+                </li>
+                <li>
+                  <strong>Hubungkan Worker ke Relay:</strong> Jalankan perintah{' '}
+                  <span className="font-mono">wrangler secret put</span> di bawah, lalu
+                  deploy ulang.
+                </li>
+              </ol>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="rounded-lg border border-slate-200 dark:border-[#232732] overflow-hidden">
+                  <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1016] border-b border-slate-200 dark:border-[#232732] flex items-center justify-between text-xs">
+                    <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-slate-800 dark:text-slate-200">
+                      <KeyRound className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                      <span>/home/&lt;user&gt;/.vz_relay_secret.php</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCopy('.vz_relay_secret.php', CPANEL_SECRET_FILE_SNIPPET)
+                      }
+                      className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </button>
+                  </div>
+                  <pre className="p-3.5 text-[11px] font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">
+                    {CPANEL_SECRET_FILE_SNIPPET}
+                  </pre>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 dark:border-[#232732] overflow-hidden">
+                  <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1016] border-b border-slate-200 dark:border-[#232732] flex items-center justify-between text-xs">
+                    <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-slate-800 dark:text-slate-200">
+                      <Terminal className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                      <span>Wrangler Secrets (cPanel Relay)</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCopy('Wrangler cPanel Secrets', CPANEL_WRANGLER_SECRETS_CMD)
+                      }
+                      className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </button>
+                  </div>
+                  <pre className="p-3.5 text-[11px] font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">
+                    {CPANEL_WRANGLER_SECRETS_CMD}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeGuideTab === 'api_cloudflare' && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1">
+                  <div className="font-bold text-slate-900 dark:text-white">
+                    Resend API (Gratis)
+                  </div>
+                  <div className="text-emerald-600 dark:text-emerald-400 font-mono">
+                    3.000 email/bulan · 100/hari
+                  </div>
+                  <p className="text-slate-500 dark:text-slate-400 leading-relaxed">
+                    Verifikasi domain <span className="font-mono">imy.li</span> di
+                    Resend, tambahkan DNS DKIM-nya, lalu set{' '}
+                    <span className="font-mono">RESEND_API_KEY</span>.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1">
+                  <div className="font-bold text-slate-900 dark:text-white">
+                    Brevo API (Gratis)
+                  </div>
+                  <div className="text-emerald-600 dark:text-emerald-400 font-mono">
+                    300 email/hari (~9.000/bulan)
+                  </div>
+                  <p className="text-slate-500 dark:text-slate-400 leading-relaxed">
+                    Verifikasi domain <span className="font-mono">imy.li</span> di
+                    Brevo, lalu pasang secret{' '}
+                    <span className="font-mono">BREVO_API_KEY</span>.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1">
+                  <div className="font-bold text-slate-900 dark:text-white">
+                    Cloudflare Email Sending
+                  </div>
+                  <div className="text-amber-600 dark:text-amber-400 font-mono">
+                    Free: verified only · Paid: $5/bln
+                  </div>
+                  <p className="text-slate-500 dark:text-slate-400 leading-relaxed">
+                    Onboard <span className="font-mono">imy.li</span> di{' '}
+                    <strong>Email Sending</strong> lalu uncomment{' '}
+                    <span className="font-mono">[[send_email]]</span> di{' '}
+                    <span className="font-mono">wrangler.toml</span>.
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 dark:border-[#232732] overflow-hidden">
+                <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1016] border-b border-slate-200 dark:border-[#232732] flex items-center justify-between text-xs">
+                  <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-slate-800 dark:text-slate-200">
+                    <Terminal className="w-3.5 h-3.5 text-violet-600 dark:text-violet-400" />
+                    <span>Perintah CLI Secret (Resend / Brevo / Cloudflare)</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleCopy('CLI API Secrets', API_WRANGLER_SECRETS_CMD)}
+                    className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Copy</span>
+                  </button>
+                </div>
+                <pre className="p-3.5 text-[11px] font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">
+                  {API_WRANGLER_SECRETS_CMD}
+                </pre>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* Section 2: DNS Records & Deliverability Checklist for imy.li */}
+      <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 space-y-4">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+          <h2 className="text-base font-bold text-slate-900 dark:text-white font-display">
+            DNS &amp; Deliverability Blueprint (`imy.li` + `karya.kreasi.org` + `vz.gay`)
+          </h2>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse text-xs font-mono">
+            <thead>
+              <tr className="border-b border-slate-200 dark:border-[#232732] text-slate-500 font-sans">
+                <th className="py-2 pr-4">Type</th>
+                <th className="py-2 px-4">Host / Name</th>
+                <th className="py-2 px-4">Target / Value</th>
+                <th className="py-2 px-4">Fungsi</th>
+                <th className="py-2 pl-4 text-right">Salin</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200 dark:divide-[#232732] text-[11px]">
+              {dnsBlueprintRows.map((row) => (
+                <tr key={`${row.type}-${row.host}`} className="h-11">
+                  <td
+                    className={`py-2.5 pr-4 font-bold whitespace-nowrap ${
+                      row.accent === 'emerald'
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-blue-600 dark:text-blue-400'
+                    }`}
+                  >
+                    {row.type}
+                  </td>
+                  <td className="py-2.5 px-4 whitespace-nowrap">{row.host}</td>
+                  <td className="py-2.5 px-4 break-all max-w-md">{row.value}</td>
+                  <td className="py-2.5 px-4 font-sans text-slate-500">
+                    {row.note}
+                  </td>
+                  <td className="py-2.5 pl-4 text-right">
+                    <button
+                      type="button"
+                      onClick={() => handleCopy(row.type, row.copyValue)}
+                      className="inline-flex items-center gap-1 font-sans text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* Section 3: Extensible Live Domain Registry */}
       <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -266,8 +817,8 @@ export function WorkerDomainConsole({
             <thead>
               <tr className="border-b border-slate-200 dark:border-[#232732] text-slate-500">
                 <th className="py-2.5 pr-4 font-medium">Domain</th>
-                <th className="py-2.5 px-4 font-medium">Registry & Catatan</th>
-                <th className="py-2.5 px-4 font-medium">Identitas & Rute</th>
+                <th className="py-2.5 px-4 font-medium">Registry &amp; Catatan</th>
+                <th className="py-2.5 px-4 font-medium">Identitas &amp; Rute</th>
                 <th className="py-2.5 px-4 font-medium">Status</th>
                 <th className="py-2.5 pl-4 text-right font-medium">Kontrol</th>
               </tr>
@@ -332,153 +883,64 @@ export function WorkerDomainConsole({
         </div>
       </section>
 
-      {/* Section 2: DNS Records & Deliverability Checklist for imy.li */}
-      <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-6 space-y-4">
-        <div className="flex items-center gap-2">
-          <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-          <h2 className="text-base font-bold text-slate-900 dark:text-white font-display">
-            DNS &amp; Deliverability Blueprint (`imy.li` + `vz.gay`)
-          </h2>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse text-xs font-mono">
-            <thead>
-              <tr className="border-b border-slate-200 dark:border-[#232732] text-slate-500 font-sans">
-                <th className="py-2 pr-4">Type</th>
-                <th className="py-2 px-4">Host / Name</th>
-                <th className="py-2 px-4">Target / Value</th>
-                <th className="py-2 pl-4">Fungsi</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200 dark:divide-[#232732] text-[11px]">
-              <tr className="h-10">
-                <td className="py-2 pr-4 font-bold text-blue-600 dark:text-blue-400">
-                  MX
-                </td>
-                <td className="py-2 px-4">imy.li</td>
-                <td className="py-2 px-4">
-                  route1.mx.cloudflare.net (prio 10) · route2/route3
-                </td>
-                <td className="py-2 pl-4 font-sans text-slate-500">
-                  Catch-All Email Routing -&gt; Worker `email()`
-                </td>
-              </tr>
-              <tr className="h-10">
-                <td className="py-2 pr-4 font-bold text-blue-600 dark:text-blue-400">
-                  TXT (SPF)
-                </td>
-                <td className="py-2 px-4">imy.li</td>
-                <td className="py-2 px-4">
-                  v=spf1 include:_spf.mx.cloudflare.net ~all
-                </td>
-                <td className="py-2 pl-4 font-sans text-slate-500">
-                  Otorisasi pengiriman Cloudflare Email Sending
-                </td>
-              </tr>
-              <tr className="h-10">
-                <td className="py-2 pr-4 font-bold text-blue-600 dark:text-blue-400">
-                  TXT (DMARC)
-                </td>
-                <td className="py-2 px-4">_dmarc.imy.li</td>
-                <td className="py-2 px-4">
-                  v=DMARC1; p=reject; sp=reject; adkim=s; aspf=s;
-                </td>
-                <td className="py-2 pl-4 font-sans text-slate-500">
-                  Proteksi anti-spoofing ketat untuk reputasi @imy.li
-                </td>
-              </tr>
-              <tr className="h-10">
-                <td className="py-2 pr-4 font-bold text-emerald-600 dark:text-emerald-400">
-                  CNAME
-                </td>
-                <td className="py-2 px-4">*.imy.li</td>
-                <td className="py-2 px-4">
-                  vzmail.workers.dev (Proxied Orange Cloud)
-                </td>
-                <td className="py-2 pl-4 font-sans text-slate-500">
-                  Wildcard SSL otomatis untuk $USERNAME.imy.li Bio
-                </td>
-              </tr>
-              <tr className="h-10">
-                <td className="py-2 pr-4 font-bold text-emerald-600 dark:text-emerald-400">
-                  ROUTE
-                </td>
-                <td className="py-2 px-4">
-                  mail.vz.gay/* · links.vz.gay/* · imy.li/s/*
-                </td>
-                <td className="py-2 px-4">vzmail (2-in-1 Worker + Assets)</td>
-                <td className="py-2 pl-4 font-sans text-slate-500">
-                  Menyatukan VZ Mail, VZ Links &amp; Shortlinks dalam 1 deploy
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {/* Section 3: Copy-Ready 2-in-1 Cloudflare Worker & Wrangler Config */}
+      {/* Section 4: Wrangler Config & Auto-Renamed PHP Relay Download */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <div className="lg:col-span-7 bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl overflow-hidden">
           <div className="px-5 py-3.5 border-b border-slate-200 dark:border-[#232732] flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs font-mono font-semibold text-slate-800 dark:text-slate-200">
+            <span className="inline-flex items-center gap-2 text-xs font-mono font-semibold text-slate-800 dark:text-slate-200">
               <Server className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-              <span>cloudflare/worker-mail-links.ts</span>
-            </div>
+              <span>wrangler.toml (Active Multi-Route + Multi-Provider)</span>
+            </span>
             <button
               type="button"
-              onClick={() => handleCopy('Worker Code', WORKER_DEPLOY_SNIPPET)}
+              onClick={() =>
+                handleCopy('wrangler.toml', WRANGLER_ROUTES_SNIPPET)
+              }
               className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
             >
               <Copy className="w-3.5 h-3.5" />
-              <span>Copy Worker</span>
+              <span>Copy</span>
             </button>
           </div>
           <pre className="p-4 text-[11px] font-mono text-slate-800 dark:text-slate-200 bg-[#FAFAFA] dark:bg-[#0B0D11] overflow-x-auto leading-relaxed">
-            {WORKER_DEPLOY_SNIPPET}
+            {WRANGLER_ROUTES_SNIPPET}
           </pre>
         </div>
 
-        <div className="lg:col-span-5 flex flex-col gap-6">
-          <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl overflow-hidden flex-1">
-            <div className="px-5 py-3.5 border-b border-slate-200 dark:border-[#232732] flex items-center justify-between">
-              <span className="text-xs font-mono font-semibold text-slate-800 dark:text-slate-200">
-                wrangler.toml (Multi-Route 2-in-1)
-              </span>
-              <button
-                type="button"
-                onClick={() =>
-                  handleCopy('wrangler.toml', WRANGLER_ROUTES_SNIPPET)
-                }
-                className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
-              >
-                <Copy className="w-3.5 h-3.5" />
-                <span>Copy</span>
-              </button>
+        <div className="lg:col-span-5 bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-5 flex flex-col justify-between gap-4">
+          <div className="space-y-2.5">
+            <div className="text-sm font-bold text-slate-900 dark:text-white font-display">
+              {lang === 'id'
+                ? 'Skrip Relay Outbound cPanel/WHM (Otomatis Rename Saat Build)'
+                : 'cPanel/WHM Outbound Relay Script (Auto-Renamed on Build)'}
             </div>
-            <pre className="p-4 text-[11px] font-mono text-slate-800 dark:text-slate-200 bg-[#FAFAFA] dark:bg-[#0B0D11] overflow-x-auto leading-relaxed">
-              {WRANGLER_ROUTES_SNIPPET}
-            </pre>
+            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+              {lang === 'id'
+                ? 'Di GitHub dan workspace AI Studio, berkas ini tetap disimpan sebagai .php.txt. Saat npm run build berjalan, plugin Vite otomatis mengganti namanya di folder dist/ menjadi .php agar siap langsung diunggah ke cPanel karya.kreasi.org tanpa rename manual.'
+                : 'Stored safely as .php.txt in GitHub and AI Studio. Running npm run build automatically renames it inside dist/ to .php so it is ready to upload to cPanel karya.kreasi.org.'}
+            </p>
+            <div className="p-3 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] text-[11px] font-mono space-y-1">
+              <div className="text-slate-500">
+                Source Repo: <span className="text-slate-800 dark:text-slate-200">public/cloudflare_imy_mail_links_relay.php.txt</span>
+              </div>
+              <div className="text-slate-500">
+                Build Output: <span className="text-emerald-600 dark:text-emerald-400 font-semibold">dist/cloudflare_imy_mail_links_relay.php</span>
+              </div>
+            </div>
           </div>
 
-          <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-5 flex items-center justify-between gap-4">
-            <div className="space-y-1">
-              <div className="text-xs font-bold text-slate-900 dark:text-white font-display">
-                Optional PHP Webhook Relay Reference
-              </div>
-              <div className="text-[11px] font-mono text-slate-500">
-                cloudflare_imy_mail_links_relay.php.txt
-              </div>
-            </div>
-            <a
-              href="/cloudflare_imy_mail_links_relay.php.txt"
-              download="cloudflare_imy_mail_links_relay.php.txt"
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Download .php.txt</span>
-            </a>
-          </div>
+          <a
+            href="/cloudflare_imy_mail_links_relay.php"
+            download="cloudflare_imy_mail_links_relay.php"
+            className="w-full min-h-[42px] inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors"
+          >
+            <Download className="w-4 h-4" />
+            <span>
+              {lang === 'id'
+                ? 'Unduh cloudflare_imy_mail_links_relay.php'
+                : 'Download cloudflare_imy_mail_links_relay.php'}
+            </span>
+          </a>
         </div>
       </div>
     </div>

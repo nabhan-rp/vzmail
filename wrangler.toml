@@ -5,8 +5,8 @@ compatibility_date = "2026-11-19"
 compatibility_flags = ["nodejs_compat"]
 
 # Static SPA assets built by `npm run build` (`vite build` -> `./dist`)
-# Hashed bundles under /assets/* bypass the Worker and serve directly from Cloudflare's edge CDN.
-# Navigation routes, /api/*, /s/* shortlinks, and *.imy.li subdomains execute the Worker first.
+# Note: `vite.config.ts` automatically renames `*.php.txt` -> `*.php` inside `./dist` at build time
+# while keeping source files as `*.php.txt` in GitHub & AI Studio.
 [assets]
 directory = "./dist"
 binding = "ASSETS"
@@ -21,7 +21,7 @@ run_worker_first = [
   "!/og-banner.jpg",
   "!/robots.txt",
   "!/sitemap.xml",
-  "!/cloudflare_imy_mail_links_relay.php.txt"
+  "!/cloudflare_imy_mail_links_relay.php"
 ]
 
 [observability]
@@ -36,13 +36,13 @@ head_sampling_rate = 1
 enabled = true
 head_sampling_rate = 0.1
 
-# 2-in-1 Cloudflare Worker Custom Routes (uncomment once zones are attached in Cloudflare):
- routes = [
-   { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
-   { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
-   { pattern = "imy.li/*", zone_name = "imy.li" },
-   { pattern = "*.imy.li/*", zone_name = "imy.li" }
- ]
+# 2-in-1 Cloudflare Worker Custom Routes (active for vz.gay + imy.li):
+routes = [
+  { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
+  { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
+  { pattern = "imy.li/*", zone_name = "imy.li" },
+  { pattern = "*.imy.li/*", zone_name = "imy.li" }
+]
 
 [vars]
 APP_DOMAIN = "mail.vz.gay"
@@ -52,22 +52,34 @@ AUTH0_DOMAIN = "accounts.vz.gay"
 ACCOUNT_DASHBOARD_URL = "https://myaccount.vz.gay"
 SPONSOR_DOMAIN = "jajanserver.com"
 DAILY_OUTBOUND_LIMIT = "25"
+# Outbound email provider mode: "auto" | "cpanel_relay" | "resend" | "brevo" | "cloudflare"
+# In "auto" mode, Worker checks in order: cpanel_relay -> resend -> brevo -> cloudflare
+OUTBOUND_PROVIDER = "auto"
 
-# Optional Production Bindings — uncomment after provisioning resources in Cloudflare Dashboard:
+# Production Bindings:
 #
-# 1. Cloudflare Email Sending (requires domain onboarded under Compute > Email Service):
-# [[send_email]]
-# name = "SEND_EMAIL"
-#
-# 2. Ephemeral Transit Buffer KV (Zero permanent mailbox retention; auto-TTL + Pop-and-Purge):
+# 1. Ephemeral Transit Buffer KV (Zero permanent mailbox retention; auto-TTL + Pop-and-Purge):
 [[kv_namespaces]]
 binding = "MAIL_TRANSIT_KV"
 id = "b330955476094cc2820053732cbb4471"
-#
-# 3. VZ Links Shortener & Static Bio KV:
+
+# 2. VZ Links Shortener & Static Bio KV:
 [[kv_namespaces]]
 binding = "LINKS_KV"
 id = "9fb255e46c7b4501922aa6881c806493"
-#
-# 4. Optional Relay Auth Secret (set via CLI, NEVER commit):
-#    npx wrangler secret put RELAY_AUTH_TOKEN
+
+# 3. Optional Cloudflare Email Sending (uncomment after onboarding imy.li in Compute > Email Service):
+#    Free plan: verified destination addresses only; Workers Paid: any recipient.
+# [[send_email]]
+# name = "SEND_EMAIL"
+
+# 4. Outbound Provider Secrets (set via CLI — NEVER commit secrets into wrangler.toml):
+#    Option A — Hybrid cPanel/WHM Outbound Relay ($0, zero storage on karya.kreasi.org):
+#      npx wrangler secret put CPANEL_RELAY_URL
+#      npx wrangler secret put CPANEL_RELAY_SECRET
+#    Option B — Resend Free Tier (3,000 emails/month):
+#      npx wrangler secret put RESEND_API_KEY
+#    Option C — Brevo Free Tier (300 emails/day):
+#      npx wrangler secret put BREVO_API_KEY
+#    Optional API Relay Protection Token:
+#      npx wrangler secret put RELAY_AUTH_TOKEN

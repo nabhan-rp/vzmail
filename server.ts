@@ -124,11 +124,34 @@ async function startServer() {
   // 0. GET /api/health
   app.get('/api/health', (_req, res) => {
     pruneExpiredAndBoundQueue();
+    const hasCpanel = Boolean(process.env.CPANEL_RELAY_URL && process.env.CPANEL_RELAY_SECRET);
+    const hasResend = Boolean(process.env.RESEND_API_KEY);
+    const hasBrevo = Boolean(process.env.BREVO_API_KEY);
+    const activeOutboundProvider = hasCpanel
+      ? 'cpanel_relay'
+      : hasResend
+        ? 'resend'
+        : hasBrevo
+          ? 'brevo'
+          : 'none';
+
     res.json({
       ok: true,
       service: 'vzmail-local-dev',
       primaryDomain: 'imy.li',
       retentionPolicy: 'EPHEMERAL_POP_AND_PURGE',
+      outboundProviderMode: (process.env.OUTBOUND_PROVIDER || 'auto').toLowerCase(),
+      activeOutboundProvider,
+      bindings: {
+        mailTransitKv: true,
+        linksKv: true,
+        sendEmail: false,
+        cpanelRelay: hasCpanel,
+        resendApi: hasResend,
+        brevoApi: hasBrevo,
+        assets: true,
+        relayAuthProtected: Boolean(process.env.RELAY_AUTH_TOKEN),
+      },
       pendingInMemoryPackets: ephemeralQueue.size,
       timestamp: new Date().toISOString(),
     });

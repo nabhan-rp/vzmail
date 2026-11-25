@@ -1,11 +1,21 @@
 <?php
 /**
- * FILE: cloudflare_imy_mail_links_relay.php.txt
- * (Disimpan dengan ekstensi .php.txt sesuai aturan proyek)
+ * FILE SUMBER REPO : public/cloudflare_imy_mail_links_relay.php.txt
+ * FILE OUTPUT BUILD: dist/cloudflare_imy_mail_links_relay.php (otomatis rename saat `npm run build`)
  *
- * Opsional: Fallback Webhook Relay ringan untuk cPanel / Shared Hosting
- * apabila pengguna ingin mem-forward webhook dari Cloudflare Email Worker
- * atau sinkronisasi shortlink imy.li/s/$URL tanpa menyimpan mailbox permanen.
+ * Stateless Zero-Storage Outbound Mail Relay untuk cPanel / WHM (karya.kreasi.org).
+ * - TIDAK menyimpan kotak masuk (Inbox) atau pesan terkirim (Sent) di disk cPanel.
+ * - Menggunakan Exim lokal cPanel sehingga otomatis menandatangani DKIM domain `imy.li`
+ *   (selama `imy.li` ditambahkan di cPanel dengan mode "Remote Mail Exchanger").
+ *
+ * CARA PASANG AMAN DI CPANEL:
+ * 1. Buat file konfigurasi rahasia DI LUAR public_html (misal `/home/<user>/.vz_relay_secret.php`):
+ *      <?php return ['secret' => 'GANTI_DENGAN_TOKEN_ACAK_MINIMAL_32_KARAKTER'];
+ *    (Atau set environment variable `CPANEL_RELAY_SECRET` di cPanel / .htaccess).
+ * 2. Unggah file hasil build `cloudflare_imy_mail_links_relay.php` ke subdomain/folder HTTPS Anda.
+ * 3. Pasang URL & Secret yang sama di Cloudflare Worker:
+ *      npx wrangler secret put CPANEL_RELAY_URL
+ *      npx wrangler secret put CPANEL_RELAY_SECRET
  */
 
 declare(strict_types=1);
@@ -16,41 +26,211 @@ header('X-Frame-Options: DENY');
 header('Cache-Control: no-store');
 header('X-VZ-Zero-Retention: true');
 
-$action = isset($_GET['action']) && is_string($_GET['action']) ? $_GET['action'] : 'status';
+const ALLOWED_SENDER_DOMAINS = ['imy.li'];
+const MAX_PAYLOAD_BYTES = 262144; // 256 KB max JSON request
+
+function respond_json(int $status, array $payload): never {
+    http_response_code($status);
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+function strip_header_injection(string $value, int $maxLen = 250): string {
+    $clean = preg_replace('/[\r\n\0]+/', ' ', $value) ?? '';
+    return substr(trim($clean), 0, $maxLen);
+}
+
+function load_relay_secret(): string {
+    $envSecret = getenv('CPANEL_RELAY_SECRET');
+    if (is_string($envSecret) && strlen(trim($envSecret)) >= 16) {
+        return trim($envSecret);
+    }
+
+    // Check private config file placed one or two directories above public_html
+    $candidatePaths = [
+        dirname(__DIR__) . '/.vz_relay_secret.php',
+        dirname(__DIR__, 2) . '/.vz_relay_secret.php',
+    ];
+    foreach ($candidatePaths as $cfgPath) {
+        if (is_file($cfgPath) && is_readable($cfgPath)) {
+            $cfg = include $cfgPath;
+            if (is_array($cfg) && isset($cfg['secret']) && is_string($cfg['secret']) && strlen(trim($cfg['secret'])) >= 16) {
+                return trim($cfg['secret']);
+            }
+        }
+    }
+
+    return '';
+}
+
+function extract_bearer_token(): string {
+    $authHeader = $_SERVER['HTTP_AUTHORIZATION']
+        ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION']
+        ?? '';
+    if ($authHeader === '' && function_exists('apache_request_headers')) {
+        $headers = apache_request_headers();
+        if (is_array($headers)) {
+            foreach ($headers as $k => $v) {
+                if (strtolower((string) $k) === 'authorization' && is_string($v)) {
+                    $authHeader = $v;
+                    break;
+                }
+            }
+        }
+    }
+    if (preg_match('/^Bearer\s+(\S+)$/i', trim($authHeader), $matches)) {
+        return $matches[1];
+    }
+    return '';
+}
 
 function canonicalize_imy_address(string $rawEmail): array {
-    $trimmed = strtolower(trim(substr($rawEmail, 0, 254)));
+    $trimmed = strtolower(strip_header_injection($rawEmail, 254));
     $parts = explode('@', $trimmed, 2);
-    $local = $parts[0] ?? 'fadhil';
-    $domain = preg_replace('/[^a-z0-9.-]/', '', $parts[1] ?? 'imy.li') ?: 'imy.li';
+    $local = $parts[0] ?? '';
+    $domain = preg_replace('/[^a-z0-9.-]/', '', $parts[1] ?? '') ?: '';
 
     $plusParts = explode('+', $local, 2);
     $base = $plusParts[0];
     $plusTag = isset($plusParts[1]) ? (preg_replace('/[^a-z0-9._-]/', '', $plusParts[1]) ?: null) : null;
 
     $canonicalUser = preg_replace('/[^a-z0-9_-]/', '', str_replace('.', '', $base));
-    $safeUser = $canonicalUser !== '' ? substr($canonicalUser, 0, 64) : 'fadhil';
+    $safeUser = $canonicalUser !== '' ? substr($canonicalUser, 0, 64) : '';
 
     return [
         'canonicalUser' => $safeUser,
-        'canonicalEmail' => $safeUser . '@' . $domain,
+        'canonicalEmail' => $safeUser !== '' && $domain !== '' ? $safeUser . '@' . $domain : '',
         'plusTag' => $plusTag,
         'dotNormalized' => strpos($base, '.') !== false,
         'domain' => $domain,
     ];
 }
 
-if ($action === 'resolve') {
-    $email = isset($_GET['email']) && is_string($_GET['email']) ? $_GET['email'] : 'fa.dhil+news@imy.li';
-    echo json_encode([
+// GET /health or status check (never discloses secret)
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    $action = isset($_GET['action']) && is_string($_GET['action']) ? $_GET['action'] : 'status';
+    if ($action === 'resolve') {
+        $email = isset($_GET['email']) && is_string($_GET['email']) ? $_GET['email'] : 'fa.dhil+news@imy.li';
+        respond_json(200, [
+            'ok' => true,
+            'resolved' => canonicalize_imy_address($email),
+        ]);
+    }
+
+    respond_json(200, [
         'ok' => true,
-        'resolved' => canonicalize_imy_address($email),
-    ], JSON_UNESCAPED_SLASHES);
-    exit;
+        'service' => 'VZ Mail Stateless cPanel/WHM Outbound Relay',
+        'retention' => 'ZERO_SERVER_STORAGE_SEND_ONLY',
+        'secretConfigured' => load_relay_secret() !== '',
+        'allowedDomains' => ALLOWED_SENDER_DOMAINS,
+    ]);
 }
 
-echo json_encode([
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    respond_json(405, ['ok' => false, 'error' => 'Method not allowed.']);
+}
+
+// Constant-time Bearer token authentication
+$expectedSecret = load_relay_secret();
+if ($expectedSecret === '') {
+    respond_json(503, [
+        'ok' => false,
+        'error' => 'CPANEL_RELAY_SECRET belum dikonfigurasi di server cPanel (buat file .vz_relay_secret.php di luar public_html).',
+    ]);
+}
+
+$providedToken = extract_bearer_token();
+if ($providedToken === '' || !hash_equals($expectedSecret, $providedToken)) {
+    respond_json(401, ['ok' => false, 'error' => 'Unauthorized relay token.']);
+}
+
+$rawBody = file_get_contents('php://input', false, null, 0, MAX_PAYLOAD_BYTES + 1);
+if (!is_string($rawBody) || $rawBody === '' || strlen($rawBody) > MAX_PAYLOAD_BYTES) {
+    respond_json(413, ['ok' => false, 'error' => 'Payload kosong atau melebihi batas 256 KB.']);
+}
+
+$data = json_decode($rawBody, true);
+if (!is_array($data)) {
+    respond_json(400, ['ok' => false, 'error' => 'Format JSON tidak valid.']);
+}
+
+$fromEmail = strtolower(strip_header_injection((string) ($data['fromEmail'] ?? ''), 254));
+$fromName = strip_header_injection((string) ($data['fromName'] ?? ''), 120);
+$toEmail = strtolower(strip_header_injection((string) ($data['toEmail'] ?? ''), 254));
+$subject = strip_header_injection((string) ($data['subject'] ?? '(No Subject)'), 250);
+$textBody = trim((string) ($data['text'] ?? ''));
+$htmlBody = trim((string) ($data['html'] ?? ''));
+$messageId = strip_header_injection((string) ($data['messageId'] ?? ''), 250);
+
+if (
+    !filter_var($fromEmail, FILTER_VALIDATE_EMAIL) ||
+    !filter_var($toEmail, FILTER_VALIDATE_EMAIL) ||
+    !preg_match('/^[a-z0-9._+-]+@[a-z0-9.-]+$/', $fromEmail) ||
+    !preg_match('/^[a-z0-9._+-]+@[a-z0-9.-]+$/', $toEmail)
+) {
+    respond_json(400, ['ok' => false, 'error' => 'Alamat email pengirim atau tujuan tidak valid.']);
+}
+
+$fromParts = explode('@', $fromEmail, 2);
+$fromDomain = $fromParts[1] ?? '';
+if (!in_array($fromDomain, ALLOWED_SENDER_DOMAINS, true)) {
+    respond_json(403, ['ok' => false, 'error' => 'Domain pengirim tidak diizinkan pada relay ini.']);
+}
+
+if ($textBody === '') {
+    respond_json(400, ['ok' => false, 'error' => 'Isi pesan email tidak boleh kosong.']);
+}
+
+$safeDisplayName = $fromName !== '' ? $fromName : $fromParts[0];
+$encodedFromName = '=?UTF-8?B?' . base64_encode($safeDisplayName) . '?=';
+$encodedSubject = '=?UTF-8?B?' . base64_encode($subject) . '?=';
+
+$boundary = 'vz_boundary_' . bin2hex(random_bytes(12));
+$headers = [
+    'MIME-Version: 1.0',
+    'Date: ' . gmdate('r'),
+    'From: ' . $encodedFromName . ' <' . $fromEmail . '>',
+    'Reply-To: ' . $fromEmail,
+    'X-VZ-Zero-Retention: true',
+    'X-Mailer: VZ-Mail-Hybrid-Relay/1.0',
+    'Content-Type: multipart/alternative; boundary="' . $boundary . '"',
+];
+if ($messageId !== '' && str_starts_with($messageId, '<') && str_ends_with($messageId, '>')) {
+    $headers[] = 'Message-ID: ' . $messageId;
+}
+
+$safeHtml = $htmlBody !== ''
+    ? $htmlBody
+    : '<p>' . nl2br(htmlspecialchars($textBody, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) . '</p>';
+
+$mimeBody = "--{$boundary}\r\n"
+    . "Content-Type: text/plain; charset=UTF-8\r\n"
+    . "Content-Transfer-Encoding: base64\r\n\r\n"
+    . chunk_split(base64_encode($textBody)) . "\r\n"
+    . "--{$boundary}\r\n"
+    . "Content-Type: text/html; charset=UTF-8\r\n"
+    . "Content-Transfer-Encoding: base64\r\n\r\n"
+    . chunk_split(base64_encode($safeHtml)) . "\r\n"
+    . "--{$boundary}--\r\n";
+
+// Envelope sender `-f` ensures Exim signs with the matching domain DKIM key (`imy.li`)
+// and sets Return-Path cleanly without writing anything to cPanel IMAP/Maildir.
+$envelopeParams = '-f ' . escapeshellarg($fromEmail);
+$sent = @mail($toEmail, $encodedSubject, $mimeBody, implode("\r\n", $headers), $envelopeParams);
+
+if (!$sent) {
+    respond_json(502, [
+        'ok' => false,
+        'error' => 'Exim cPanel gagal memproses mail(). Pastikan fungsi mail() aktif dan imy.li terdaftar di cPanel sebagai Remote Mail Exchanger.',
+    ]);
+}
+
+respond_json(200, [
     'ok' => true,
-    'service' => 'VZ Mail (mail.vz.gay) + VZ Links (links.vz.gay / *.imy.li) Ephemeral Relay',
-    'retention' => 'ZERO_SERVER_STORAGE_POP_AND_PURGE',
-], JSON_UNESCAPED_SLASHES);
+    'relayedVia' => 'cpanel-exim-zero-storage',
+    'from' => $fromEmail,
+    'to' => $toEmail,
+    'messageId' => $messageId,
+    'sentAt' => gmdate('c'),
+    'serverStoredCopy' => false,
+]);

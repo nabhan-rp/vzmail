@@ -67,6 +67,207 @@ export interface WorkerEnv {
   SPONSOR_DOMAIN?: string;
   DAILY_OUTBOUND_LIMIT?: string;
   RELAY_AUTH_TOKEN?: string;
+  OUTBOUND_PROVIDER?: string;
+  CPANEL_RELAY_URL?: string;
+  CPANEL_RELAY_SECRET?: string;
+  RESEND_API_KEY?: string;
+  BREVO_API_KEY?: string;
+}
+
+type OutboundProviderId = 'cpanel_relay' | 'resend' | 'brevo' | 'cloudflare' | 'none';
+
+interface OutboundDispatchPayload {
+  fromEmail: string;
+  fromName: string;
+  toEmail: string;
+  subject: string;
+  text: string;
+  html: string;
+  rfcMessageId: string;
+}
+
+function getOutboundCapabilities(env: WorkerEnv) {
+  const safeRelayUrl = env.CPANEL_RELAY_URL
+    ? sanitizeExternalUrl(env.CPANEL_RELAY_URL.trim(), {
+        allowMailto: false,
+        blockPrivateHosts: true,
+      })
+    : null;
+  const cpanelRelay = Boolean(
+    safeRelayUrl &&
+      safeRelayUrl.startsWith('https://') &&
+      env.CPANEL_RELAY_SECRET &&
+      env.CPANEL_RELAY_SECRET.trim().length >= 16
+  );
+  const resend = Boolean(env.RESEND_API_KEY && env.RESEND_API_KEY.trim().length > 0);
+  const brevo = Boolean(env.BREVO_API_KEY && env.BREVO_API_KEY.trim().length > 0);
+  const cloudflare = Boolean(env.SEND_EMAIL);
+
+  return { safeRelayUrl, cpanelRelay, resend, brevo, cloudflare };
+}
+
+function resolveOutboundProvider(env: WorkerEnv): OutboundProviderId {
+  const mode = (env.OUTBOUND_PROVIDER || 'auto').trim().toLowerCase();
+  const caps = getOutboundCapabilities(env);
+
+  if (mode === 'cpanel_relay') return caps.cpanelRelay ? 'cpanel_relay' : 'none';
+  if (mode === 'resend') return caps.resend ? 'resend' : 'none';
+  if (mode === 'brevo') return caps.brevo ? 'brevo' : 'none';
+  if (mode === 'cloudflare') return caps.cloudflare ? 'cloudflare' : 'none';
+
+  // Default "auto" priority chain: cPanel/WHM ($0) -> Resend ($0) -> Brevo ($0) -> Cloudflare SEND_EMAIL
+  if (caps.cpanelRelay) return 'cpanel_relay';
+  if (caps.resend) return 'resend';
+  if (caps.brevo) return 'brevo';
+  if (caps.cloudflare) return 'cloudflare';
+  return 'none';
+}
+
+async function dispatchOutboundEmail(
+  provider: OutboundProviderId,
+  env: WorkerEnv,
+  payload: OutboundDispatchPayload
+): Promise<{ ok: true; label: string } | { ok: false; error: string }> {
+  const caps = getOutboundCapabilities(env);
+
+  if (provider === 'cpanel_relay') {
+    if (!caps.safeRelayUrl || !caps.safeRelayUrl.startsWith('https://') || !env.CPANEL_RELAY_SECRET) {
+      return {
+        ok: false,
+        error:
+          'Konfigurasi cPanel Relay belum valid. Pastikan CPANEL_RELAY_URL menggunakan HTTPS publik dan CPANEL_RELAY_SECRET (min 16 karakter) sudah diset via wrangler secret put.',
+      };
+    }
+
+    const res = await fetch(caps.safeRelayUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.CPANEL_RELAY_SECRET.trim()}`,
+        'X-VZ-Relay-Origin': 'cloudflare-worker',
+      },
+      body: JSON.stringify({
+        action: 'send',
+        fromEmail: payload.fromEmail,
+        fromName: payload.fromName,
+        toEmail: payload.toEmail,
+        subject: payload.subject,
+        text: payload.text,
+        html: payload.html,
+        messageId: payload.rfcMessageId,
+      }),
+    });
+
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+    if (!res.ok || !data?.ok) {
+      return {
+        ok: false,
+        error:
+          data?.error ||
+          `Relay cPanel menolak permintaan pengiriman (HTTP ${res.status}). Periksa token rahasia dan status Remote Mail Exchanger di cPanel.`,
+      };
+    }
+
+    return {
+      ok: true,
+      label: 'cPanel/WHM Outbound Relay (Zero-Storage Exim + DKIM)',
+    };
+  }
+
+  if (provider === 'resend') {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.RESEND_API_KEY!.trim()}`,
+      },
+      body: JSON.stringify({
+        from: `${payload.fromName} <${payload.fromEmail}>`,
+        to: [payload.toEmail],
+        subject: payload.subject,
+        text: payload.text,
+        html: payload.html,
+        headers: {
+          'Message-ID': payload.rfcMessageId,
+          'X-VZ-Zero-Retention': 'true',
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => null)) as { message?: string } | null;
+      return {
+        ok: false,
+        error:
+          errBody?.message ||
+          `Pengiriman via Resend API gagal (HTTP ${res.status}). Pastikan domain imy.li sudah terverifikasi di Resend.`,
+      };
+    }
+
+    return { ok: true, label: 'Resend Transactional API' };
+  }
+
+  if (provider === 'brevo') {
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': env.BREVO_API_KEY!.trim(),
+      },
+      body: JSON.stringify({
+        sender: {
+          name: payload.fromName,
+          email: payload.fromEmail,
+        },
+        to: [{ email: payload.toEmail }],
+        subject: payload.subject,
+        textContent: payload.text,
+        htmlContent: payload.html,
+        headers: {
+          'Message-ID': payload.rfcMessageId,
+          'X-VZ-Zero-Retention': 'true',
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => null)) as { message?: string } | null;
+      return {
+        ok: false,
+        error:
+          errBody?.message ||
+          `Pengiriman via Brevo API gagal (HTTP ${res.status}). Pastikan domain pengirim imy.li sudah terverifikasi di Brevo.`,
+      };
+    }
+
+    return { ok: true, label: 'Brevo Transactional API' };
+  }
+
+  if (provider === 'cloudflare' && env.SEND_EMAIL) {
+    await env.SEND_EMAIL.send({
+      from: {
+        email: payload.fromEmail,
+        name: payload.fromName,
+      },
+      to: payload.toEmail,
+      subject: payload.subject,
+      text: payload.text,
+      html: payload.html,
+      headers: {
+        'Message-ID': payload.rfcMessageId,
+        'X-VZ-Zero-Retention': 'true',
+      },
+    });
+    return {
+      ok: true,
+      label: 'Cloudflare Email Sending Worker (SEND_EMAIL binding)',
+    };
+  }
+
+  return {
+    ok: false,
+    error: 'Belum ada provider email keluar yang aktif.',
+  };
 }
 
 export interface EphemeralMailPacket {
@@ -440,17 +641,24 @@ async function handleApiRequest(
 ): Promise<Response> {
   const primaryDomain = getPrimaryDomain(env);
 
-  // Public health check endpoint
+  // Public health check endpoint (booleans only — never exposes secret values)
   if (url.pathname === '/api/health' && request.method === 'GET') {
+    const caps = getOutboundCapabilities(env);
+    const activeOutboundProvider = resolveOutboundProvider(env);
     return jsonResponse({
       ok: true,
       service: 'vzmail',
       primaryDomain,
       retentionPolicy: 'EPHEMERAL_POP_AND_PURGE',
+      outboundProviderMode: (env.OUTBOUND_PROVIDER || 'auto').trim().toLowerCase(),
+      activeOutboundProvider,
       bindings: {
         mailTransitKv: Boolean(env.MAIL_TRANSIT_KV),
         linksKv: Boolean(env.LINKS_KV),
-        sendEmail: Boolean(env.SEND_EMAIL),
+        sendEmail: caps.cloudflare,
+        cpanelRelay: caps.cpanelRelay,
+        resendApi: caps.resend,
+        brevoApi: caps.brevo,
         assets: Boolean(env.ASSETS),
         relayAuthProtected: Boolean(env.RELAY_AUTH_TOKEN),
       },
@@ -752,37 +960,42 @@ async function handleApiRequest(
 
     const messageIdToken = generateSecureId('out');
     const rfcMessageId = `<${messageIdToken}@${primaryDomain}>`;
-    let dispatchedVia = 'Simulated Local Relay (bind SEND_EMAIL in wrangler.toml for live delivery)';
+    const activeProvider = resolveOutboundProvider(env);
+    let dispatchedVia =
+      'Simulated Local Relay (set CPANEL_RELAY_URL+CPANEL_RELAY_SECRET, RESEND_API_KEY, BREVO_API_KEY, atau binding SEND_EMAIL untuk pengiriman live)';
     let liveEmailDispatched = false;
 
-    if (env.SEND_EMAIL) {
+    if (activeProvider !== 'none') {
       try {
-        await env.SEND_EMAIL.send({
-          from: {
-            email: safeFromAddress,
-            name: sanitizeDisplayName(senderUser, senderUser),
-          },
-          to: toAddress,
+        const result = await dispatchOutboundEmail(activeProvider, env, {
+          fromEmail: safeFromAddress,
+          fromName: sanitizeDisplayName(senderUser, senderUser),
+          toEmail: toAddress,
           subject,
           text: bodyText,
           html: plainTextToSafeEmailHtml(bodyText),
-          headers: {
-            'Message-ID': rfcMessageId,
-            'X-VZ-Zero-Retention': 'true',
-          },
+          rfcMessageId,
         });
-        dispatchedVia = 'Cloudflare Email Sending Worker (SEND_EMAIL binding)';
+        if (!result.ok) {
+          logError('outbound_provider_rejected', new Error(result.error), {
+            senderUser,
+            provider: activeProvider,
+            domain: primaryDomain,
+          });
+          return jsonResponse({ ok: false, error: result.error }, 502);
+        }
+        dispatchedVia = result.label;
         liveEmailDispatched = true;
       } catch (err) {
-        logError('send_email_binding_failed', err, {
+        logError('outbound_provider_exception', err, {
           senderUser,
+          provider: activeProvider,
           domain: primaryDomain,
         });
         return jsonResponse(
           {
             ok: false,
-            error:
-              'Pengiriman via Cloudflare Email Sending gagal. Pastikan domain pengirim sudah terverifikasi di Compute > Email Service.',
+            error: `Pengiriman email via ${activeProvider} mengalami gangguan koneksi. Periksa konfigurasi provider di Konsol Admin.`,
           },
           502
         );
@@ -841,6 +1054,7 @@ async function handleApiRequest(
       ok: true,
       kvBound: Boolean(env.MAIL_TRANSIT_KV),
       liveEmailDispatched,
+      providerUsed: activeProvider,
       dispatchedVia,
       rfcMessageId,
       sentAt: new Date().toISOString(),
