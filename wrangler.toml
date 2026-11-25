@@ -37,12 +37,12 @@ enabled = true
 head_sampling_rate = 0.1
 
 # 2-in-1 Cloudflare Worker Custom Routes (uncomment once zones are attached in Cloudflare):
-# routes = [
-#   { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
-#   { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
-#   { pattern = "imy.li/*", zone_name = "imy.li" },
-#   { pattern = "*.imy.li/*", zone_name = "imy.li" }
-# ]
+ routes = [
+   { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
+   { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
+   { pattern = "imy.li/*", zone_name = "imy.li" },
+   { pattern = "*.imy.li/*", zone_name = "imy.li" }
+ ]
 
 [vars]
 APP_DOMAIN = "mail.vz.gay"
