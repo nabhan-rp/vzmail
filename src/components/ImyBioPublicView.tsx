@@ -46,6 +46,7 @@ export function ImyBioPublicView({
   const [workspace, setWorkspace] = useState<BioWorkspaceData | null>(null);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState(false);
+  const [avatarError, setAvatarError] = useState(false);
 
   const loadPublicBio = useCallback(async () => {
     if (!user) {
@@ -90,6 +91,12 @@ export function ImyBioPublicView({
       ) || null
     );
   }, [workspace, pageSlug]);
+
+  const effectiveAvatarUrl = activePage?.avatarUrl || workspace?.avatarUrl || '';
+
+  useEffect(() => {
+    setAvatarError(false);
+  }, [effectiveAvatarUrl]);
 
   const otherPublishedPages = useMemo(() => {
     if (!workspace) return [];
@@ -259,10 +266,16 @@ export function ImyBioPublicView({
         >
           {/* Profile Header */}
           <header className="flex flex-col items-center text-center space-y-3">
-            {workspace.avatarUrl ? (
+            {effectiveAvatarUrl && !avatarError ? (
               <img
-                src={workspace.avatarUrl}
-                alt={workspace.displayName || user}
+                src={effectiveAvatarUrl}
+                alt={
+                  activePage.pageSlug === ''
+                    ? workspace.displayName || user
+                    : activePage.title || activePage.pageSlug
+                }
+                referrerPolicy="no-referrer"
+                onError={() => setAvatarError(true)}
                 className="w-20 h-20 rounded-2xl object-cover border border-white/15"
               />
             ) : (

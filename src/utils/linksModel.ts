@@ -197,6 +197,7 @@ export interface BioPageRecord {
   pageSlug: string; // "" for root ($USERNAME.imy.li), or e.g. "promo" ($USERNAME.imy.li/promo)
   title: string;
   description: string;
+  avatarUrl: string; // Optional per-subpage override ("": inherit main bio avatar)
   themeId: BioThemeId;
   buttonStyle: BioButtonStyle;
   showSocials: boolean;
@@ -332,9 +333,78 @@ export function sanitizeShortlinkSlugInput(raw: string): string | null {
   return cleaned;
 }
 
+export const AVATAR_MAX_BYTES = 128 * 1024; // 128 KB strict ceiling for 256x256 AVIF/WebP avatars
+
+/**
+ * Validates binary magic bytes strictly for AVIF (ISO BMFF ftyp box with avif/avis brand)
+ * or WebP (RIFF....WEBP) so SVG, HTML, or arbitrary uploads are always rejected.
+ */
+export function detectValidatedAvatarMime(
+  bytes: Uint8Array
+): 'image/avif' | 'image/webp' | null {
+  if (!bytes || bytes.byteLength < 12 || bytes.byteLength > AVATAR_MAX_BYTES) {
+    return null;
+  }
+
+  // Check WebP: "RIFF" (0..3) and "WEBP" (8..11)
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+
+  // Check AVIF: ISO BMFF box size (0..3) + "ftyp" (4..7) + brand containing "avif" or "avis"
+  if (
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70
+  ) {
+    const boxSize = Math.min(
+      bytes.byteLength,
+      ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0 || 64
+    );
+    const scanEnd = Math.min(bytes.byteLength, Math.max(16, Math.min(boxSize, 128)));
+    let ascii = '';
+    for (let i = 8; i < scanEnd; i += 1) {
+      ascii += String.fromCharCode(bytes[i]);
+    }
+    if (ascii.includes('avif') || ascii.includes('avis')) {
+      return 'image/avif';
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Allows either our own `/api/links/avatar/...` binary URL or a validated public https:// image URL.
+ */
+export function sanitizeBioAvatarUrl(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (/^\/api\/links\/avatar\/[a-z0-9._-]+(?:\/[a-z0-9_-]+)?(?:\?v=[a-zA-Z0-9_-]+)?$/i.test(trimmed)) {
+    return trimmed;
+  }
+  return (
+    sanitizeExternalUrl(trimmed, {
+      allowMailto: false,
+      blockPrivateHosts: true,
+    }) || ''
+  );
+}
+
 export function createEmptyBioWorkspace(
   rawUsername: string,
-  defaults?: { displayName?: string; avatarUrl?: string }
+  defaults?: { displayName?: string }
 ): BioWorkspaceData {
   const username = sanitizeHandle(rawUsername);
   const now = new Date().toISOString();
@@ -343,7 +413,7 @@ export function createEmptyBioWorkspace(
     displayName: defaults?.displayName?.trim() || username,
     headline: '',
     bio: '',
-    avatarUrl: defaults?.avatarUrl?.trim() || '',
+    avatarUrl: '', // Dedicated Bio avatar only — never auto-copied from SSO account picture
     socials: {},
     pages: [
       {
@@ -351,6 +421,7 @@ export function createEmptyBioWorkspace(
         pageSlug: '',
         title: defaults?.displayName?.trim() || username,
         description: '',
+        avatarUrl: '',
         themeId: 'midnight_slate',
         buttonStyle: 'rounded',
         showSocials: true,
@@ -376,10 +447,7 @@ export function sanitizeBioWorkspaceInput(
   const displayName = String(obj.displayName || username).trim().slice(0, 80) || username;
   const headline = String(obj.headline || '').trim().slice(0, 120);
   const bio = String(obj.bio || '').trim().slice(0, 400);
-  const rawAvatar = typeof obj.avatarUrl === 'string' ? obj.avatarUrl.trim() : '';
-  const safeAvatar = rawAvatar
-    ? sanitizeExternalUrl(rawAvatar, { allowMailto: false, blockPrivateHosts: true }) || ''
-    : '';
+  const safeAvatar = sanitizeBioAvatarUrl(obj.avatarUrl);
   const socials = sanitizeSocialsMap(obj.socials);
 
   const rawPages = Array.isArray(obj.pages) ? obj.pages : [];
@@ -437,6 +505,7 @@ export function sanitizeBioWorkspaceInput(
         .trim()
         .slice(0, 80),
       description: String(p.description || '').trim().slice(0, 260),
+      avatarUrl: normalizedSlug === '' ? '' : sanitizeBioAvatarUrl(p.avatarUrl),
       themeId: isValidBioThemeId(p.themeId) ? p.themeId : 'midnight_slate',
       buttonStyle: isValidButtonStyle(p.buttonStyle) ? p.buttonStyle : 'rounded',
       showSocials: p.showSocials !== false,
@@ -453,6 +522,7 @@ export function sanitizeBioWorkspaceInput(
       pageSlug: '',
       title: displayName,
       description: '',
+      avatarUrl: '',
       themeId: 'midnight_slate',
       buttonStyle: 'rounded',
       showSocials: true,

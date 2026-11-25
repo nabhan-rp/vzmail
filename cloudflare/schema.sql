@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS bio_pages (
   page_slug TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL DEFAULT '',
   description TEXT NOT NULL DEFAULT '',
+  avatar_url TEXT NOT NULL DEFAULT '',
   theme_id TEXT NOT NULL DEFAULT 'midnight_slate',
   button_style TEXT NOT NULL DEFAULT 'rounded',
   show_socials INTEGER NOT NULL DEFAULT 1,
@@ -45,6 +46,16 @@ CREATE TABLE IF NOT EXISTS bio_links (
   FOREIGN KEY (page_id) REFERENCES bio_pages(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS bio_avatars (
+  avatar_key TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  page_slug TEXT NOT NULL DEFAULT '',
+  content_type TEXT NOT NULL,
+  data_base64 TEXT NOT NULL,
+  byte_size INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS shortlinks (
   slug TEXT PRIMARY KEY,
   owner_user TEXT,
@@ -58,4 +69,5 @@ CREATE TABLE IF NOT EXISTS shortlinks (
 
 CREATE INDEX IF NOT EXISTS idx_bio_pages_user ON bio_pages(username, page_slug);
 CREATE INDEX IF NOT EXISTS idx_bio_links_page ON bio_links(page_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_bio_avatars_user ON bio_avatars(username, page_slug);
 CREATE INDEX IF NOT EXISTS idx_shortlinks_owner_created ON shortlinks(owner_user, created_at DESC);

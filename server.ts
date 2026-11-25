@@ -16,6 +16,8 @@ import {
   stripHeaderInjection,
 } from './src/utils/mailSecurity.ts';
 import {
+  AVATAR_MAX_BYTES,
+  detectValidatedAvatarMime,
   generateShortlinkCode,
   sanitizeBioWorkspaceInput,
   sanitizePageSlug,
@@ -51,6 +53,10 @@ const ephemeralQueue: Map<string, EphemeralMailPacket> = new Map();
 const outboundQuotaCounter: Map<string, { date: string; count: number }> = new Map();
 const localShortlinks: Map<string, ShortlinkRecord> = new Map();
 const localBioWorkspaces: Map<string, BioWorkspaceData> = new Map();
+const localBioAvatars: Map<
+  string,
+  { bytes: Buffer; contentType: 'image/avif' | 'image/webp'; updatedAt: string }
+> = new Map();
 
 let totalPurgedSinceBoot = 0;
 
@@ -152,10 +158,12 @@ async function startServer() {
       outboundProviderMode: (process.env.OUTBOUND_PROVIDER || 'auto').toLowerCase(),
       activeOutboundProvider,
       linksStorageEngine: 'local-dev-memory',
+      mediaStorageEngine: 'local-dev-memory',
       bindings: {
         mailTransitKv: true,
         linksKv: true,
         linksDb: false,
+        linksMediaR2: false,
         sendEmail: false,
         cpanelRelay: hasCpanel,
         resendApi: hasResend,
@@ -595,6 +603,104 @@ async function startServer() {
     }
     res.json({ ok: true, clicks });
   });
+
+  // 7. Dedicated Bio Link AVIF/WebP Avatar Endpoints (parity with Cloudflare Worker R2/D1/KV)
+  const avatarRawParser = express.raw({
+    type: ['image/avif', 'image/webp', 'application/octet-stream'],
+    limit: '160kb',
+  });
+
+  const resolveAvatarKey = (rawUser: string, rawPage?: string) => {
+    const username = sanitizeHandle(rawUser);
+    const pageSlug = rawPage ? sanitizePageSlug(rawPage) : '';
+    if (pageSlug === null) return null;
+    const key = pageSlug ? `avatars/${username}/page-${pageSlug}` : `avatars/${username}/main`;
+    return { username, pageSlug, key };
+  };
+
+  const handleGetAvatar: express.RequestHandler = (req, res) => {
+    const resolved = resolveAvatarKey(String(req.params.username || ''), req.params.pageSlug);
+    if (!resolved) {
+      res.status(400).end();
+      return;
+    }
+    const stored = localBioAvatars.get(resolved.key);
+    if (!stored) {
+      res.status(404).setHeader('Cache-Control', 'no-store').end();
+      return;
+    }
+    res.setHeader('Content-Type', stored.contentType);
+    res.setHeader(
+      'Cache-Control',
+      req.query.v ? 'public, max-age=31536000, immutable' : 'public, max-age=300'
+    );
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.status(200).send(stored.bytes);
+  };
+
+  const handlePutAvatar: express.RequestHandler = (req, res) => {
+    const resolved = resolveAvatarKey(String(req.params.username || ''), req.params.pageSlug);
+    if (!resolved) {
+      res.status(400).json({ ok: false, error: 'Parameter avatar tidak valid.' });
+      return;
+    }
+    const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    if (buf.byteLength === 0 || buf.byteLength > AVATAR_MAX_BYTES) {
+      res.status(413).json({
+        ok: false,
+        error: `Ukuran foto harus di bawah ${Math.round(AVATAR_MAX_BYTES / 1024)} KB.`,
+      });
+      return;
+    }
+    const validatedMime = detectValidatedAvatarMime(new Uint8Array(buf));
+    if (!validatedMime) {
+      res.status(400).json({
+        ok: false,
+        error: 'Format berkas ditolak. Hanya AVIF atau WebP terkompresi yang diizinkan.',
+      });
+      return;
+    }
+    localBioAvatars.set(resolved.key, {
+      bytes: buf,
+      contentType: validatedMime,
+      updatedAt: new Date().toISOString(),
+    });
+    const version = Date.now().toString(36);
+    const avatarUrl = resolved.pageSlug
+      ? `/api/links/avatar/${encodeURIComponent(resolved.username)}/${encodeURIComponent(resolved.pageSlug)}?v=${version}`
+      : `/api/links/avatar/${encodeURIComponent(resolved.username)}?v=${version}`;
+
+    res.json({
+      ok: true,
+      avatarUrl,
+      contentType: validatedMime,
+      byteSize: buf.byteLength,
+      mediaStorageEngine: 'local-dev-memory',
+    });
+  };
+
+  const handleDeleteAvatar: express.RequestHandler = (req, res) => {
+    const resolved = resolveAvatarKey(String(req.params.username || ''), req.params.pageSlug);
+    if (!resolved) {
+      res.status(400).json({ ok: false, error: 'Parameter avatar tidak valid.' });
+      return;
+    }
+    localBioAvatars.delete(resolved.key);
+    res.json({
+      ok: true,
+      deleted: true,
+      username: resolved.username,
+      pageSlug: resolved.pageSlug,
+    });
+  };
+
+  app.get('/api/links/avatar/:username', handleGetAvatar);
+  app.get('/api/links/avatar/:username/:pageSlug', handleGetAvatar);
+  app.put('/api/links/avatar/:username', avatarRawParser, handlePutAvatar);
+  app.put('/api/links/avatar/:username/:pageSlug', avatarRawParser, handlePutAvatar);
+  app.delete('/api/links/avatar/:username', handleDeleteAvatar);
+  app.delete('/api/links/avatar/:username/:pageSlug', handleDeleteAvatar);
 
   app.get('/s/:slug', (req, res, next) => {
     const slug = sanitizeSlug(String(req.params.slug || ''));

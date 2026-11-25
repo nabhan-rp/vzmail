@@ -32,10 +32,12 @@ interface HealthSnapshot {
   outboundProviderMode?: string;
   activeOutboundProvider?: string;
   linksStorageEngine?: string;
+  mediaStorageEngine?: string;
   bindings?: {
     mailTransitKv?: boolean;
     linksKv?: boolean;
     linksDb?: boolean;
+    linksMediaR2?: boolean;
     sendEmail?: boolean;
     cpanelRelay?: boolean;
     resendApi?: boolean;
@@ -90,6 +92,16 @@ const D1_WRANGLER_BLOCK_SNIPPET = `[[d1_databases]]
 binding = "LINKS_DB"
 database_name = "vzlinks-db"
 database_id = "TEMPEL_DATABASE_ID_DARI_WRANGLER_D1_CREATE"`;
+
+const R2_UPGRADE_CLI_CMD = `# 1. Buat bucket Cloudflare R2 gratis (10 GB storage, 0 biaya egress)
+npx wrangler r2 bucket create vzlinks-media
+
+# 2. Uncomment blok [[r2_buckets]] di wrangler.toml, lalu deploy ulang Worker:
+npm run cf:deploy`;
+
+const R2_WRANGLER_BLOCK_SNIPPET = `[[r2_buckets]]
+binding = "LINKS_MEDIA_R2"
+bucket_name = "vzlinks-media"`;
 
 const WRANGLER_ROUTES_SNIPPET = `name = "vzmail"
 main = "cloudflare/worker-mail-links.ts"
@@ -363,7 +375,7 @@ export function WorkerDomainConsole({
             Error: {healthError}
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
             <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1">
               <div className="text-[11px] text-slate-500">Inbound Transit KV</div>
               <div className="font-mono font-semibold text-slate-900 dark:text-white">
@@ -397,6 +409,28 @@ export function WorkerDomainConsole({
                   : health?.bindings?.linksKv
                     ? 'KV Active · D1 Ready'
                     : 'Not Bound'}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1">
+              <div className="text-[11px] text-slate-500">Bio Avatar Media (AVIF)</div>
+              <div className="font-mono font-semibold text-slate-900 dark:text-white">
+                {health?.bindings?.linksMediaR2
+                  ? 'LINKS_MEDIA_R2 (R2)'
+                  : health?.bindings?.linksDb
+                    ? 'LINKS_DB (D1 Fallback)'
+                    : 'LINKS_KV (Fallback)'}
+              </div>
+              <div
+                className={`text-[11px] font-mono font-semibold ${
+                  health?.bindings?.linksMediaR2
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-blue-600 dark:text-blue-400'
+                }`}
+              >
+                {health?.bindings?.linksMediaR2
+                  ? 'Cloudflare R2 Active'
+                  : 'Auto Fallback · R2 Ready'}
               </div>
             </div>
 
@@ -516,7 +550,7 @@ export function WorkerDomainConsole({
               }`}
             >
               <Database className="w-3.5 h-3.5" />
-              <span>4. Upgrade D1 &amp; Route imy.li/*</span>
+              <span>4. D1, R2 &amp; Route imy.li/*</span>
             </button>
           </div>
         </div>
@@ -836,6 +870,65 @@ export function WorkerDomainConsole({
                   <pre className="p-3.5 text-[11px] font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">
                     {D1_WRANGLER_BLOCK_SNIPPET}
                   </pre>
+                </div>
+              </div>
+
+              {/* Cloudflare R2 Object Storage for AVIF Bio Profile Photos */}
+              <div className="pt-4 border-t border-slate-200 dark:border-[#232732] space-y-4">
+                <div className="p-3.5 rounded-lg bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/50 text-xs text-blue-900 dark:text-blue-200 leading-relaxed">
+                  <strong>Cloudflare R2 untuk Foto Profil Bio (AVIF 256×256):</strong>{' '}
+                  Foto profil Bio otomatis dikompres ke format <strong>AVIF</strong> (±5–20 KB) dan
+                  disajikan melalui endpoint biner{' '}
+                  <span className="font-mono">/api/links/avatar/:username</span> dengan cache{' '}
+                  <span className="font-mono">immutable</span>. Tanpa R2, foto otomatis tersimpan di{' '}
+                  <span className="font-mono">LINKS_DB</span> (D1) atau{' '}
+                  <span className="font-mono">LINKS_KV</span>. Aktifkan bucket{' '}
+                  <span className="font-mono font-semibold">LINKS_MEDIA_R2</span> kapan saja untuk
+                  kuota gratis 10 GB dan 0 biaya egress—foto lama di D1/KV tetap terbaca otomatis.
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="rounded-lg border border-slate-200 dark:border-[#232732] overflow-hidden">
+                    <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1016] border-b border-slate-200 dark:border-[#232732] flex items-center justify-between text-xs">
+                      <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-slate-800 dark:text-slate-200">
+                        <Terminal className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                        <span>Wrangler R2 Bucket CLI (LINKS_MEDIA_R2)</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopy('R2 Setup CLI', R2_UPGRADE_CLI_CMD)}
+                        className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>Copy</span>
+                      </button>
+                    </div>
+                    <pre className="p-3.5 text-[11px] font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">
+                      {R2_UPGRADE_CLI_CMD}
+                    </pre>
+                  </div>
+
+                  <div className="rounded-lg border border-slate-200 dark:border-[#232732] overflow-hidden">
+                    <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1016] border-b border-slate-200 dark:border-[#232732] flex items-center justify-between text-xs">
+                      <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-slate-800 dark:text-slate-200">
+                        <Database className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                        <span>wrangler.toml — [[r2_buckets]]</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleCopy('R2 wrangler.toml block', R2_WRANGLER_BLOCK_SNIPPET)
+                        }
+                        className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>Copy</span>
+                      </button>
+                    </div>
+                    <pre className="p-3.5 text-[11px] font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">
+                      {R2_WRANGLER_BLOCK_SNIPPET}
+                    </pre>
+                  </div>
                 </div>
               </div>
             </div>

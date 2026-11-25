@@ -40,9 +40,12 @@ import {
   stripHeaderInjection,
 } from '../src/utils/mailSecurity.ts';
 import {
+  AVATAR_MAX_BYTES,
+  detectValidatedAvatarMime,
   generateShortlinkCode,
   isValidBioThemeId,
   isValidButtonStyle,
+  sanitizeBioAvatarUrl,
   sanitizeBioWorkspaceInput,
   sanitizePageSlug,
   sanitizeShortlinkSlugInput,
@@ -72,6 +75,7 @@ export interface WorkerEnv {
   MAIL_TRANSIT_KV?: KVNamespace;
   LINKS_KV?: KVNamespace;
   LINKS_DB?: D1Database;
+  LINKS_MEDIA_R2?: R2Bucket;
   SEND_EMAIL?: SendEmailBinding;
   APP_DOMAIN?: string;
   LINKS_DOMAIN?: string;
@@ -881,7 +885,7 @@ async function getBioWorkspaceFromStorage(
 
     if (profile) {
       const pagesRes = await env.LINKS_DB.prepare(
-        'SELECT id, page_slug, title, description, theme_id, button_style, show_socials, is_published, updated_at FROM bio_pages WHERE username = ? ORDER BY CASE WHEN page_slug = "" THEN 0 ELSE 1 END, page_slug ASC'
+        'SELECT id, page_slug, title, description, avatar_url, theme_id, button_style, show_socials, is_published, updated_at FROM bio_pages WHERE username = ? ORDER BY CASE WHEN page_slug = "" THEN 0 ELSE 1 END, page_slug ASC'
       )
         .bind(username)
         .all<{
@@ -889,6 +893,7 @@ async function getBioWorkspaceFromStorage(
           page_slug: string;
           title: string;
           description: string;
+          avatar_url?: string;
           theme_id: string;
           button_style: string;
           show_socials: number;
@@ -938,6 +943,7 @@ async function getBioWorkspaceFromStorage(
         pageSlug: p.page_slug || '',
         title: p.title || profile.display_name || username,
         description: p.description || '',
+        avatarUrl: sanitizeBioAvatarUrl(p.avatar_url || ''),
         themeId: isValidBioThemeId(p.theme_id) ? p.theme_id : 'midnight_slate',
         buttonStyle: isValidButtonStyle(p.button_style) ? p.button_style : 'rounded',
         showSocials: Boolean(p.show_socials),
@@ -951,7 +957,7 @@ async function getBioWorkspaceFromStorage(
         displayName: profile.display_name || username,
         headline: profile.headline || '',
         bio: profile.bio || '',
-        avatarUrl: profile.avatar_url || '',
+        avatarUrl: sanitizeBioAvatarUrl(profile.avatar_url || ''),
         socials: sanitizeSocialsMap(parsedSocials),
         pages,
         updatedAt: profile.updated_at,
@@ -1007,17 +1013,19 @@ async function saveBioWorkspaceToStorage(
     for (const page of sanitized.pages) {
       stmts.push(
         env.LINKS_DB.prepare(
-          'INSERT INTO bio_pages (id, username, page_slug, title, description, theme_id, button_style, show_socials, is_published, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          'INSERT INTO bio_pages (id, username, page_slug, title, description, avatar_url, theme_id, button_style, show_socials, is_published, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         ).bind(
           page.id,
           sanitized.username,
           page.pageSlug,
           page.title,
           page.description,
+          page.avatarUrl || '',
           page.themeId,
           page.buttonStyle,
           page.showSocials ? 1 : 0,
           page.isPublished ? 1 : 0,
+          page.updatedAt,
           page.updatedAt
         )
       );
@@ -1025,7 +1033,7 @@ async function saveBioWorkspaceToStorage(
       for (const link of page.links) {
         stmts.push(
           env.LINKS_DB.prepare(
-            'INSERT INTO bio_links (id, page_id, username, title, subtitle, url, sort_order, enabled, clicks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO bio_links (id, page_id, username, title, subtitle, url, sort_order, enabled, clicks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(
             link.id,
             page.id,
@@ -1035,7 +1043,8 @@ async function saveBioWorkspaceToStorage(
             link.url,
             link.sortOrder,
             link.enabled ? 1 : 0,
-            link.clicks
+            link.clicks,
+            sanitized.updatedAt
           )
         );
       }
@@ -1099,6 +1108,204 @@ async function incrementBioLinkClickInStorage(
   return null;
 }
 
+type MediaStorageEngine = 'cloudflare-r2' | 'cloudflare-d1' | 'cloudflare-kv' | 'none';
+
+function getMediaStorageEngine(env: WorkerEnv): MediaStorageEngine {
+  if (env.LINKS_MEDIA_R2) return 'cloudflare-r2';
+  if (env.LINKS_DB) return 'cloudflare-d1';
+  if (env.LINKS_KV) return 'cloudflare-kv';
+  return 'none';
+}
+
+function buildAvatarStorageKey(username: string, pageSlug: string): string {
+  return pageSlug ? `avatars/${username}/page-${pageSlug}` : `avatars/${username}/main`;
+}
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
+async function readBoundedBinary(
+  request: Request,
+  maxBytes = AVATAR_MAX_BYTES
+): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; status: number; error: string }> {
+  const contentLength = Number(request.headers.get('content-length') || '0');
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    return {
+      ok: false,
+      status: 413,
+      error: `Ukuran foto terlalu besar (maks ${Math.round(maxBytes / 1024)} KB setelah kompresi AVIF).`,
+    };
+  }
+  if (!request.body) {
+    return { ok: false, status: 400, error: 'Data biner gambar diperlukan.' };
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel();
+          return {
+            ok: false,
+            status: 413,
+            error: `Ukuran foto melebihi batas ${Math.round(maxBytes / 1024)} KB.`,
+          };
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, bytes: merged };
+}
+
+async function putAvatarToStorage(
+  env: WorkerEnv,
+  username: string,
+  pageSlug: string,
+  bytes: Uint8Array,
+  contentType: 'image/avif' | 'image/webp'
+): Promise<MediaStorageEngine> {
+  const key = buildAvatarStorageKey(username, pageSlug);
+  const now = new Date().toISOString();
+
+  if (env.LINKS_MEDIA_R2) {
+    await env.LINKS_MEDIA_R2.put(key, bytes, {
+      httpMetadata: {
+        contentType,
+        cacheControl: 'public, max-age=31536000, immutable',
+      },
+      customMetadata: {
+        username,
+        pageSlug,
+        updatedAt: now,
+      },
+    });
+    return 'cloudflare-r2';
+  }
+
+  const dataBase64 = uint8ToBase64(bytes);
+
+  if (env.LINKS_DB) {
+    await env.LINKS_DB.prepare(
+      'INSERT INTO bio_avatars (avatar_key, username, page_slug, content_type, data_base64, byte_size, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(avatar_key) DO UPDATE SET content_type = excluded.content_type, data_base64 = excluded.data_base64, byte_size = excluded.byte_size, updated_at = excluded.updated_at'
+    )
+      .bind(key, username, pageSlug, contentType, dataBase64, bytes.byteLength, now)
+      .run();
+    return 'cloudflare-d1';
+  }
+
+  if (env.LINKS_KV) {
+    await env.LINKS_KV.put(
+      `avatar:${key}`,
+      JSON.stringify({
+        contentType,
+        dataBase64,
+        byteSize: bytes.byteLength,
+        updatedAt: now,
+      })
+    );
+    return 'cloudflare-kv';
+  }
+
+  return 'none';
+}
+
+async function getAvatarFromStorage(
+  env: WorkerEnv,
+  username: string,
+  pageSlug: string
+): Promise<{ body: ArrayBuffer | ReadableStream; contentType: string } | null> {
+  const key = buildAvatarStorageKey(username, pageSlug);
+
+  if (env.LINKS_MEDIA_R2) {
+    const obj = await env.LINKS_MEDIA_R2.get(key);
+    if (obj && obj.body) {
+      const ct =
+        obj.httpMetadata?.contentType === 'image/webp' ? 'image/webp' : 'image/avif';
+      return { body: obj.body, contentType: ct };
+    }
+  }
+
+  if (env.LINKS_DB) {
+    const row = await env.LINKS_DB.prepare(
+      'SELECT content_type, data_base64 FROM bio_avatars WHERE avatar_key = ? LIMIT 1'
+    )
+      .bind(key)
+      .first<{ content_type: string; data_base64: string }>();
+    if (row && row.data_base64) {
+      const ct = row.content_type === 'image/webp' ? 'image/webp' : 'image/avif';
+      const bytes = base64ToUint8(row.data_base64);
+      return { body: bytes.buffer as ArrayBuffer, contentType: ct };
+    }
+  }
+
+  if (env.LINKS_KV) {
+    const raw = await env.LINKS_KV.get<{
+      contentType?: string;
+      dataBase64?: string;
+    }>(`avatar:${key}`, 'json');
+    if (raw?.dataBase64) {
+      const ct = raw.contentType === 'image/webp' ? 'image/webp' : 'image/avif';
+      const bytes = base64ToUint8(raw.dataBase64);
+      return { body: bytes.buffer as ArrayBuffer, contentType: ct };
+    }
+  }
+
+  return null;
+}
+
+async function deleteAvatarFromStorage(
+  env: WorkerEnv,
+  username: string,
+  pageSlug: string
+): Promise<void> {
+  const key = buildAvatarStorageKey(username, pageSlug);
+  const tasks: Promise<unknown>[] = [];
+  if (env.LINKS_MEDIA_R2) {
+    tasks.push(env.LINKS_MEDIA_R2.delete(key));
+  }
+  if (env.LINKS_DB) {
+    tasks.push(
+      env.LINKS_DB.prepare('DELETE FROM bio_avatars WHERE avatar_key = ?').bind(key).run()
+    );
+  }
+  if (env.LINKS_KV) {
+    tasks.push(env.LINKS_KV.delete(`avatar:${key}`));
+  }
+  await Promise.allSettled(tasks);
+}
+
 async function handleApiRequest(
   request: Request,
   url: URL,
@@ -1118,10 +1325,12 @@ async function handleApiRequest(
       outboundProviderMode: (env.OUTBOUND_PROVIDER || 'auto').trim().toLowerCase(),
       activeOutboundProvider,
       linksStorageEngine: getLinksStorageEngine(env),
+      mediaStorageEngine: getMediaStorageEngine(env),
       bindings: {
         mailTransitKv: Boolean(env.MAIL_TRANSIT_KV),
         linksKv: Boolean(env.LINKS_KV),
         linksDb: Boolean(env.LINKS_DB),
+        linksMediaR2: Boolean(env.LINKS_MEDIA_R2),
         sendEmail: caps.cloudflare,
         cpanelRelay: caps.cpanelRelay,
         resendApi: caps.resend,
@@ -1744,6 +1953,96 @@ async function handleApiRequest(
     }
     const clicks = await incrementBioLinkClickInStorage(env, username, pageSlug, linkId);
     return jsonResponse({ ok: true, clicks });
+  }
+
+  // 8. Dedicated Bio Link AVIF Avatar API (`/api/links/avatar/:username` & `/:pageSlug`)
+  //    Primary: Cloudflare R2 (`LINKS_MEDIA_R2`) -> Fallback: D1 (`bio_avatars`) -> KV (`LINKS_KV`)
+  if (url.pathname.startsWith('/api/links/avatar/')) {
+    const rest = url.pathname.replace('/api/links/avatar/', '').replace(/\/+$/, '');
+    const parts = rest.split('/').filter(Boolean);
+    const rawUser = decodeURIComponent(parts[0] || '');
+    const rawPage = parts[1] ? decodeURIComponent(parts[1]) : '';
+    if (!rawUser) {
+      return jsonResponse({ ok: false, error: 'Username diperlukan.' }, 400);
+    }
+    const username = sanitizeHandle(rawUser);
+    const pageSlug = rawPage ? sanitizePageSlug(rawPage) : '';
+    if (pageSlug === null) {
+      return jsonResponse({ ok: false, error: 'Slug halaman tidak valid.' }, 400);
+    }
+
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      const stored = await getAvatarFromStorage(env, username, pageSlug);
+      if (!stored) {
+        return new Response(null, {
+          status: 404,
+          headers: {
+            'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff',
+          },
+        });
+      }
+      const hasVersion = Boolean(url.searchParams.get('v'));
+      return new Response(request.method === 'HEAD' ? null : stored.body, {
+        status: 200,
+        headers: {
+          'Content-Type': stored.contentType,
+          'Cache-Control': hasVersion
+            ? 'public, max-age=31536000, immutable'
+            : 'public, max-age=300',
+          'X-Content-Type-Options': 'nosniff',
+          'Cross-Origin-Resource-Policy': 'cross-origin',
+        },
+      });
+    }
+
+    if (request.method === 'PUT') {
+      const bin = await readBoundedBinary(request, AVATAR_MAX_BYTES);
+      if (!bin.ok) {
+        return jsonResponse({ ok: false, error: bin.error }, bin.status);
+      }
+      const validatedMime = detectValidatedAvatarMime(bin.bytes);
+      if (!validatedMime) {
+        return jsonResponse(
+          {
+            ok: false,
+            error:
+              'Format berkas ditolak. Hanya gambar AVIF atau WebP terkompresi (maks 128 KB) yang diizinkan.',
+          },
+          400
+        );
+      }
+
+      const mediaEngine = await putAvatarToStorage(
+        env,
+        username,
+        pageSlug,
+        bin.bytes,
+        validatedMime
+      );
+      const version = Date.now().toString(36);
+      const avatarPath = pageSlug
+        ? `/api/links/avatar/${encodeURIComponent(username)}/${encodeURIComponent(pageSlug)}?v=${version}`
+        : `/api/links/avatar/${encodeURIComponent(username)}?v=${version}`;
+
+      return jsonResponse({
+        ok: true,
+        avatarUrl: avatarPath,
+        contentType: validatedMime,
+        byteSize: bin.bytes.byteLength,
+        mediaStorageEngine: mediaEngine,
+      });
+    }
+
+    if (request.method === 'DELETE') {
+      await deleteAvatarFromStorage(env, username, pageSlug);
+      return jsonResponse({
+        ok: true,
+        deleted: true,
+        username,
+        pageSlug,
+      });
+    }
   }
 
   return jsonResponse({ ok: false, error: 'Endpoint API tidak ditemukan.' }, 404);
