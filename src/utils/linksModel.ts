@@ -429,6 +429,21 @@ export interface BioPageRecord {
   updatedAt: string;
 }
 
+export type BioIndexingMode = 'none' | 'search_only' | 'ai_only' | 'search_and_ai';
+
+export function isValidBioIndexingMode(val: unknown): val is BioIndexingMode {
+  return (
+    val === 'none' ||
+    val === 'search_only' ||
+    val === 'ai_only' ||
+    val === 'search_and_ai'
+  );
+}
+
+export function sanitizeBioIndexingMode(val: unknown): BioIndexingMode {
+  return isValidBioIndexingMode(val) ? val : 'none';
+}
+
 export interface BioWorkspaceData {
   username: string;
   displayName: string;
@@ -437,6 +452,7 @@ export interface BioWorkspaceData {
   avatarUrl: string;
   socials: Partial<Record<SocialPlatformId, string>>;
   pages: BioPageRecord[];
+  indexingMode?: BioIndexingMode;
   isDeactivated?: boolean;
   deactivatedAt?: string | null;
   updatedAt: string;
@@ -496,10 +512,14 @@ export const RESERVED_PAGE_SLUGS = new Set([
   'terms',
   'privacy',
   'legal',
+  'changelog',
+  'releases',
   'sw.js',
   'favicon.svg',
   'robots.txt',
   'sitemap.xml',
+  'llms.txt',
+  'llms-full.txt',
   'manifest.webmanifest',
 ]);
 
@@ -686,6 +706,7 @@ export function createEmptyBioWorkspace(
         updatedAt: now,
       },
     ],
+    indexingMode: 'none',
     isDeactivated: false,
     deactivatedAt: null,
     updatedAt: now,
@@ -805,6 +826,7 @@ export function sanitizeBioWorkspaceInput(
     cleanPages.sort((a, b) => (a.pageSlug === '' ? -1 : b.pageSlug === '' ? 1 : 0));
   }
 
+  const indexingMode = sanitizeBioIndexingMode(obj.indexingMode);
   const isDeactivated = obj.isDeactivated === true;
   const deactivatedAt =
     isDeactivated && typeof obj.deactivatedAt === 'string' && obj.deactivatedAt.trim()
@@ -821,6 +843,7 @@ export function sanitizeBioWorkspaceInput(
     avatarUrl: safeAvatar,
     socials,
     pages: cleanPages,
+    indexingMode,
     isDeactivated,
     deactivatedAt,
     updatedAt: now,

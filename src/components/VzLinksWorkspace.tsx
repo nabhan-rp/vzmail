@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  Bot,
   Camera,
   Check,
   CheckCircle2,
@@ -13,6 +14,7 @@ import {
   FilePlus2,
   Globe,
   Link2,
+  Lock,
   Palette,
   PauseCircle,
   PlayCircle,
@@ -22,6 +24,7 @@ import {
   RotateCcw,
   Save,
   Scissors,
+  Search,
   ShieldAlert,
   Trash2,
   Upload,
@@ -42,9 +45,11 @@ import {
   SOCIAL_PLATFORMS,
   createEmptyBioWorkspace,
   getDefaultQrDesignForTheme,
+  sanitizeBioIndexingMode,
   sanitizePageSlug,
   type BioButtonStyle,
   type BioDeleteCooldownInfo,
+  type BioIndexingMode,
   type BioLinkItem,
   type BioPageRecord,
   type BioQrDesignConfig,
@@ -55,6 +60,7 @@ import {
   type SocialPlatformId,
 } from '../utils/linksModel';
 import { checkReservedUsername } from '../utils/reservedUsernames';
+import { getBioIndexingPolicyDirectives } from '../utils/seoConfig';
 import { BioAvatarCropModal } from './BioAvatarCropModal';
 import { BioQrCustomizerPanel } from './BioQrCustomizerPanel';
 import { ConfirmActionModal } from './ConfirmActionModal';
@@ -2340,8 +2346,165 @@ export function VzLinksWorkspace({
                 )}
               </div>
             ) : (
-              /* Settings & Danger Zone Tab (Temporary Deactivate + Permanent DB Erase with 3-Day Cooldown) */
+              /* Settings & Danger Zone Tab (Opt-In Search/AI Indexing + Temporary Deactivate + Permanent DB Erase) */
               <div className="space-y-6">
+                {/* 0. Meta-Style Opt-In Search Engine & AI Crawler Indexing Controls */}
+                {(() => {
+                  const currentMode = sanitizeBioIndexingMode(workspace.indexingMode);
+                  const activePolicy = getBioIndexingPolicyDirectives(currentMode);
+                  const indexingOptions: {
+                    mode: BioIndexingMode;
+                    title: string;
+                    subtitle: string;
+                    metaTag: string;
+                    icon: typeof Lock;
+                  }[] = [
+                    {
+                      mode: 'none',
+                      title:
+                        lang === 'id'
+                          ? 'Privat — Tidak Diindeks (Default)'
+                          : 'Private — Do Not Index (Default)',
+                      subtitle:
+                        lang === 'id'
+                          ? 'Halaman Bio tetap dapat dibuka lewat tautan langsung, tetapi disembunyikan dari Google/Bing dan semua AI Crawler.'
+                          : 'Your Bio remains reachable via direct link, but is hidden from Google/Bing and all AI crawlers.',
+                      metaTag: 'noindex, nofollow, noai',
+                      icon: Lock,
+                    },
+                    {
+                      mode: 'search_only',
+                      title:
+                        lang === 'id'
+                          ? 'Mesin Pencari Saja (Google, Bing, DuckDuckGo)'
+                          : 'Search Engines Only (Google, Bing, DuckDuckGo)',
+                      subtitle:
+                        lang === 'id'
+                          ? 'Izinkan profil & sub-halaman publik muncul di hasil pencarian web, namun blokir AI crawler (GPTBot, ClaudeBot, PerplexityBot).'
+                          : 'Allow your Bio and published sub-pages in web search results while blocking AI crawlers (GPTBot, ClaudeBot, PerplexityBot).',
+                      metaTag: 'index, follow, noai',
+                      icon: Search,
+                    },
+                    {
+                      mode: 'ai_only',
+                      title:
+                        lang === 'id'
+                          ? 'AI Search & Crawler Saja (ChatGPT, Claude, Perplexity)'
+                          : 'AI Search & Crawlers Only (ChatGPT, Claude, Perplexity)',
+                      subtitle:
+                        lang === 'id'
+                          ? 'Izinkan mesin jawaban & asisten AI membaca halaman Bio Anda, tetapi cegah indeksasi mesin pencari konvensional.'
+                          : 'Allow AI search assistants to read your Bio while keeping it out of traditional search engine indexes.',
+                      metaTag: 'AI Allow · Search noindex',
+                      icon: Bot,
+                    },
+                    {
+                      mode: 'search_and_ai',
+                      title:
+                        lang === 'id'
+                          ? 'Mesin Pencari + AI Crawler (Publik Penuh)'
+                          : 'Search Engines + AI Crawlers (Full Discovery)',
+                      subtitle:
+                        lang === 'id'
+                          ? 'Maksimalkan keterlihatan publik: izinkan mesin pencari web dan AI Search/Crawler mengindeks profil Bio beserta Schema.org ProfilePage.'
+                          : 'Maximize public discoverability: allow both web search engines and AI search crawlers to index your Bio with ProfilePage JSON-LD.',
+                      metaTag: 'index, follow · AI Allow',
+                      icon: Globe,
+                    },
+                  ];
+
+                  return (
+                    <div className="p-4 sm:p-5 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-4">
+                      <div className="space-y-1">
+                        <div className="text-sm font-bold text-slate-900 dark:text-white font-display flex items-center gap-2">
+                          <Search className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                          <span>
+                            {lang === 'id'
+                              ? `Visibilitas Mesin Pencari & AI Crawler (${username}.${domain})`
+                              : `Search Engine & AI Crawler Visibility (${username}.${domain})`}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                          {lang === 'id'
+                            ? 'Seperti kontrol privasi profil di ekosistem Meta, halaman Bio Anda bersifat opt-in (privat secara bawaan). Pilihan Anda diterapkan langsung pada edge Cloudflare melalui robots.txt, header HTTP X-Robots-Tag, dan meta HTML.'
+                            : 'Modeled after Meta profile discovery controls, your Bio is opt-in (private by default). Your selection is enforced directly at the Cloudflare edge via robots.txt, HTTP X-Robots-Tag headers, and HTML meta tags.'}
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {indexingOptions.map((opt) => {
+                          const Icon = opt.icon;
+                          const isSelected = currentMode === opt.mode;
+                          return (
+                            <button
+                              key={opt.mode}
+                              type="button"
+                              disabled={saving || isCooldownLocked || isReservedHandle}
+                              onClick={() => {
+                                if (currentMode === opt.mode) return;
+                                const nextWs: BioWorkspaceData = {
+                                  ...workspace,
+                                  indexingMode: opt.mode,
+                                };
+                                setWorkspace(nextWs);
+                                void persistWorkspace(
+                                  nextWs,
+                                  lang === 'id'
+                                    ? `Kebijakan indeksasi ${username}.${domain} diperbarui: ${opt.title}`
+                                    : `Indexing policy for ${username}.${domain} updated: ${opt.title}`
+                                );
+                              }}
+                              className={`text-left p-3.5 rounded-xl border transition-colors flex flex-col justify-between gap-2.5 disabled:opacity-50 cursor-pointer ${
+                                isSelected
+                                  ? 'bg-blue-50/70 dark:bg-blue-950/30 border-blue-500 dark:border-blue-500/80'
+                                  : 'bg-white dark:bg-[#13161C] border-slate-200 dark:border-[#232732] hover:border-slate-300 dark:hover:border-slate-600'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <Icon
+                                    className={`w-4 h-4 shrink-0 ${
+                                      isSelected
+                                        ? 'text-blue-600 dark:text-blue-400'
+                                        : 'text-slate-500 dark:text-slate-400'
+                                    }`}
+                                  />
+                                  <span className="text-xs font-bold text-slate-900 dark:text-white leading-snug">
+                                    {opt.title}
+                                  </span>
+                                </div>
+                                {isSelected && (
+                                  <CheckCircle2 className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                                )}
+                              </div>
+                              <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                                {opt.subtitle}
+                              </p>
+                              <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 pt-1 border-t border-slate-200/70 dark:border-[#232732]">
+                                {opt.metaTag}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="p-3 rounded-lg bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] space-y-1 text-[11px] font-mono text-slate-600 dark:text-slate-400">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-slate-500">
+                            {lang === 'id' ? 'Kebijakan Edge Aktif:' : 'Active Edge Policy:'}
+                          </span>
+                          <span className="text-slate-900 dark:text-slate-200">
+                            https://{username}.{domain}/robots.txt
+                          </span>
+                        </div>
+                        <div className="truncate">
+                          X-Robots-Tag: {activePolicy.xRobotsTag}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* 1. Temporary Deactivation (Main Bio + Sub-Pages) */}
                 <div className="p-4 sm:p-5 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-4">
                   <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">

@@ -23,6 +23,7 @@ import {
   isValidBioThemeId,
   isValidButtonStyle,
   sanitizeBioAvatarUrl,
+  sanitizeBioIndexingMode,
   sanitizeBioWorkspaceInput,
   sanitizePageSlug,
   sanitizeShortlinkSlugInput,
@@ -35,6 +36,13 @@ import {
   type ShortlinkRecord,
 } from './src/utils/linksModel.ts';
 import { checkReservedUsername } from './src/utils/reservedUsernames.ts';
+import { verifyDomainAtEdge } from './src/utils/domainVerify.ts';
+import {
+  buildHostRobotsTxt,
+  buildHostSitemapXml,
+  buildLlmsFullTxt,
+  buildLlmsTxt,
+} from './src/utils/seoConfig.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1067,6 +1075,22 @@ async function startServer() {
   app.delete('/api/links/avatar/:username', handleDeleteAvatar);
   app.delete('/api/links/avatar/:username/:pageSlug', handleDeleteAvatar);
 
+  // Same-Origin Domain Verification Proxy (`GET /api/mail/verify-domain?domain=...`)
+  app.get('/api/mail/verify-domain', async (req, res) => {
+    const rawDomain = String(req.query.domain || '').trim().slice(0, 253);
+    if (!rawDomain) {
+      res.status(400).json({ ok: false, error: 'Parameter domain diperlukan.' });
+      return;
+    }
+    const result = await verifyDomainAtEdge(rawDomain);
+    if (!result) {
+      res.status(400).json({ ok: false, error: 'Format domain tidak valid.' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'public, max-age=120');
+    res.json(result);
+  });
+
   // Non-AI VZ Search Grounding Proxy (`GET /api/mail/vz-search?q=...&page=...`)
   app.get('/api/mail/vz-search', async (req, res) => {
     const rawQ = String(req.query.q || '').trim().slice(0, 240);
@@ -1086,7 +1110,8 @@ async function startServer() {
           method: 'GET',
           headers: {
             Accept: 'application/json',
-            'User-Agent': 'VZMail-SearchGrounding/1.0 (+https://mail.vz.gay)',
+            'User-Agent':
+              'Mozilla/5.0 (compatible; VZMail-SearchGrounding/1.0; +https://mail.vz.gay)',
           },
         }
       );
@@ -1180,6 +1205,44 @@ async function startServer() {
       return;
     }
     next();
+  });
+
+  // Dynamic Host-Aware SEO & AI Crawler Discovery Routes (parity with Cloudflare Worker)
+  app.get('/robots.txt', (req, res) => {
+    const host = String(req.hostname || 'mail.vz.gay').toLowerCase();
+    const isBioSub =
+      host.endsWith('.imy.li') && host !== 'www.imy.li' && host !== 'mail.imy.li';
+    let bioMode = undefined;
+    if (isBioSub) {
+      const bioUser = sanitizeHandle(host.slice(0, -'.imy.li'.length));
+      const ws = localBioWorkspaces.get(bioUser);
+      bioMode =
+        ws && ws.configured && !ws.isDeactivated
+          ? sanitizeBioIndexingMode(ws.indexingMode)
+          : ('none' as const);
+    }
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.status(200).send(buildHostRobotsTxt(host, bioMode));
+  });
+
+  app.get('/sitemap.xml', (req, res) => {
+    const host = String(req.hostname || 'mail.vz.gay').toLowerCase();
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.status(200).send(buildHostSitemapXml(host));
+  });
+
+  app.get('/llms.txt', (_req, res) => {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.status(200).send(buildLlmsTxt());
+  });
+
+  app.get('/llms-full.txt', (_req, res) => {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.status(200).send(buildLlmsFullTxt());
   });
 
   // Return JSON 404 for unknown API paths instead of falling through to SPA HTML

@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS bio_profiles (
   bio TEXT NOT NULL DEFAULT '',
   avatar_url TEXT NOT NULL DEFAULT '',
   socials_json TEXT NOT NULL DEFAULT '{}',
+  indexing_mode TEXT NOT NULL DEFAULT 'none',
   is_deactivated INTEGER NOT NULL DEFAULT 0,
   deactivated_at TEXT,
   updated_at TEXT NOT NULL

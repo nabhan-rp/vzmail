@@ -51,11 +51,13 @@ if (typeof window !== 'undefined') {
     appNameMeta.setAttribute('content', appTitle);
   }
 
-  // Register Multi-OS PWA Service Worker only on production HTTPS origins (skip dev & AI Studio preview iframes)
+  // Register Multi-OS PWA Service Worker only on production HTTPS service origins
+  // (skip dev, AI Studio preview iframes, and standalone user Bio subdomains *.imy.li)
   if ('serviceWorker' in navigator) {
     const shouldRegisterSw =
       !import.meta.env.DEV &&
       !auth0Config.isPreviewHost &&
+      !auth0Config.isStandaloneBioHost &&
       window.location.protocol === 'https:' &&
       !window.location.search.includes('no-sw');
 
@@ -87,7 +89,7 @@ createRoot(document.getElementById('root')!).render(
     <Auth0Provider
       domain={auth0Config.domain}
       clientId={auth0Config.clientId}
-      skipRedirectCallback={auth0Config.isPreviewHost}
+      skipRedirectCallback={auth0Config.isPreviewHost || auth0Config.isImyExternalHost}
       authorizationParams={{
         redirect_uri: auth0Config.redirectUri,
       }}

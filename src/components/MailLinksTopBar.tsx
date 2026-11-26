@@ -29,6 +29,7 @@ export type ActiveHostView =
   | 'bio_public'
   | 'shortlinks'
   | 'worker_console'
+  | 'changelog'
   | 'terms'
   | 'privacy';
 

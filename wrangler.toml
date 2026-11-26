@@ -2,7 +2,7 @@
 name = "vzmail"
 main = "cloudflare/worker-mail-links.ts"
 compatibility_date = "2026-11-19"
-compatibility_flags = ["nodejs_compat"]
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 
 # 2-in-1 Cloudflare Worker Custom Routes (active for vz.gay + imy.li):
 routes = [
@@ -27,8 +27,6 @@ run_worker_first = [
   "!/apple-touch-icon*.png",
   "!/favicon.svg",
   "!/og-banner.jpg",
-  "!/robots.txt",
-  "!/sitemap.xml",
   "!/cloudflare_imy_mail_links_relay.php"
 ]
 

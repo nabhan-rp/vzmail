@@ -1,4 +1,61 @@
+# VZ Mail (mail.vz.gay) & VZ Links (links.vz.gay, imy.li/s/)
+# Search engines and AI Search / LLM Crawlers are welcome on public service pages.
+# AI Documentation: https://mail.vz.gay/llms.txt
+# Full AI Reference: https://mail.vz.gay/llms-full.txt
+
 User-agent: *
+Allow: /
+Disallow: /api/
+
+User-agent: GPTBot
+Allow: /
+Disallow: /api/
+
+User-agent: OAI-SearchBot
+Allow: /
+Disallow: /api/
+
+User-agent: ChatGPT-User
+Allow: /
+Disallow: /api/
+
+User-agent: ClaudeBot
+Allow: /
+Disallow: /api/
+
+User-agent: Claude-SearchBot
+Allow: /
+Disallow: /api/
+
+User-agent: Claude-User
+Allow: /
+Disallow: /api/
+
+User-agent: PerplexityBot
+Allow: /
+Disallow: /api/
+
+User-agent: Perplexity-User
+Allow: /
+Disallow: /api/
+
+User-agent: Google-Extended
+Allow: /
+Disallow: /api/
+
+User-agent: Applebot-Extended
+Allow: /
+Disallow: /api/
+
+User-agent: Amazonbot
+Allow: /
+Disallow: /api/
+
+User-agent: Meta-ExternalAgent
+Allow: /
+Disallow: /api/
+
+User-agent: DuckAssistBot
 Allow: /
 Disallow: /api/
 

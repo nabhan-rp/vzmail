@@ -11,6 +11,8 @@ import {
   type BioWorkspaceData,
 } from '../utils/linksModel';
 import { sanitizeHandle } from '../utils/mailIdentity';
+import { applyClientSeo } from '../utils/applyClientSeo';
+import { buildServiceSeoMeta } from '../utils/seoConfig';
 import type { ActiveHostView } from './MailLinksTopBar';
 import { QrCodeModal } from './QrCodeModal';
 import { SocialIconGlyph } from './SocialIconGlyph';
@@ -20,6 +22,7 @@ interface ImyBioPublicViewProps {
   session: SsoSession;
   overrideUser?: string | null;
   pageSlug?: string;
+  standaloneMode?: boolean;
   onChangePageSlug?: (nextSlug: string) => void;
   onSelectHost: (host: ActiveHostView) => void;
   onLoginWithAuth0?: () => void;
@@ -30,6 +33,7 @@ export function ImyBioPublicView({
   session,
   overrideUser,
   pageSlug = '',
+  standaloneMode = false,
   onChangePageSlug,
   onSelectHost,
   onLoginWithAuth0,
@@ -109,6 +113,24 @@ export function ImyBioPublicView({
     setAvatarError(false);
   }, [effectiveAvatarUrl]);
 
+  // Synchronize client <head> SEO & ProfilePage JSON-LD with owner's real Bio data & opt-in indexingMode
+  useEffect(() => {
+    if (loading) return;
+    const hostname =
+      typeof window !== 'undefined' ? window.location.hostname : `${user || 'links'}.${domain}`;
+    applyClientSeo(
+      buildServiceSeoMeta({
+        routeKind: 'bio_public',
+        hostname,
+        lang,
+        bioUsername: user || null,
+        bioPageSlug: pageSlug,
+        bioWorkspace: workspace,
+        bioActivePage: activePage,
+      })
+    );
+  }, [loading, user, domain, lang, pageSlug, workspace, activePage]);
+
   const otherPublishedPages = useMemo(() => {
     if (!workspace) return [];
     return workspace.pages.filter(
@@ -147,9 +169,13 @@ export function ImyBioPublicView({
     }
   };
 
+  const containerHeightClass = standaloneMode
+    ? 'min-h-screen'
+    : 'min-h-[calc(100vh-112px)]';
+
   if (loading) {
     return (
-      <div className="min-h-[calc(100vh-112px)] flex items-center justify-center px-4 py-12">
+      <div className={`${containerHeightClass} flex items-center justify-center px-4 py-12`}>
         <div className="w-full max-w-md space-y-4">
           <div className="w-16 h-16 rounded-2xl bg-slate-200 dark:bg-[#191E28] mx-auto animate-pulse" />
           <div className="h-6 w-40 rounded-lg bg-slate-200 dark:bg-[#191E28] mx-auto animate-pulse" />
@@ -253,8 +279,8 @@ export function ImyBioPublicView({
   // Temporary deactivation state (owner deactivated Bio without deleting data)
   if (user && workspace && workspace.isDeactivated) {
     return (
-      <div className="min-h-[calc(100vh-112px)] flex items-center justify-center px-4 py-14">
-        <div className="w-full max-w-md bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-2xl p-7 text-center space-y-5">
+      <div className={`${containerHeightClass} flex flex-col items-center justify-between px-4 py-14`}>
+        <div className="my-auto w-full max-w-md bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-2xl p-7 text-center space-y-5">
           <div className="w-12 h-12 rounded-xl bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-900/60 flex items-center justify-center mx-auto">
             <Globe className="w-6 h-6" />
           </div>
@@ -296,6 +322,15 @@ export function ImyBioPublicView({
             </div>
           )}
         </div>
+
+        <footer className="pt-8 text-xs text-slate-500 dark:text-slate-400 flex items-center gap-2">
+          <a
+            href="https://links.vz.gay"
+            className="hover:underline font-medium"
+          >
+            {lang === 'id' ? 'Buat Bio Anda di links.vz.gay' : 'Create your Bio on links.vz.gay'}
+          </a>
+        </footer>
       </div>
     );
   }
@@ -307,8 +342,8 @@ export function ImyBioPublicView({
       : `${user}.${domain}`;
 
     return (
-      <div className="min-h-[calc(100vh-112px)] flex items-center justify-center px-4 py-14">
-        <div className="w-full max-w-md bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-2xl p-7 text-center space-y-5">
+      <div className={`${containerHeightClass} flex flex-col items-center justify-between px-4 py-14`}>
+        <div className="my-auto w-full max-w-md bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-2xl p-7 text-center space-y-5">
           <div className="w-12 h-12 rounded-xl bg-slate-100 dark:bg-[#1B202B] text-slate-500 dark:text-slate-300 flex items-center justify-center mx-auto">
             <Globe className="w-6 h-6" />
           </div>
@@ -354,7 +389,7 @@ export function ImyBioPublicView({
                 <span>{lang === 'id' ? `Ke ${user}.${domain}` : `Go to ${user}.${domain}`}</span>
               </button>
             )}
-            {isOwner && (
+            {isOwner ? (
               <button
                 type="button"
                 onClick={() => onSelectHost('links.vz.gay')}
@@ -363,9 +398,23 @@ export function ImyBioPublicView({
                 <Edit3 className="w-3.5 h-3.5" />
                 <span>{lang === 'id' ? 'Atur di Studio Bio' : 'Edit in Bio Studio'}</span>
               </button>
+            ) : (
+              <a
+                href="https://links.vz.gay"
+                className="w-full sm:w-auto min-h-[40px] px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg inline-flex items-center justify-center gap-1.5"
+              >
+                <Link2 className="w-3.5 h-3.5" />
+                <span>{lang === 'id' ? 'Kelola / Buat Bio di links.vz.gay' : 'Manage / Create Bio on links.vz.gay'}</span>
+              </a>
             )}
           </div>
         </div>
+
+        <footer className="pt-8 text-xs text-slate-500 dark:text-slate-400">
+          <a href="https://links.vz.gay" className="hover:underline font-medium">
+            {lang === 'id' ? 'Ditenagai VZ Links (links.vz.gay)' : 'Powered by VZ Links (links.vz.gay)'}
+          </a>
+        </footer>
       </div>
     );
   }
@@ -384,16 +433,16 @@ export function ImyBioPublicView({
 
   return (
     <div
-      className={`min-h-[calc(100vh-112px)] px-4 py-10 sm:py-14 flex flex-col items-center justify-between transition-colors ${theme.pageBgClass}`}
+      className={`${containerHeightClass} px-4 pt-8 pb-8 sm:pt-12 sm:pb-10 flex flex-col items-center justify-between transition-colors ${theme.pageBgClass}`}
     >
-      <div className="w-full max-w-[540px] space-y-6">
-        {/* Top Utility Row: Back to Root (if sub-page) + Public QR Code Button + Owner Edit */}
+      <div className="w-full max-w-[540px] space-y-5 my-auto">
+        {/* Top Utility Row: Back to Root (if sub-page) + Public QR Code Button + Owner Edit (preview mode) */}
         <div className="flex items-center justify-between gap-2 text-xs">
           {activePage.pageSlug !== '' ? (
             <button
               type="button"
               onClick={() => onChangePageSlug?.('')}
-              className={`inline-flex items-center gap-1.5 font-medium hover:underline cursor-pointer ${theme.mutedClass}`}
+              className={`min-h-[40px] inline-flex items-center gap-1.5 font-medium hover:underline cursor-pointer ${theme.mutedClass}`}
             >
               <ArrowLeft className="w-3.5 h-3.5" />
               <span>{user}.{domain}</span>
@@ -406,17 +455,17 @@ export function ImyBioPublicView({
             <button
               type="button"
               onClick={() => setQrModalOpen(true)}
-              className={`min-h-[36px] px-3 py-1.5 rounded-lg border inline-flex items-center gap-1.5 text-xs font-semibold transition-colors cursor-pointer ${theme.socialBtnClass}`}
+              className={`min-h-[40px] px-3.5 py-2 rounded-xl border inline-flex items-center gap-1.5 text-xs font-semibold transition-colors cursor-pointer ${theme.socialBtnClass}`}
             >
               <QrCode className="w-3.5 h-3.5" />
-              <span>{lang === 'id' ? 'QR Code' : 'QR Code'}</span>
+              <span>QR Code</span>
             </button>
 
-            {isOwner && (
+            {isOwner && !standaloneMode && (
               <button
                 type="button"
                 onClick={() => onSelectHost('links.vz.gay')}
-                className={`inline-flex items-center gap-1.5 font-medium hover:underline cursor-pointer ${theme.mutedClass}`}
+                className={`min-h-[40px] inline-flex items-center gap-1.5 font-medium hover:underline cursor-pointer ${theme.mutedClass}`}
               >
                 <Edit3 className="w-3.5 h-3.5" />
                 <span>{lang === 'id' ? 'Edit Halaman' : 'Edit Page'}</span>
@@ -568,11 +617,24 @@ export function ImyBioPublicView({
         </article>
       </div>
 
-      {/* Minimal Footer */}
-      <div className={`pt-8 text-xs font-mono flex items-center gap-1.5 ${theme.mutedClass}`}>
-        <Link2 className="w-3.5 h-3.5" />
-        <span>{publicPath}</span>
-      </div>
+      {/* Minimal Thin Footer to links.vz.gay */}
+      <footer
+        className={`pt-8 text-xs flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-center ${theme.mutedClass}`}
+      >
+        <span className="font-mono inline-flex items-center gap-1.5">
+          <Link2 className="w-3.5 h-3.5" />
+          <span>{publicPath}</span>
+        </span>
+        <span aria-hidden="true">·</span>
+        <a
+          href="https://links.vz.gay"
+          className="hover:underline font-medium"
+        >
+          {lang === 'id'
+            ? 'Buat Bio Anda di links.vz.gay'
+            : 'Create your Bio on links.vz.gay'}
+        </a>
+      </footer>
 
       {/* Public Bio Custom QR Code Modal */}
       <QrCodeModal

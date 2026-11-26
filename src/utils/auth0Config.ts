@@ -9,11 +9,30 @@ export interface Auth0ResolvedConfig {
   redirectUri: string;
   logoutReturnTo: string;
   isPreviewHost: boolean;
+  isImyExternalHost: boolean;
+  isStandaloneBioHost: boolean;
 }
 
 const DEFAULT_AUTH0_DOMAIN = 'accounts.vz.gay';
 const DEFAULT_MAIL_CLIENT_ID = 'sn75KSPt8iU8RlhI5lCC6MY53yt85jy3';
 const DEFAULT_LINKS_CLIENT_ID = 'BVT8uaChXUDLjuCDhtfPYXeSSWn6yuGa';
+export const LINKS_CANONICAL_ORIGIN = 'https://links.vz.gay';
+
+export function isStandaloneBioSubdomainHost(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname.toLowerCase();
+  return (
+    host.endsWith('.imy.li') &&
+    host !== 'www.imy.li' &&
+    host !== 'mail.imy.li'
+  );
+}
+
+export function isImyExternalHost(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname.toLowerCase();
+  return host === 'imy.li' || host.endsWith('.imy.li');
+}
 
 export function isPreviewOrIframeHost(): boolean {
   if (typeof window === 'undefined') return false;
@@ -45,6 +64,8 @@ export function detectAuth0Service(): Auth0ServiceId {
   if (
     host === 'links.vz.gay' ||
     host.startsWith('links.') ||
+    host === 'imy.li' ||
+    host.endsWith('.imy.li') ||
     hostMode === 'links' ||
     hostMode === 'shortlinks' ||
     pathname.startsWith('/links') ||
@@ -59,6 +80,8 @@ export function detectAuth0Service(): Auth0ServiceId {
 export function resolveAuth0Config(): Auth0ResolvedConfig {
   const service = detectAuth0Service();
   const isPreviewHost = isPreviewOrIframeHost();
+  const imyExternal = isImyExternalHost();
+  const standaloneBio = isStandaloneBioSubdomainHost();
   const domain =
     import.meta.env.VITE_AUTH0_DOMAIN || DEFAULT_AUTH0_DOMAIN;
 
@@ -79,12 +102,17 @@ export function resolveAuth0Config(): Auth0ResolvedConfig {
     const host = window.location.hostname.toLowerCase();
     const isDedicatedLinksHost =
       host === 'links.vz.gay' || host.startsWith('links.');
+    // On *.imy.li & imy.li, never use current origin as Auth0 callback URI — always point to links.vz.gay.
     // On dedicated production domains (mail.vz.gay / links.vz.gay), origin uniquely identifies the service.
     // On shared dev hosts (localhost / *.workers.dev), keep /links on the callback URI so VZ Links resolves its own clientId.
-    redirectUri =
-      service === 'links' && !isDedicatedLinksHost
-        ? `${window.location.origin}/links`
-        : window.location.origin;
+    if (imyExternal) {
+      redirectUri = LINKS_CANONICAL_ORIGIN;
+    } else {
+      redirectUri =
+        service === 'links' && !isDedicatedLinksHost
+          ? `${window.location.origin}/links`
+          : window.location.origin;
+    }
   }
 
   return {
@@ -96,5 +124,7 @@ export function resolveAuth0Config(): Auth0ResolvedConfig {
     redirectUri,
     logoutReturnTo: redirectUri,
     isPreviewHost,
+    isImyExternalHost: imyExternal,
+    isStandaloneBioHost: standaloneBio,
   };
 }

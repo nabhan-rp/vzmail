@@ -1,6 +1,6 @@
 import { useAuth0 } from '@auth0/auth0-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { resolveAuth0Config } from '../utils/auth0Config';
+import { LINKS_CANONICAL_ORIGIN, resolveAuth0Config } from '../utils/auth0Config';
 import { sanitizeHandle } from '../utils/mailIdentity';
 
 export type CrossServiceOffer =
@@ -185,16 +185,24 @@ export function useSsoSession() {
   );
 
   const loginWithAuth0 = useCallback(() => {
+    if (typeof window !== 'undefined' && auth0Config.isImyExternalHost) {
+      window.location.assign(`${LINKS_CANONICAL_ORIGIN}/`);
+      return;
+    }
     void loginWithRedirect();
-  }, [loginWithRedirect]);
+  }, [auth0Config.isImyExternalHost, loginWithRedirect]);
 
   const signupWithAuth0 = useCallback(() => {
+    if (typeof window !== 'undefined' && auth0Config.isImyExternalHost) {
+      window.location.assign(`${LINKS_CANONICAL_ORIGIN}/`);
+      return;
+    }
     void loginWithRedirect({
       authorizationParams: {
         screen_hint: 'signup',
       },
     });
-  }, [loginWithRedirect]);
+  }, [auth0Config.isImyExternalHost, loginWithRedirect]);
 
   const signOut = useCallback(() => {
     setCrossOffer(null);

@@ -1,0 +1,52 @@
+# VZ Mail & VZ Links — Full Technical & Product Reference
+
+Publisher: PT Galeri Langkah Bahagia Yuwana (galbay) (https://vz.gay)
+Latest Stable Version: v1.0.0 (2026-11-25)
+Universal SSO: https://accounts.vz.gay (Account Portal: https://myaccount.vz.gay)
+
+## 1. Domain Architecture (2-in-1 Cloudflare Worker)
+
+1. **https://mail.vz.gay** — VZ Mail web application & PWA for @imy.li accounts.
+2. **https://links.vz.gay** — VZ Links Studio for managing multi-page Link-in-Bio, QR designs, Recycle Bin, and Bio indexing preferences.
+3. **https://imy.li** & **https://imy.li/s/$CODE** — Standalone URL shortener & HTTP 302 redirector.
+4. **https://$USERNAME.imy.li** & **https://$USERNAME.imy.li/$PAGE** — Public Link-in-Bio pages isolated with Zero-Cookie PSL headers and strict CSP.
+5. **https://mail.vz.gay/changelog** & **https://links.vz.gay/changelog** — Public bilingual release changelog.
+
+## 2. Privacy & Security Guarantees
+
+- **VZ Mail Zero-Retention Pop-and-Purge**: Inbound emails received via Cloudflare Email Routing are held transiently in Cloudflare KV (`MAIL_TRANSIT_KV`, max 72-hour TTL). As soon as the user's browser saves the message to local IndexedDB and calls `POST /api/mail/ack`, the server deletes the transit packet immediately. No permanent server-side mailbox exists.
+- **Client-Side Encrypted Backups**: Users can export/restore local mail history into AES-GCM encrypted `.vzvault` files without exposing passphrases to the server.
+- **User Bio Opt-In Indexing (Meta-Style Controls)**: Every `$USERNAME.imy.li` profile defaults to `none` (`noindex, nofollow, noai, noimageai`). Owners can choose one of four explicit modes enforced at the edge via `robots.txt`, `X-Robots-Tag`, and HTML `<meta name="robots">`:
+  - `none`: Blocked from both search engines and AI crawlers (default).
+  - `search_only`: Indexed by search engines, blocked for AI crawlers (`noai, noimageai`).
+  - `ai_only`: Accessible to AI search/crawler agents, blocked from traditional search engine indexes.
+  - `search_and_ai`: Opted in for both search engines and AI crawlers.
+
+## 3. Official Releases (v1.0.0)
+
+### VZ Mail v1.0.0 (2026-11-25)
+Domains: mail.vz.gay, @imy.li
+Summary: First stable release of local-first private conversational email (@imy.li) with zero permanent server mailbox storage, powered by Cloudflare Email Routing, device-local IndexedDB, and vz.gay Universal SSO.
+
+- **Zero-Retention Pop-and-Purge + Local IndexedDB Storage**: Inbound emails are queued transiently in Cloudflare MAIL_TRANSIT_KV (72h auto-TTL). Once pulled into the user's local IndexedDB and acknowledged, the transit copy is immediately purged from the edge.
+- **Unlimited (+tag & dot .) Aliases + Outbound Email Delivery**: Supports Gmail-style alias canonicalization alongside outbound delivery via Brevo/Cloudflare/Relay with daily rate quotas.
+- **QR Codes for Primary Address & All Aliases (mailto: & vCard)**: Every primary @imy.li address and (+ / .) alias can generate instant QR codes in mailto: mode or vCard 3.0 mode with HD PNG/SVG download.
+- **AES-GCM Encrypted MyVault Backup & Sender Verification (DNS/RDAP/VZ Search)**: Export and restore full local conversation archives into password-encrypted .vzvault files directly in-browser, paired with SPF/DKIM/DMARC/RDAP domain checks and search.vz.gay grounding.
+- **Multi-OS PWA, Dynamic Edge SEO & AI Crawler Discovery (llms.txt)**: Installable across iOS, Android, macOS, Windows, and Linux with dynamic Cloudflare Worker HTMLRewriter OpenGraph/JSON-LD injection plus standards-compliant /llms.txt and /llms-full.txt discovery.
+
+### VZ Links v1.0.0 (2026-11-25)
+Domains: links.vz.gay, *.imy.li, imy.li/s/
+Summary: First stable release of multi-page Link-in-Bio ($USERNAME.imy.li and /$PAGE) paired 1:1 with VZ Mail handles, standalone imy.li/s/ URL shortener, customizable QR studio, and Meta-style opt-in Search/AI indexing controls.
+
+- **Multi-Page Link-in-Bio ($USERNAME.imy.li/$PAGE) & AVIF Avatars**: Single account supports a primary Bio plus unlimited sub-pages with per-page themes, 16 social icons, automatic AVIF/WebP profile photo encoding to Cloudflare R2/D1, and real click counters.
+- **Standalone imy.li/s/ Shortener + Auto-Bootstrapping Cloudflare D1 & KV Fallback**: Fast URL shortener with random codes or custom slugs, uncached HTTP 302 redirects for accurate click counting, and automatic Cloudflare D1 schema bootstrapping with seamless legacy LINKS_KV read fallback.
+- **Custom QR Code Design Studio for Bio, Sub-Pages & Every Link**: Customize QR colors, dot patterns (square/rounded/dots/classy), corner eyes, CTA text frames, and centered Bio avatar/monogram live. Designs persist in D1/KV and appear directly on public Bio pages.
+- **14-Day Recycle Bin, Temporary Deactivation & 3-Day Delete Cooldown**: Deleted links, sub-pages, and shortlinks can be restored for up to 14 days. Permanent Bio erasure hard-deletes D1/KV/R2 records with an anti-abuse 3-day cooldown alongside Zero-Cookie PSL isolation.
+- **Opt-In Search Engine & AI Crawler Indexing Controls for Bio Pages**: Private by default (noindex, noai) inspired by Meta controls: Bio owners choose whether $USERNAME.imy.li allows No Indexing, Search Engines Only, AI Crawlers Only, or Both Search & AI—enforced at the edge via per-subdomain robots.txt, X-Robots-Tag, and HTML meta tags.
+
+## 4. Public Discovery Endpoints
+
+- `/robots.txt` — Host-aware crawler directives (allows AI & search crawlers on main service domains; reflects owner opt-in policy on `*.imy.li`).
+- `/sitemap.xml` — Host-aware XML sitemap covering service homepages, `/changelog`, `/terms`, `/privacy`, and `/llms.txt`.
+- `/llms.txt` — Concise markdown index for LLMs and AI search engines.
+- `/llms-full.txt` — This complete reference document.

@@ -37,6 +37,7 @@ interface DnsVerificationResult {
   spfPolicy: 'strict (-all)' | 'softfail (~all)' | 'neutral/open' | 'missing';
   dmarcRecord: string | null;
   dmarcPolicy: 'reject' | 'quarantine' | 'none' | 'missing';
+  dkimSelectors: string[];
   checkedAt: string | null;
 }
 
@@ -60,14 +61,32 @@ interface VzSearchResultItem {
   age: string;
 }
 
-interface DohJsonResponse {
-  Status?: number;
-  Answer?: Array<{
-    name?: string;
-    type?: number;
-    TTL?: number;
-    data?: string;
-  }>;
+interface VerifyDomainApiResponse {
+  ok?: boolean;
+  domain?: string;
+  registrableDomain?: string;
+  error?: string;
+  dns?: {
+    domain: string;
+    mxRecords: string[];
+    spfRecord: string | null;
+    spfPolicy: DnsVerificationResult['spfPolicy'];
+    dmarcRecord: string | null;
+    dmarcPolicy: DnsVerificationResult['dmarcPolicy'];
+    dkimSelectors?: string[];
+    checkedAt: string;
+    error: string | null;
+  };
+  rdap?: {
+    domain: string;
+    available: boolean;
+    registeredAt: string | null;
+    expiresAt: string | null;
+    ageDays: number | null;
+    registrar: string | null;
+    statuses: string[];
+    unavailableReason: string | null;
+  };
 }
 
 function extractDomainFromInput(raw: string): {
@@ -118,13 +137,6 @@ function extractDomainFromInput(raw: string): {
   return { email, domain, registrableDomain };
 }
 
-function stripTxtQuotes(raw: string): string {
-  return raw
-    .replace(/^"+|"+$/g, '')
-    .replace(/"\s+"/g, '')
-    .trim();
-}
-
 export function MailSearchGroundingDrawer({
   isOpen,
   lang,
@@ -138,7 +150,7 @@ export function MailSearchGroundingDrawer({
   const [senderInput, setSenderInput] = useState(initialSenderEmail);
   const [activeTab, setActiveTab] = useState<'verify' | 'vz_search' | 'local_history'>('verify');
 
-  // DNS-over-HTTPS state
+  // DNS-over-HTTPS state (resolved via same-origin /api/mail/verify-domain)
   const [dnsState, setDnsState] = useState<DnsVerificationResult>({
     domain: '',
     loading: false,
@@ -148,6 +160,7 @@ export function MailSearchGroundingDrawer({
     spfPolicy: 'missing',
     dmarcRecord: null,
     dmarcPolicy: 'missing',
+    dkimSelectors: [],
     checkedAt: null,
   });
 
@@ -223,221 +236,124 @@ export function MailSearchGroundingDrawer({
     };
   }, [allMessages, parsedTarget.domain, parsedTarget.email]);
 
-  // Run Live DNS-over-HTTPS (MX, SPF, DMARC) lookup
-  const runDnsVerification = useCallback(async (domainToVerify: string) => {
-    const cleanDomain = domainToVerify.trim().toLowerCase();
-    if (!cleanDomain || !cleanDomain.includes('.')) return;
-
-    setDnsState({
-      domain: cleanDomain,
-      loading: true,
-      error: null,
-      mxRecords: [],
-      spfRecord: null,
-      spfPolicy: 'missing',
-      dmarcRecord: null,
-      dmarcPolicy: 'missing',
-      checkedAt: null,
-    });
-
-    try {
-      const dohHeaders = { Accept: 'application/dns-json' };
-      const [mxRes, txtRes, dmarcRes] = await Promise.all([
-        fetch(
-          `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(cleanDomain)}&type=MX`,
-          { headers: dohHeaders }
-        ).then((r) => r.json() as Promise<DohJsonResponse>),
-        fetch(
-          `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(cleanDomain)}&type=TXT`,
-          { headers: dohHeaders }
-        ).then((r) => r.json() as Promise<DohJsonResponse>),
-        fetch(
-          `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(`_dmarc.${cleanDomain}`)}&type=TXT`,
-          { headers: dohHeaders }
-        ).then((r) => r.json() as Promise<DohJsonResponse>),
-      ]);
-
-      const mxRecords = (mxRes.Answer || [])
-        .filter((a) => a.type === 15 && typeof a.data === 'string')
-        .map((a) => String(a.data).replace(/\.$/, '').trim())
-        .filter(Boolean);
-
-      const txtStrings = (txtRes.Answer || [])
-        .filter((a) => a.type === 16 && typeof a.data === 'string')
-        .map((a) => stripTxtQuotes(String(a.data)));
-
-      const spfRecord =
-        txtStrings.find((t) => t.toLowerCase().startsWith('v=spf1')) || null;
-
-      let spfPolicy: DnsVerificationResult['spfPolicy'] = 'missing';
-      if (spfRecord) {
-        const lowerSpf = spfRecord.toLowerCase();
-        if (lowerSpf.includes('-all')) {
-          spfPolicy = 'strict (-all)';
-        } else if (lowerSpf.includes('~all')) {
-          spfPolicy = 'softfail (~all)';
-        } else {
-          spfPolicy = 'neutral/open';
-        }
-      }
-
-      const dmarcStrings = (dmarcRes.Answer || [])
-        .filter((a) => a.type === 16 && typeof a.data === 'string')
-        .map((a) => stripTxtQuotes(String(a.data)));
-
-      const dmarcRecord =
-        dmarcStrings.find((t) => t.toLowerCase().startsWith('v=dmarc1')) || null;
-
-      let dmarcPolicy: DnsVerificationResult['dmarcPolicy'] = 'missing';
-      if (dmarcRecord) {
-        const match = dmarcRecord.match(/(?:^|;\s*)p\s*=\s*([a-zA-Z]+)/i);
-        const policyVal = (match?.[1] || '').toLowerCase();
-        if (policyVal === 'reject') dmarcPolicy = 'reject';
-        else if (policyVal === 'quarantine') dmarcPolicy = 'quarantine';
-        else if (policyVal === 'none') dmarcPolicy = 'none';
-      }
+  // Run Live Same-Origin Edge Verification (Cloudflare DoH MX/SPF/DMARC/DKIM + Authoritative RDAP)
+  // Avoids browser CSP connect-src blocks and RDAP CORS/bot challenges.
+  const runDomainVerification = useCallback(
+    async (domainToVerify: string, registrableDomainFallback: string) => {
+      const cleanDomain = domainToVerify.trim().toLowerCase();
+      if (!cleanDomain || !cleanDomain.includes('.')) return;
 
       setDnsState({
         domain: cleanDomain,
-        loading: false,
+        loading: true,
         error: null,
-        mxRecords,
-        spfRecord,
-        spfPolicy,
-        dmarcRecord,
-        dmarcPolicy,
-        checkedAt: new Date().toISOString(),
+        mxRecords: [],
+        spfRecord: null,
+        spfPolicy: 'missing',
+        dmarcRecord: null,
+        dmarcPolicy: 'missing',
+        dkimSelectors: [],
+        checkedAt: null,
       });
-    } catch {
-      setDnsState((prev) => ({
-        ...prev,
-        loading: false,
-        error:
-          lang === 'id'
-            ? 'Gagal memuat record DNS-over-HTTPS.'
-            : 'Failed to query DNS-over-HTTPS records.',
-      }));
-    }
-  }, [lang]);
-
-  // Run Public RDAP Registration & Domain Age lookup
-  const runRdapVerification = useCallback(async (registrableDomain: string) => {
-    const cleanDomain = registrableDomain.trim().toLowerCase();
-    if (!cleanDomain || !cleanDomain.includes('.')) return;
-
-    setRdapState({
-      domain: cleanDomain,
-      loading: true,
-      error: null,
-      registeredAt: null,
-      expiresAt: null,
-      ageDays: null,
-      registrar: null,
-      statuses: [],
-    });
-
-    try {
-      const res = await fetch(
-        `https://rdap.org/domain/${encodeURIComponent(cleanDomain)}`,
-        {
-          headers: { Accept: 'application/rdap+json, application/json' },
-        }
-      );
-
-      if (!res.ok) {
-        setRdapState({
-          domain: cleanDomain,
-          loading: false,
-          error:
-            lang === 'id'
-              ? `Registri TLD untuk ${cleanDomain} tidak menyediakan endpoint RDAP publik terbuka.`
-              : `TLD registry for ${cleanDomain} does not expose an open public RDAP record.`,
-          registeredAt: null,
-          expiresAt: null,
-          ageDays: null,
-          registrar: null,
-          statuses: [],
-        });
-        return;
-      }
-
-      const data = (await res.json()) as {
-        events?: Array<{ eventAction?: string; eventDate?: string }>;
-        status?: string[];
-        entities?: Array<{
-          roles?: string[];
-          vcardArray?: unknown[];
-          handle?: string;
-        }>;
-      };
-
-      const events = Array.isArray(data.events) ? data.events : [];
-      const regEvent = events.find(
-        (e) =>
-          e.eventAction === 'registration' ||
-          e.eventAction === 'registered'
-      );
-      const expEvent = events.find((e) => e.eventAction === 'expiration');
-
-      const registeredAt = regEvent?.eventDate || null;
-      const expiresAt = expEvent?.eventDate || null;
-
-      let ageDays: number | null = null;
-      if (registeredAt) {
-        const parsedMs = Date.parse(registeredAt);
-        if (!Number.isNaN(parsedMs)) {
-          ageDays = Math.max(
-            0,
-            Math.floor((Date.now() - parsedMs) / (1000 * 60 * 60 * 24))
-          );
-        }
-      }
-
-      let registrar: string | null = null;
-      const registrarEntity = (data.entities || []).find(
-        (ent) => Array.isArray(ent.roles) && ent.roles.includes('registrar')
-      );
-      if (registrarEntity) {
-        const vcard = registrarEntity.vcardArray;
-        if (Array.isArray(vcard) && Array.isArray(vcard[1])) {
-          const fnEntry = (vcard[1] as unknown[]).find(
-            (row) => Array.isArray(row) && row[0] === 'fn'
-          ) as [string, unknown, string, string] | undefined;
-          if (fnEntry && typeof fnEntry[3] === 'string') {
-            registrar = fnEntry[3];
-          }
-        }
-        if (!registrar && registrarEntity.handle) {
-          registrar = registrarEntity.handle;
-        }
-      }
 
       setRdapState({
-        domain: cleanDomain,
-        loading: false,
+        domain: registrableDomainFallback || cleanDomain,
+        loading: true,
         error: null,
-        registeredAt,
-        expiresAt,
-        ageDays,
-        registrar,
-        statuses: Array.isArray(data.status) ? data.status.slice(0, 5) : [],
-      });
-    } catch {
-      setRdapState({
-        domain: cleanDomain,
-        loading: false,
-        error:
-          lang === 'id'
-            ? `Data RDAP untuk ${cleanDomain} tidak dapat diakses langsung dari browser.`
-            : `RDAP data for ${cleanDomain} could not be fetched directly.`,
         registeredAt: null,
         expiresAt: null,
         ageDays: null,
         registrar: null,
         statuses: [],
       });
-    }
-  }, [lang]);
+
+      try {
+        const res = await fetch(
+          `/api/mail/verify-domain?domain=${encodeURIComponent(cleanDomain)}`,
+          { cache: 'no-store' }
+        );
+        const data = (await res.json().catch(() => null)) as VerifyDomainApiResponse | null;
+
+        if (!res.ok || !data?.ok || !data.dns) {
+          const errText =
+            data?.error ||
+            (lang === 'id'
+              ? 'Gagal memuat verifikasi DNS & RDAP dari edge.'
+              : 'Failed to load edge DNS & RDAP verification.');
+          setDnsState((prev) => ({
+            ...prev,
+            loading: false,
+            error: errText,
+          }));
+          setRdapState((prev) => ({
+            ...prev,
+            loading: false,
+            error: errText,
+          }));
+          return;
+        }
+
+        setDnsState({
+          domain: data.dns.domain || cleanDomain,
+          loading: false,
+          error: data.dns.error || null,
+          mxRecords: Array.isArray(data.dns.mxRecords) ? data.dns.mxRecords : [],
+          spfRecord: data.dns.spfRecord || null,
+          spfPolicy: data.dns.spfPolicy || 'missing',
+          dmarcRecord: data.dns.dmarcRecord || null,
+          dmarcPolicy: data.dns.dmarcPolicy || 'missing',
+          dkimSelectors: Array.isArray(data.dns.dkimSelectors) ? data.dns.dkimSelectors : [],
+          checkedAt: data.dns.checkedAt || new Date().toISOString(),
+        });
+
+        if (data.rdap && data.rdap.available) {
+          setRdapState({
+            domain: data.rdap.domain || registrableDomainFallback || cleanDomain,
+            loading: false,
+            error: null,
+            registeredAt: data.rdap.registeredAt,
+            expiresAt: data.rdap.expiresAt,
+            ageDays: data.rdap.ageDays,
+            registrar: data.rdap.registrar,
+            statuses: Array.isArray(data.rdap.statuses) ? data.rdap.statuses : [],
+          });
+        } else {
+          setRdapState({
+            domain: data.rdap?.domain || registrableDomainFallback || cleanDomain,
+            loading: false,
+            error:
+              data.rdap?.unavailableReason ||
+              (lang === 'id'
+                ? `Registri TLD untuk ${registrableDomainFallback || cleanDomain} tidak menyediakan endpoint RDAP publik terbuka.`
+                : `TLD registry for ${registrableDomainFallback || cleanDomain} does not expose an open public RDAP record.`),
+            registeredAt: null,
+            expiresAt: null,
+            ageDays: null,
+            registrar: null,
+            statuses: [],
+          });
+        }
+      } catch {
+        setDnsState((prev) => ({
+          ...prev,
+          loading: false,
+          error:
+            lang === 'id'
+              ? 'Gagal menghubungi endpoint verifikasi DNS.'
+              : 'Failed to contact DNS verification endpoint.',
+        }));
+        setRdapState((prev) => ({
+          ...prev,
+          loading: false,
+          error:
+            lang === 'id'
+              ? 'Gagal menghubungi endpoint RDAP.'
+              : 'Failed to contact RDAP endpoint.',
+        }));
+      }
+    },
+    [lang]
+  );
 
   // Run VZ Search (https://search.vz.gay/?q=...) query via backend proxy
   const executeVzSearch = useCallback(
@@ -499,10 +415,7 @@ export function MailSearchGroundingDrawer({
       setSenderInput(nextInput);
       const { domain, registrableDomain } = extractDomainFromInput(nextInput);
       if (domain) {
-        void runDnsVerification(domain);
-      }
-      if (registrableDomain) {
-        void runRdapVerification(registrableDomain);
+        void runDomainVerification(domain, registrableDomain);
       }
       const defaultQuery = initialSenderName
         ? `"${nextInput}" OR "${initialSenderName}"`
@@ -518,8 +431,7 @@ export function MailSearchGroundingDrawer({
     initialSenderEmail,
     initialSenderName,
     initialSubject,
-    runDnsVerification,
-    runRdapVerification,
+    runDomainVerification,
     executeVzSearch,
   ]);
 
@@ -539,10 +451,7 @@ export function MailSearchGroundingDrawer({
     e.preventDefault();
     const { email, domain, registrableDomain } = extractDomainFromInput(senderInput);
     if (domain) {
-      void runDnsVerification(domain);
-    }
-    if (registrableDomain) {
-      void runRdapVerification(registrableDomain);
+      void runDomainVerification(domain, registrableDomain);
     }
     const q = email || domain || senderInput.trim();
     if (q) {
@@ -553,6 +462,16 @@ export function MailSearchGroundingDrawer({
   // Deterministic non-AI security score calculation
   const securityVerdict = (() => {
     if (!parsedTarget.domain || dnsState.loading) return null;
+    if (dnsState.error) {
+      return {
+        tone: 'amber' as const,
+        label:
+          lang === 'id'
+            ? 'Pemeriksaan DNS Sementara Gagal — Coba Verifikasi Ulang'
+            : 'DNS Lookup Temporarily Unavailable — Retry Verification',
+      };
+    }
+
     let points = 0;
     if (dnsState.mxRecords.length > 0) points += 1;
     if (dnsState.spfPolicy === 'strict (-all)') points += 2;
@@ -560,18 +479,19 @@ export function MailSearchGroundingDrawer({
     if (dnsState.dmarcPolicy === 'reject') points += 2;
     else if (dnsState.dmarcPolicy === 'quarantine') points += 1.5;
     else if (dnsState.dmarcPolicy === 'none') points += 0.5;
+    if (dnsState.dkimSelectors.length > 0) points += 1;
 
     if (rdapState.ageDays !== null && rdapState.ageDays < 30) {
       points -= 2;
     }
 
-    if (points >= 4) {
+    if (points >= 3.5) {
       return {
         tone: 'emerald' as const,
         label:
           lang === 'id'
-            ? 'Autentikasi Domain Kuat (SPF + DMARC Aktif)'
-            : 'Strong Domain Authentication (SPF + DMARC Active)',
+            ? 'Autentikasi Domain Kuat (SPF / DKIM / DMARC Terverifikasi)'
+            : 'Strong Domain Authentication (SPF / DKIM / DMARC Verified)',
       };
     }
     if (points >= 2) {
@@ -579,8 +499,8 @@ export function MailSearchGroundingDrawer({
         tone: 'amber' as const,
         label:
           lang === 'id'
-            ? 'Autentikasi Domain Parsial (Periksa DMARC/SPF)'
-            : 'Partial Domain Authentication (Check DMARC/SPF)',
+            ? 'Autentikasi Domain Parsial (Periksa Kebijakan DMARC/MX)'
+            : 'Partial Domain Authentication (Check DMARC/MX Policy)',
       };
     }
     return {
@@ -865,6 +785,37 @@ export function MailSearchGroundingDrawer({
                           (lang === 'id'
                             ? 'Tidak ditemukan record _dmarc (rentan spoofing).'
                             : 'No _dmarc record published.')}
+                      </div>
+                    </div>
+
+                    {/*DKIM*/}
+                    <div className="p-3 rounded-lg bg-white dark:bg-[#0E1117] border border-slate-200 dark:border-[#232732] space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-slate-800 dark:text-slate-200">
+                          DKIM (DomainKeys Identified Mail)
+                        </span>
+                        <span
+                          className={`font-mono text-[11px] font-semibold ${
+                            dnsState.dkimSelectors.length > 0
+                              ? 'text-emerald-600 dark:text-emerald-400'
+                              : 'text-slate-500 dark:text-slate-400'
+                          }`}
+                        >
+                          {dnsState.dkimSelectors.length > 0
+                            ? `${dnsState.dkimSelectors.length} selector`
+                            : lang === 'id'
+                              ? 'selector kustom'
+                              : 'custom selector'}
+                        </span>
+                      </div>
+                      <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 break-all">
+                        {dnsState.dkimSelectors.length > 0
+                          ? dnsState.dkimSelectors
+                              .map((sel) => `${sel}._domainkey.${parsedTarget.domain}`)
+                              .join(' · ')
+                          : lang === 'id'
+                            ? 'Tidak ditemukan pada selector umum (brevo1/google/default/selector1).'
+                            : 'Not found on common selectors (brevo1/google/default/selector1).'}
                       </div>
                     </div>
 

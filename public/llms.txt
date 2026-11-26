@@ -1,0 +1,22 @@
+# VZ Mail & VZ Links
+
+> Privacy-first local email (@imy.li) and paired Link-in-Bio (*.imy.li) + URL Shortener (imy.li/s/) suite built by PT Galeri Langkah Bahagia Yuwana (galbay) (https://vz.gay) and running on Cloudflare Workers.
+
+## Services
+
+- [VZ Mail (mail.vz.gay)](https://mail.vz.gay/): Zero-retention local-first email service for @imy.li handles. Inbound mail uses Cloudflare Email Routing with 72-hour ephemeral KV transit (Pop-and-Purge), local IndexedDB storage, unlimited +tag and dot (.) aliases, mailto:/vCard QR codes, DNS/RDAP sender verification, and password-encrypted MyVault (.vzvault) backups.
+- [VZ Links (links.vz.gay)](https://links.vz.gay/): Multi-page Link-in-Bio Studio paired 1:1 with VZ Mail handles ($USERNAME.imy.li and $USERNAME.imy.li/$PAGE). Includes per-page themes, AVIF/WebP profile photos, custom QR Code design studio (colors, dot/corner styles, text frames, centered Bio avatar), 14-day Recycle Bin, and Meta-style opt-in Search/AI indexing privacy controls.
+- [imy.li/s/ URL Shortener](https://imy.li/): Standalone URL shortener (imy.li/s/$CODE) usable with or without login, supporting custom slugs, uncached HTTP 302 click counting, and instant QR Code PNG/SVG downloads.
+
+## Releases & Documentation
+
+- [Changelog Releases v1.0.0](https://mail.vz.gay/changelog): Official v1.0.0 release notes for both VZ Mail and VZ Links (2026-11-25).
+- [Full AI Reference (llms-full.txt)](https://mail.vz.gay/llms-full.txt): Complete architecture, domain mapping, privacy guarantees, and v1.0.0 feature reference for LLMs and AI search engines.
+- [Terms of Service](https://mail.vz.gay/terms): Official terms governing VZ Mail, VZ Links, and *.imy.li subdomains.
+- [Privacy Policy](https://mail.vz.gay/privacy): Zero-retention data handling and user opt-in indexing controls.
+
+## User Bio Subdomain Privacy Policy (*.imy.li)
+
+- Individual user Bio pages on https://$USERNAME.imy.li/ are private to crawlers by default (noindex, nofollow, noai, noimageai).
+- Bio owners can explicitly opt in to Search Engine indexing, AI Crawler access, or both via VZ Links Studio -> Settings.
+- Always respect each subdomain's individual https://$USERNAME.imy.li/robots.txt and X-Robots-Tag HTTP response headers.

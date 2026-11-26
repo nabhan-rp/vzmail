@@ -3,16 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>VZ Mail (mail.vz.gay) &amp; VZ Links — Email Lokal Privat @imy.li &amp; Link-in-Bio</title>
+    <title>VZ Mail — Email Lokal Privat @imy.li Tanpa Simpan Server</title>
     <meta
       name="description"
-      content="Layanan email privat lokal tanpa penyimpanan server (mail.vz.gay) berpasangan 1:1 dengan Link-in-Bio ($USERNAME.imy.li) dan Shortlink (imy.li/s/) dalam 1 Cloudflare Worker."
+      content="Email percakapan lokal privat (@imy.li) tanpa penyimpanan server permanen, ditenagai Cloudflare Email Routing, IndexedDB, alias +/., QR vCard, dan VZ Links."
     />
     <meta name="robots" content="index, follow, max-image-preview:large" />
     <meta name="author" content="PT Galeri Langkah Bahagia Yuwana (galbay)" />
     <meta name="theme-color" content="#FAFAFA" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0B0D11" media="(prefers-color-scheme: dark)" />
     <link rel="canonical" href="https://mail.vz.gay/" />
+    <link rel="alternate" type="text/markdown" href="/llms.txt" title="LLMs Information" />
     <link rel="icon" id="app-favicon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="manifest" id="app-manifest" href="/manifest.webmanifest" />
     <meta name="mobile-web-app-capable" content="yes" />
@@ -24,14 +25,14 @@
     <link rel="apple-touch-icon" id="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon-mail.png" />
     <link rel="mask-icon" id="app-mask-icon" href="/icons/mail.svg" color="#3B82F6" />
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="VZ Mail &amp; VZ Links" />
+    <meta property="og:site_name" content="VZ Mail" />
     <meta property="og:url" content="https://mail.vz.gay/" />
     <meta property="og:locale" content="id_ID" />
     <meta property="og:locale:alternate" content="en_US" />
-    <meta property="og:title" content="VZ Mail (mail.vz.gay) &amp; VZ Links — Email Lokal Privat @imy.li" />
+    <meta property="og:title" content="VZ Mail — Email Lokal Privat @imy.li Tanpa Simpan Server" />
     <meta
       property="og:description"
-      content="Email percakapan berbasis IndexedDB perangkat lokal dengan Cloudflare Email Routing, alias + dan ., serta halaman bio $USERNAME.imy.li dan shortlink imy.li/s/."
+      content="Email percakapan lokal privat (@imy.li) tanpa penyimpanan server permanen, ditenagai Cloudflare Email Routing, IndexedDB, alias +/., QR vCard, dan VZ Links."
     />
     <meta property="og:image" content="https://mail.vz.gay/og-banner.jpg" />
     <meta
@@ -39,35 +40,62 @@
       content="VZ Mail (mail.vz.gay) &amp; VZ Links (links.vz.gay) oleh PT Galeri Langkah Bahagia Yuwana (galbay)"
     />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="VZ Mail (mail.vz.gay) &amp; VZ Links — @imy.li" />
+    <meta name="twitter:title" content="VZ Mail — Email Lokal Privat @imy.li" />
     <meta
       name="twitter:description"
-      content="Email privat tanpa penyimpanan server (Zero Retention) + Link-in-Bio $USERNAME.imy.li + Shortlink imy.li/s/ dalam 1 Cloudflare Worker."
+      content="Email lokal privat tanpa simpan server (@imy.li) berpasangan 1:1 dengan Link-in-Bio $USERNAME.imy.li dan Shortlink imy.li/s/."
     />
     <meta name="twitter:image" content="https://mail.vz.gay/og-banner.jpg" />
-    <script type="application/ld+json">
+    <script id="vz-jsonld" type="application/ld+json">
       {
         "@context": "https://schema.org",
         "@graph": [
           {
-            "@type": "WebApplication",
+            "@type": "Organization",
+            "@id": "https://vz.gay/#organization",
+            "name": "PT Galeri Langkah Bahagia Yuwana (galbay)",
+            "url": "https://vz.gay",
+            "sameAs": [
+              "https://mail.vz.gay",
+              "https://links.vz.gay",
+              "https://imy.li"
+            ]
+          },
+          {
+            "@type": "SoftwareApplication",
             "@id": "https://mail.vz.gay/#app",
-            "name": "VZ Mail & VZ Links",
+            "name": "VZ Mail",
+            "alternateName": "mail.vz.gay",
             "url": "https://mail.vz.gay/",
             "applicationCategory": "CommunicationApplication",
-            "operatingSystem": "All",
+            "operatingSystem": "Web, iOS, Android, macOS, Windows, Linux",
+            "softwareVersion": "1.0.0",
             "inLanguage": ["id", "en"],
-            "description": "Layanan email privat lokal tanpa penyimpanan server permanen (@imy.li) yang terintegrasi 1:1 dengan Link-in-Bio ($USERNAME.imy.li) dan Shortlink (imy.li/s/).",
+            "description": "Layanan email privat lokal tanpa penyimpanan kotak surat permanen (@imy.li) berbasis Cloudflare Email Routing, Pop-and-Purge KV, IndexedDB, alias +/., QR vCard, dan MyVault terenkripsi.",
             "offers": {
               "@type": "Offer",
               "price": "0",
               "priceCurrency": "IDR"
             },
-            "publisher": {
-              "@type": "Organization",
-              "name": "PT Galeri Langkah Bahagia Yuwana (galbay)",
-              "url": "https://vz.gay"
-            }
+            "publisher": { "@id": "https://vz.gay/#organization" }
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://links.vz.gay/#app",
+            "name": "VZ Links",
+            "alternateName": "links.vz.gay & *.imy.li",
+            "url": "https://links.vz.gay/",
+            "applicationCategory": "UtilitiesApplication",
+            "operatingSystem": "Web, iOS, Android, macOS, Windows, Linux",
+            "softwareVersion": "1.0.0",
+            "inLanguage": ["id", "en"],
+            "description": "Platform Link-in-Bio multi-halaman ($USERNAME.imy.li & /$PAGE) berpasangan 1:1 dengan VZ Mail, pemendek URL imy.li/s/, Studio QR Code kustom, dan kontrol opt-in SEO/AI.",
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "IDR"
+            },
+            "publisher": { "@id": "https://vz.gay/#organization" }
           }
         ]
       }

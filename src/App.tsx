@@ -12,8 +12,14 @@ import { useLanguage } from './hooks/useLanguage';
 import { usePwaInstall } from './hooks/usePwaInstall';
 import { useSsoSession } from './hooks/useSsoSession';
 import { useTheme } from './hooks/useTheme';
+import { applyClientSeo } from './utils/applyClientSeo';
+import {
+  isImyExternalHost,
+  isStandaloneBioSubdomainHost,
+} from './utils/auth0Config';
 import { sanitizePageSlug } from './utils/linksModel';
 import { sanitizeHandle } from './utils/mailIdentity';
+import { buildServiceSeoMeta } from './utils/seoConfig';
 
 // Lazy-load heavy workspaces & modals to keep initial landing page JS minimal
 const VzMailWorkspace = lazy(() =>
@@ -51,6 +57,11 @@ const LegalDocumentView = lazy(() =>
     default: m.LegalDocumentView,
   }))
 );
+const ChangelogReleasesView = lazy(() =>
+  import('./components/ChangelogReleasesView').then((m) => ({
+    default: m.ChangelogReleasesView,
+  }))
+);
 const VaultBackupModal = lazy(() =>
   import('./components/VaultBackupModal').then((m) => ({
     default: m.VaultBackupModal,
@@ -79,6 +90,9 @@ function detectInitialHostView(): ActiveHostView {
   const hostMode = params.get('host_mode');
   const pathname = window.location.pathname.toLowerCase();
 
+  if (pathname === '/changelog' || pathname.startsWith('/changelog/')) {
+    return 'changelog';
+  }
   if (pathname === '/terms' || pathname.startsWith('/terms/')) {
     return 'terms';
   }
@@ -180,6 +194,12 @@ export default function App() {
     detectInitialHostView()
   );
 
+  // True when visiting a real public Bio subdomain (https://$USERNAME.imy.li)
+  const isStandaloneBioHost = useMemo(
+    () => isStandaloneBioSubdomainHost(),
+    []
+  );
+
   // Guard: If a visitor or non-admin account accesses ?host_mode=worker or worker_console,
   // automatically redirect them to the main service home page and clean the URL query param.
   useEffect(() => {
@@ -226,22 +246,36 @@ export default function App() {
         window.location.href = 'https://mail.vz.gay';
         return;
       }
+      if (isImyExternalHost()) {
+        if (nextHost === 'links.vz.gay') {
+          window.location.href = 'https://links.vz.gay';
+          return;
+        }
+        if (nextHost === 'mail.vz.gay') {
+          window.location.href = 'https://mail.vz.gay';
+          return;
+        }
+      }
 
-      if (nextHost === 'terms' && window.location.pathname !== '/terms') {
+      if (nextHost === 'changelog' && window.location.pathname !== '/changelog') {
+        window.history.pushState({}, '', '/changelog');
+      } else if (nextHost === 'terms' && window.location.pathname !== '/terms') {
         window.history.pushState({}, '', '/terms');
       } else if (nextHost === 'privacy' && window.location.pathname !== '/privacy') {
         window.history.pushState({}, '', '/privacy');
       } else if (
+        nextHost !== 'changelog' &&
         nextHost !== 'terms' &&
         nextHost !== 'privacy' &&
-        (window.location.pathname === '/terms' ||
+        (window.location.pathname === '/changelog' ||
+          window.location.pathname === '/terms' ||
           window.location.pathname === '/privacy')
       ) {
         window.history.pushState({}, '', '/');
       }
     }
     setActiveHost(nextHost);
-    if (nextHost === 'terms' || nextHost === 'privacy') {
+    if (nextHost === 'changelog' || nextHost === 'terms' || nextHost === 'privacy') {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
@@ -275,43 +309,41 @@ export default function App() {
   const [composeCounter, setComposeCounter] = useState(0);
   const [mailRefreshCounter, setMailRefreshCounter] = useState(0);
 
-  // Keep document title & tab favicon synchronized with the active domain view
+  // Keep document SEO tags (title, meta, OpenGraph, Twitter, canonical, JSON-LD) & favicon synced
   useEffect(() => {
     const user =
       activeHost === 'bio_public' && urlBioUser
         ? urlBioUser
         : session.isAuthenticated
           ? session.username
-          : 'username';
-    const domain = session.primaryDomain || 'imy.li';
+          : '';
     const isLinksView =
       activeHost === 'links.vz.gay' ||
       activeHost === 'shortlinks' ||
       activeHost === 'bio_public';
 
-    if (activeHost === 'terms') {
-      document.title =
-        lang === 'id'
-          ? 'Syarat & Ketentuan (Terms of Service) — VZ Mail & VZ Links'
-          : 'Terms of Service — VZ Mail & VZ Links';
-    } else if (activeHost === 'privacy') {
-      document.title =
-        lang === 'id'
-          ? 'Kebijakan Privasi (Privacy Policy) — VZ Mail & VZ Links'
-          : 'Privacy Policy — VZ Mail & VZ Links';
-    } else if (activeHost === 'links.vz.gay') {
-      document.title = `VZ Links (links.vz.gay) — ${user}.${domain} & ${domain}/s/`;
-    } else if (activeHost === 'bio_public') {
-      document.title = bioPageSlug
-        ? `${user}.${domain}/${bioPageSlug} — VZ Links`
-        : `${user}.${domain} — VZ Links`;
-    } else if (activeHost === 'shortlinks') {
-      document.title = `${domain}/s/ — Pemendek URL (VZ Links)`;
-    } else if (activeHost === 'worker_console' && isAdminOwner) {
-      document.title = `Worker & Domain Registry (@${domain}) — VZ Mail & Links`;
-    } else {
-      document.title = `VZ Mail (mail.vz.gay) — Email Lokal Privat @${domain}`;
-    }
+    const hostname =
+      typeof window !== 'undefined' ? window.location.hostname : 'mail.vz.gay';
+    const pathname =
+      typeof window !== 'undefined' ? window.location.pathname : '/';
+
+    const routeKind =
+      activeHost === 'worker_console' && !isAdminOwner
+        ? detectDefaultServiceView()
+        : activeHost;
+
+    // For bio_public, ImyBioPublicView refines SEO once profile workspace loads;
+    // apply initial fallback metadata immediately so title/canonical never stay stale.
+    applyClientSeo(
+      buildServiceSeoMeta({
+        routeKind,
+        hostname,
+        pathname,
+        lang,
+        bioUsername: user || null,
+        bioPageSlug,
+      })
+    );
 
     const svgHref = isLinksView ? '/icons/links.svg' : '/icons/mail.svg';
     const maskColor = isLinksView ? '#8B5CF6' : '#3B82F6';
@@ -340,50 +372,57 @@ export default function App() {
     activeHost,
     bioPageSlug,
     isAdminOwner,
+    lang,
     urlBioUser,
     session.isAuthenticated,
     session.username,
     session.primaryDomain,
   ]);
 
+  const hideGlobalChrome = isStandaloneBioHost && activeHost === 'bio_public';
+
   return (
     <ErrorBoundary>
       <div className="min-h-screen flex flex-col bg-[#FAFAFA] text-slate-900 dark:bg-[#0B0D11] dark:text-slate-100">
-        <MailLinksTopBar
-          lang={lang}
-          onChangeLang={setLang}
-          theme={theme}
-          onChangeTheme={setTheme}
-          activeHost={activeHost}
-          onSelectHost={handleSelectHost}
-          session={session}
-          isAdminOwner={isAdminOwner}
-          isAuthLoading={authLoading}
-          onLoginWithAuth0={loginWithAuth0}
-          onSignupWithAuth0={signupWithAuth0}
-          onSignOut={signOut}
-          onActivateMail={() => activateMail(true)}
-          onDeactivateMail={() => setConfirmDeactivateService('mail')}
-          onActivateLinks={() => activateLinks(true)}
-          onDeactivateLinks={() => setConfirmDeactivateService('links')}
-          onOpenCompose={() => setComposeCounter((c) => c + 1)}
-          onOpenInstall={() => setPwaOpen(true)}
-          isInstalled={isInstalled}
-          isIos={isIos}
-        />
+        {!hideGlobalChrome && (
+          <MailLinksTopBar
+            lang={lang}
+            onChangeLang={setLang}
+            theme={theme}
+            onChangeTheme={setTheme}
+            activeHost={activeHost}
+            onSelectHost={handleSelectHost}
+            session={session}
+            isAdminOwner={isAdminOwner}
+            isAuthLoading={authLoading}
+            onLoginWithAuth0={loginWithAuth0}
+            onSignupWithAuth0={signupWithAuth0}
+            onSignOut={signOut}
+            onActivateMail={() => activateMail(true)}
+            onDeactivateMail={() => setConfirmDeactivateService('mail')}
+            onActivateLinks={() => activateLinks(true)}
+            onDeactivateLinks={() => setConfirmDeactivateService('links')}
+            onOpenCompose={() => setComposeCounter((c) => c + 1)}
+            onOpenInstall={() => setPwaOpen(true)}
+            isInstalled={isInstalled}
+            isIos={isIos}
+          />
+        )}
 
-        <CrossServiceOfferBar
-          lang={lang}
-          username={session.username || 'fadhil'}
-          domain={session.primaryDomain || 'imy.li'}
-          crossOffer={crossOffer}
-          onAcceptLinksOffer={() => activateLinks(false)}
-          onAcceptMailOffer={() => activateMail(false)}
-          onDismiss={dismissCrossOffer}
-          onSelectHost={handleSelectHost}
-        />
+        {!hideGlobalChrome && (
+          <CrossServiceOfferBar
+            lang={lang}
+            username={session.username || 'fadhil'}
+            domain={session.primaryDomain || 'imy.li'}
+            crossOffer={crossOffer}
+            onAcceptLinksOffer={() => activateLinks(false)}
+            onAcceptMailOffer={() => activateMail(false)}
+            onDismiss={dismissCrossOffer}
+            onSelectHost={handleSelectHost}
+          />
+        )}
 
-        {authError && (
+        {!hideGlobalChrome && authError && (
           <div className="bg-rose-50 dark:bg-rose-950/40 border-b border-rose-200 dark:border-rose-900/60 px-4 sm:px-6 py-2.5 text-xs text-rose-700 dark:text-rose-300 flex items-center justify-between gap-4">
             <span className="font-mono">
               Auth0: {authError.message}
@@ -474,6 +513,7 @@ export default function App() {
                 session={session}
                 overrideUser={urlBioUser}
                 pageSlug={bioPageSlug}
+                standaloneMode={isStandaloneBioHost}
                 onChangePageSlug={handleChangeBioPageSlug}
                 onSelectHost={handleSelectHost}
                 onLoginWithAuth0={loginWithAuth0}
@@ -484,6 +524,14 @@ export default function App() {
               <WorkerDomainConsole
                 lang={lang}
                 username={session.username || 'fadhil'}
+              />
+            )}
+
+            {activeHost === 'changelog' && (
+              <ChangelogReleasesView
+                lang={lang}
+                onSelectHost={handleSelectHost}
+                onBack={() => handleSelectHost(detectDefaultServiceView())}
               />
             )}
 
@@ -498,76 +546,88 @@ export default function App() {
           </Suspense>
         </main>
 
-        <footer className="border-t border-slate-200 dark:border-[#232732] bg-white dark:bg-[#0D1016] pb-16 md:pb-0">
-          <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-5 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
-            <div>
-              <span>© 2026 PT Galeri Langkah Bahagia Yuwana (galbay)</span>
-              <span aria-hidden="true"> · </span>
-              <span className="font-mono">
-                mail.vz.gay + links.vz.gay + *.imy.li
-              </span>
+        {!hideGlobalChrome && (
+          <footer className="border-t border-slate-200 dark:border-[#232732] bg-white dark:bg-[#0D1016] pb-16 md:pb-0">
+            <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-5 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
+              <div>
+                <span>© 2026 PT Galeri Langkah Bahagia Yuwana (galbay)</span>
+                <span aria-hidden="true"> · </span>
+                <span className="font-mono">
+                  mail.vz.gay + links.vz.gay + *.imy.li
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-4">
+                <a
+                  href="/changelog"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    handleSelectHost('changelog');
+                  }}
+                  className="hover:text-slate-900 dark:hover:text-white transition-colors font-medium"
+                >
+                  {lang === 'id' ? 'Changelog v1.0.0' : 'Changelog v1.0.0'}
+                </a>
+                <a
+                  href="/terms"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    handleSelectHost('terms');
+                  }}
+                  className="hover:text-slate-900 dark:hover:text-white transition-colors"
+                >
+                  {lang === 'id' ? 'Syarat & Ketentuan' : 'Terms of Service'}
+                </a>
+                <a
+                  href="/privacy"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    handleSelectHost('privacy');
+                  }}
+                  className="hover:text-slate-900 dark:hover:text-white transition-colors"
+                >
+                  {lang === 'id' ? 'Kebijakan Privasi' : 'Privacy Policy'}
+                </a>
+                <a
+                  href="https://vz.gay"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-slate-900 dark:hover:text-white transition-colors"
+                >
+                  vz.gay Portal
+                </a>
+                <a
+                  href="https://myaccount.vz.gay"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-slate-900 dark:hover:text-white transition-colors"
+                >
+                  myaccount.vz.gay
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setPwaOpen(true)}
+                  className="hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
+                >
+                  {lang === 'id' ? 'Pasang App (PWA)' : 'Install App (PWA)'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLang(lang === 'id' ? 'en' : 'id')}
+                  className="font-mono hover:text-slate-900 dark:hover:text-white cursor-pointer"
+                >
+                  {lang === 'id' ? 'Switch to EN' : 'Ganti ke ID'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                  className="hover:text-slate-900 dark:hover:text-white cursor-pointer"
+                >
+                  {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+                </button>
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-4">
-              <a
-                href="/terms"
-                onClick={(e) => {
-                  e.preventDefault();
-                  handleSelectHost('terms');
-                }}
-                className="hover:text-slate-900 dark:hover:text-white transition-colors"
-              >
-                {lang === 'id' ? 'Syarat & Ketentuan' : 'Terms of Service'}
-              </a>
-              <a
-                href="/privacy"
-                onClick={(e) => {
-                  e.preventDefault();
-                  handleSelectHost('privacy');
-                }}
-                className="hover:text-slate-900 dark:hover:text-white transition-colors"
-              >
-                {lang === 'id' ? 'Kebijakan Privasi' : 'Privacy Policy'}
-              </a>
-              <a
-                href="https://vz.gay"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-slate-900 dark:hover:text-white transition-colors"
-              >
-                vz.gay Portal
-              </a>
-              <a
-                href="https://myaccount.vz.gay"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-slate-900 dark:hover:text-white transition-colors"
-              >
-                myaccount.vz.gay
-              </a>
-              <button
-                type="button"
-                onClick={() => setPwaOpen(true)}
-                className="hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
-              >
-                {lang === 'id' ? 'Pasang App (PWA)' : 'Install App (PWA)'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setLang(lang === 'id' ? 'en' : 'id')}
-                className="font-mono hover:text-slate-900 dark:hover:text-white cursor-pointer"
-              >
-                {lang === 'id' ? 'Switch to EN' : 'Ganti ke ID'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                className="hover:text-slate-900 dark:hover:text-white cursor-pointer"
-              >
-                {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-              </button>
-            </div>
-          </div>
-        </footer>
+          </footer>
+        )}
 
         <ConfirmActionModal
           isOpen={confirmDeactivateService !== null}
@@ -605,11 +665,13 @@ export default function App() {
           onCancel={() => setConfirmDeactivateService(null)}
         />
 
-        <MobileBottomNav
-          lang={lang}
-          activeHost={activeHost}
-          onSelectHost={handleSelectHost}
-        />
+        {!hideGlobalChrome && (
+          <MobileBottomNav
+            lang={lang}
+            activeHost={activeHost}
+            onSelectHost={handleSelectHost}
+          />
+        )}
 
         {vaultOpen && (
           <Suspense fallback={null}>

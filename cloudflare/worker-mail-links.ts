@@ -51,12 +51,14 @@ import {
   isValidBioThemeId,
   isValidButtonStyle,
   sanitizeBioAvatarUrl,
+  sanitizeBioIndexingMode,
   sanitizeBioQrDesign,
   sanitizeBioWorkspaceInput,
   sanitizePageSlug,
   sanitizeShortlinkSlugInput,
   sanitizeSocialsMap,
   type BioDeleteCooldownInfo,
+  type BioIndexingMode,
   type BioLinkItem,
   type BioPageRecord,
   type BioQrDesignConfig,
@@ -66,6 +68,16 @@ import {
   type ShortlinkRecord,
 } from '../src/utils/linksModel.ts';
 import { checkReservedUsername } from '../src/utils/reservedUsernames.ts';
+import { verifyDomainAtEdge } from '../src/utils/domainVerify.ts';
+import {
+  buildHostRobotsTxt,
+  buildHostSitemapXml,
+  buildLlmsFullTxt,
+  buildLlmsTxt,
+  buildServiceSeoMeta,
+  type SeoMetadataPayload,
+  type SeoRouteKind,
+} from '../src/utils/seoConfig.ts';
 
 export interface CloudflareSendEmailMessage {
   from: string | { email: string; name?: string };
@@ -430,6 +442,121 @@ function applyHtmlSecurityHeaders(
   });
 }
 
+function resolveSeoRouteKind(host: string, url: URL): SeoRouteKind {
+  const pathname = url.pathname.toLowerCase();
+  const hostMode = (url.searchParams.get('host_mode') || '').toLowerCase();
+
+  if (pathname === '/changelog' || pathname.startsWith('/changelog/')) {
+    return 'changelog';
+  }
+  if (pathname === '/terms' || pathname.startsWith('/terms/')) {
+    return 'terms';
+  }
+  if (pathname === '/privacy' || pathname.startsWith('/privacy/')) {
+    return 'privacy';
+  }
+  if (
+    hostMode === 'bio' ||
+    (host.endsWith('.imy.li') && host !== 'www.imy.li' && host !== 'mail.imy.li')
+  ) {
+    return 'bio_public';
+  }
+  if (
+    host === 'imy.li' ||
+    host === 'www.imy.li' ||
+    pathname === '/s' ||
+    pathname.startsWith('/s/') ||
+    hostMode === 'shortlinks'
+  ) {
+    return 'shortlinks';
+  }
+  if (host === 'links.vz.gay' || hostMode === 'links' || pathname.startsWith('/links')) {
+    return 'links.vz.gay';
+  }
+  if (hostMode === 'worker') {
+    return 'worker_console';
+  }
+  return 'mail.vz.gay';
+}
+
+/**
+ * Rewrites HTML <head> SEO tags, OpenGraph/Twitter tags, canonical URL, and Schema.org JSON-LD
+ * directly at the Cloudflare edge using HTMLRewriter, and attaches X-Robots-Tag.
+ */
+function rewriteHtmlSeo(response: Response, meta: SeoMetadataPayload): Response {
+  const contentType = response.headers.get('Content-Type') || '';
+  if (!contentType.includes('text/html')) {
+    return response;
+  }
+
+  const headers = new Headers(response.headers);
+  headers.set('X-Robots-Tag', meta.xRobotsTag);
+
+  const safeJsonLd = JSON.stringify(meta.jsonLd).replace(/</g, '\\u003c');
+
+  const metaNameMap: Record<string, string> = {
+    description: meta.description,
+    robots: meta.robotsMeta,
+    'twitter:title': meta.twitterTitle,
+    'twitter:description': meta.twitterDescription,
+    'twitter:image': meta.ogImage,
+  };
+
+  const metaPropMap: Record<string, string> = {
+    'og:type': meta.ogType,
+    'og:site_name': meta.ogSiteName,
+    'og:url': meta.canonicalUrl,
+    'og:title': meta.title,
+    'og:description': meta.description,
+    'og:image': meta.ogImage,
+    'og:image:alt': meta.ogImageAlt,
+  };
+
+  const withHeaders = new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+
+  if (typeof HTMLRewriter === 'undefined') {
+    return withHeaders;
+  }
+
+  return new HTMLRewriter()
+    .on('title', {
+      element(el) {
+        el.setInnerContent(meta.title);
+      },
+    })
+    .on('link[rel="canonical"]', {
+      element(el) {
+        el.setAttribute('href', meta.canonicalUrl);
+      },
+    })
+    .on('meta[name]', {
+      element(el) {
+        const name = (el.getAttribute('name') || '').toLowerCase();
+        if (name in metaNameMap) {
+          el.setAttribute('content', metaNameMap[name]);
+        }
+      },
+    })
+    .on('meta[property]', {
+      element(el) {
+        const prop = (el.getAttribute('property') || '').toLowerCase();
+        if (prop in metaPropMap) {
+          el.setAttribute('content', metaPropMap[prop]);
+        }
+      },
+    })
+    .on('script#vz-jsonld', {
+      element(el) {
+        el.setInnerContent(safeJsonLd, { html: true });
+      },
+    })
+    .transform(withHeaders);
+}
+
 /**
  * Constant-time token verification using SHA-256 + crypto.subtle.timingSafeEqual
  * (avoids length leakage and timing side-channels).
@@ -676,6 +803,7 @@ const D1_BOOTSTRAP_STATEMENTS: readonly string[] = [
     bio TEXT NOT NULL DEFAULT '',
     avatar_url TEXT NOT NULL DEFAULT '',
     socials_json TEXT NOT NULL DEFAULT '{}',
+    indexing_mode TEXT NOT NULL DEFAULT 'none',
     is_deactivated INTEGER NOT NULL DEFAULT 0,
     deactivated_at TEXT,
     updated_at TEXT NOT NULL
@@ -776,6 +904,11 @@ async function ensureLinksD1Schema(env: WorkerEnv): Promise<boolean> {
         const pageCols = new Set((pageColsRes.results || []).map((c) => c.name));
 
         const alterStmts: D1PreparedStatement[] = [];
+        if (!profileCols.has('indexing_mode')) {
+          alterStmts.push(
+            db.prepare("ALTER TABLE bio_profiles ADD COLUMN indexing_mode TEXT NOT NULL DEFAULT 'none'")
+          );
+        }
         if (!profileCols.has('is_deactivated')) {
           alterStmts.push(
             db.prepare('ALTER TABLE bio_profiles ADD COLUMN is_deactivated INTEGER NOT NULL DEFAULT 0')
@@ -1071,7 +1204,7 @@ async function getBioWorkspaceFromStorage(
   if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
     try {
       const profile = await env.LINKS_DB.prepare(
-        'SELECT username, display_name, headline, bio, avatar_url, socials_json, is_deactivated, deactivated_at, updated_at FROM bio_profiles WHERE username = ? LIMIT 1'
+        'SELECT username, display_name, headline, bio, avatar_url, socials_json, indexing_mode, is_deactivated, deactivated_at, updated_at FROM bio_profiles WHERE username = ? LIMIT 1'
       )
         .bind(username)
         .first<{
@@ -1081,6 +1214,7 @@ async function getBioWorkspaceFromStorage(
           bio: string;
           avatar_url: string;
           socials_json: string;
+          indexing_mode?: string | null;
           is_deactivated?: number;
           deactivated_at?: string | null;
           updated_at: string;
@@ -1183,6 +1317,7 @@ async function getBioWorkspaceFromStorage(
           avatarUrl: sanitizeBioAvatarUrl(profile.avatar_url || ''),
           socials: sanitizeSocialsMap(parsedSocials),
           pages,
+          indexingMode: sanitizeBioIndexingMode(profile.indexing_mode),
           isDeactivated: Boolean(profile.is_deactivated),
           deactivatedAt: profile.deactivated_at || null,
           updatedAt: profile.updated_at,
@@ -1200,6 +1335,7 @@ async function getBioWorkspaceFromStorage(
       return {
         ...raw,
         username,
+        indexingMode: sanitizeBioIndexingMode(raw.indexingMode),
         isDeactivated: raw.isDeactivated === true,
         deactivatedAt: raw.isDeactivated ? raw.deactivatedAt || null : null,
         configured: true,
@@ -1231,7 +1367,7 @@ async function saveBioWorkspaceToStorage(
     try {
       const stmts: D1PreparedStatement[] = [
         env.LINKS_DB.prepare(
-          'INSERT INTO bio_profiles (username, display_name, headline, bio, avatar_url, socials_json, is_deactivated, deactivated_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(username) DO UPDATE SET display_name = excluded.display_name, headline = excluded.headline, bio = excluded.bio, avatar_url = excluded.avatar_url, socials_json = excluded.socials_json, is_deactivated = excluded.is_deactivated, deactivated_at = excluded.deactivated_at, updated_at = excluded.updated_at'
+          'INSERT INTO bio_profiles (username, display_name, headline, bio, avatar_url, socials_json, indexing_mode, is_deactivated, deactivated_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(username) DO UPDATE SET display_name = excluded.display_name, headline = excluded.headline, bio = excluded.bio, avatar_url = excluded.avatar_url, socials_json = excluded.socials_json, indexing_mode = excluded.indexing_mode, is_deactivated = excluded.is_deactivated, deactivated_at = excluded.deactivated_at, updated_at = excluded.updated_at'
         ).bind(
           sanitized.username,
           sanitized.displayName,
@@ -1239,6 +1375,7 @@ async function saveBioWorkspaceToStorage(
           sanitized.bio,
           sanitized.avatarUrl,
           JSON.stringify(sanitized.socials),
+          sanitizeBioIndexingMode(sanitized.indexingMode),
           sanitized.isDeactivated ? 1 : 0,
           sanitized.deactivatedAt || null,
           sanitized.updatedAt
@@ -3006,6 +3143,23 @@ async function handleApiRequest(
     }
   }
 
+  // 9.5 Same-Origin Domain Verification Proxy (`GET /api/mail/verify-domain?domain=...`)
+  //     Executes Cloudflare DoH (MX, SPF, DMARC, DKIM) & authoritative RDAP at the edge
+  //     so strict browser CSP and RDAP CORS never cause false "missing" DNS warnings.
+  if (url.pathname === '/api/mail/verify-domain' && request.method === 'GET') {
+    const rawDomain = (url.searchParams.get('domain') || '').trim().slice(0, 253);
+    if (!rawDomain) {
+      return jsonResponse({ ok: false, error: 'Parameter domain diperlukan.' }, 400);
+    }
+    const result = await verifyDomainAtEdge(rawDomain);
+    if (!result) {
+      return jsonResponse({ ok: false, error: 'Format domain tidak valid.' }, 400);
+    }
+    return jsonResponse(result as unknown as Record<string, unknown>, 200, {
+      'Cache-Control': 'public, max-age=120',
+    });
+  }
+
   // 10. Non-AI VZ Search Grounding Proxy (`GET /api/mail/vz-search?q=...&page=...`)
   //     Fetches live web index results from https://search.vz.gay/api/search?q=...
   if (url.pathname === '/api/mail/vz-search' && request.method === 'GET') {
@@ -3028,7 +3182,8 @@ async function handleApiRequest(
           method: 'GET',
           headers: {
             Accept: 'application/json',
-            'User-Agent': 'VZMail-SearchGrounding/1.0 (+https://mail.vz.gay)',
+            'User-Agent':
+              'Mozilla/5.0 (compatible; VZMail-SearchGrounding/1.0; +https://mail.vz.gay)',
           },
         }
       );
@@ -3166,7 +3321,73 @@ export default {
         }
       }
 
-      // 3. Shortlink Redirector: imy.li/s/$SLUG or links.vz.gay/s/$SLUG
+      // 3. Dynamic Host-Aware SEO & AI Crawler Discovery Endpoints
+      //    (/robots.txt, /sitemap.xml, /llms.txt, /llms-full.txt)
+      const isBioSubdomain =
+        host.endsWith('.imy.li') && host !== 'www.imy.li' && host !== 'mail.imy.li';
+      const bioSubdomainUser = isBioSubdomain
+        ? sanitizeHandle(host.slice(0, -'.imy.li'.length))
+        : null;
+
+      if (url.pathname === '/robots.txt' && (request.method === 'GET' || request.method === 'HEAD')) {
+        let effectiveMode: BioIndexingMode | null = null;
+        if (isBioSubdomain && bioSubdomainUser) {
+          const ws = await getBioWorkspaceFromStorage(env, bioSubdomainUser);
+          effectiveMode =
+            ws && ws.configured && !ws.isDeactivated
+              ? sanitizeBioIndexingMode(ws.indexingMode)
+              : 'none';
+        }
+        return new Response(buildHostRobotsTxt(host, effectiveMode), {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Cache-Control': isBioSubdomain ? 'public, max-age=300' : 'public, max-age=3600',
+            'X-Content-Type-Options': 'nosniff',
+          },
+        });
+      }
+
+      if (url.pathname === '/sitemap.xml' && (request.method === 'GET' || request.method === 'HEAD')) {
+        if (isBioSubdomain) {
+          return new Response('Not Found', {
+            status: 404,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=300' },
+          });
+        }
+        return new Response(buildHostSitemapXml(host), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/xml; charset=utf-8',
+            'Cache-Control': 'public, max-age=3600',
+            'X-Content-Type-Options': 'nosniff',
+          },
+        });
+      }
+
+      if (url.pathname === '/llms.txt' && (request.method === 'GET' || request.method === 'HEAD')) {
+        return new Response(buildLlmsTxt(), {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Cache-Control': 'public, max-age=3600',
+            'X-Content-Type-Options': 'nosniff',
+          },
+        });
+      }
+
+      if (url.pathname === '/llms-full.txt' && (request.method === 'GET' || request.method === 'HEAD')) {
+        return new Response(buildLlmsFullTxt(), {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Cache-Control': 'public, max-age=3600',
+            'X-Content-Type-Options': 'nosniff',
+          },
+        });
+      }
+
+      // 4. Shortlink Redirector: imy.li/s/$SLUG or links.vz.gay/s/$SLUG
       //    Uses 302 + no-store so browsers don't cache over real click counting.
       if (url.pathname.startsWith('/s/') && (request.method === 'GET' || request.method === 'HEAD')) {
         const rawSlug = url.pathname.replace(/^\/s\//, '').split('/')[0] || '';
@@ -3189,6 +3410,7 @@ export default {
                   'Cache-Control': 'no-store, max-age=0',
                   'X-Content-Type-Options': 'nosniff',
                   'Referrer-Policy': 'no-referrer',
+                  'X-Robots-Tag': 'noindex, nofollow',
                 },
               });
             }
@@ -3196,18 +3418,46 @@ export default {
         }
       }
 
-      // 3. Wildcard Subdomain Link-in-Bio: $USERNAME.imy.li
-      //    Enforces Zero Cookie Collision (no Set-Cookie, strict CSP without arbitrary user JS)
-      const isBioSubdomain =
-        host.endsWith('.imy.li') && host !== 'www.imy.li' && host !== 'mail.imy.li';
-
+      // 5. SPA Assets + Dynamic Edge SEO (HTMLRewriter) & PSL-Safe Bio Isolation
       if (env.ASSETS) {
         const assetResponse = await env.ASSETS.fetch(request);
-        return applyHtmlSecurityHeaders(assetResponse, {
+        const secured = applyHtmlSecurityHeaders(assetResponse, {
           isBioSubdomain,
           isHttps,
           auth0Domain: env.AUTH0_DOMAIN,
         });
+
+        const contentType = secured.headers.get('Content-Type') || '';
+        if (contentType.includes('text/html')) {
+          const routeKind = resolveSeoRouteKind(host, url);
+          let bioWorkspace: BioWorkspaceData | null = null;
+          let bioPageSlug = '';
+          const effectiveBioUser =
+            bioSubdomainUser ||
+            (url.searchParams.get('bio_user')
+              ? sanitizeHandle(url.searchParams.get('bio_user') || '')
+              : null);
+
+          if (routeKind === 'bio_public' && effectiveBioUser) {
+            bioWorkspace = await getBioWorkspaceFromStorage(env, effectiveBioUser);
+            const rawSegment = isBioSubdomain
+              ? url.pathname.replace(/^\/+|\/+$/g, '').split('/')[0] || ''
+              : url.searchParams.get('bio_page') || '';
+            bioPageSlug = rawSegment ? sanitizePageSlug(rawSegment) || '' : '';
+          }
+
+          const seoMeta = buildServiceSeoMeta({
+            routeKind,
+            hostname: host,
+            pathname: url.pathname,
+            bioUsername: effectiveBioUser,
+            bioPageSlug,
+            bioWorkspace,
+          });
+          return rewriteHtmlSeo(secured, seoMeta);
+        }
+
+        return secured;
       }
 
       return jsonResponse({
