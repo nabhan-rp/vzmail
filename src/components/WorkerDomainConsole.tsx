@@ -301,12 +301,12 @@ export function WorkerDomainConsole({
     {
       type: 'TXT (SPF)',
       host: 'imy.li',
-      value: 'v=spf1 include:_spf.mx.cloudflare.net a:karya.kreasi.org ~all',
-      copyValue: 'v=spf1 include:_spf.mx.cloudflare.net a:karya.kreasi.org ~all',
+      value: 'v=spf1 include:_spf.mx.cloudflare.net include:spf.brevo.com ~all',
+      copyValue: 'v=spf1 include:_spf.mx.cloudflare.net include:spf.brevo.com ~all',
       note:
         lang === 'id'
-          ? 'Izinkan Cloudflare & Exim cPanel karya.kreasi.org kirim atas nama @imy.li'
-          : 'Authorizes Cloudflare & cPanel Exim (karya.kreasi.org) to send as @imy.li',
+          ? 'Ganti v=spf1 -all menjadi record ini agar Brevo & Cloudflare lolos filter Spam Gmail (tambahkan a:karya.kreasi.org jika memakai cPanel)'
+          : 'Replace v=spf1 -all with this record so Brevo & Cloudflare pass Gmail Spam filters (add a:karya.kreasi.org if using cPanel)',
       accent: 'blue',
     },
     {
@@ -551,6 +551,49 @@ export function WorkerDomainConsole({
                 ? 'Secret BREVO_API_KEY yang terpasang tampak bukan kunci API v3 standar (awalan xkeysib-...), melainkan token MCP. Jika pengiriman email ditolak Brevo (HTTP 401), buat kunci baru bertipe API Key (v3) di Brevo → Settings → SMTP & API → API keys (xkeysib-...) lalu perbarui secret BREVO_API_KEY di panel Cloudflare Workers.'
                 : 'Your BREVO_API_KEY secret does not start with xkeysib- and looks like an MCP token. If Brevo rejects sending with HTTP 401, generate a standard API v3 key (xkeysib-...) in Brevo → Settings → SMTP & API → API keys and update BREVO_API_KEY in Cloudflare Workers Secrets.'}
             </div>
+          </div>
+        )}
+
+        {health?.bindings?.brevoApi && (
+          <div className="p-3.5 rounded-lg bg-emerald-50/80 dark:bg-emerald-950/25 border border-emerald-200 dark:border-emerald-900/60 text-xs text-emerald-950 dark:text-emerald-200 space-y-2 leading-relaxed">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="font-bold inline-flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <span>
+                  {lang === 'id'
+                    ? 'Tips Lolos Kotak Masuk Utama Gmail (Brevo + imy.li)'
+                    : 'Gmail Primary Inbox Checklist (Brevo + imy.li)'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  handleCopy(
+                    'SPF Record Brevo + Cloudflare',
+                    'v=spf1 include:_spf.mx.cloudflare.net include:spf.brevo.com ~all'
+                  )
+                }
+                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-white dark:bg-[#131922] text-emerald-700 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 rounded-md hover:bg-emerald-100/60 cursor-pointer"
+              >
+                <Copy className="w-3 h-3" />
+                <span>Copy TXT SPF</span>
+              </button>
+            </div>
+            <ul className="list-disc pl-5 space-y-1 text-[11px] sm:text-xs">
+              <li>
+                <strong>Ganti record SPF `imy.li`:</strong> Jika DNS Anda masih berisi{' '}
+                <code className="font-mono px-1 rounded bg-white/80 dark:bg-black/30">v=spf1 -all</code>,
+                ubah menjadi{' '}
+                <code className="font-mono px-1 rounded bg-white/80 dark:bg-black/30">
+                  v=spf1 include:_spf.mx.cloudflare.net include:spf.brevo.com ~all
+                </code>{' '}
+                agar Gmail tidak menandai domain sebagai penolak semua pengirim.
+              </li>
+              <li>
+                <strong>Pemanasan Domain Baru:</strong> Klik{' '}
+                <strong>&ldquo;Laporkan bukan spam&rdquo;</strong> pada email uji pertama di Gmail dan hindari isi uji terlalu singkat (1–2 kata) saat awal mengirim dari domain baru.
+              </li>
+            </ul>
           </div>
         )}
       </section>
@@ -837,8 +880,10 @@ export function WorkerDomainConsole({
                   </div>
                   <p className="text-slate-500 dark:text-slate-400 leading-relaxed">
                     Verifikasi domain <span className="font-mono">imy.li</span> di
-                    Brevo, lalu pasang secret{' '}
-                    <span className="font-mono">BREVO_API_KEY</span>.
+                    Brevo (termasuk ubah TXT SPF dari <span className="font-mono">v=spf1 -all</span> ke{' '}
+                    <span className="font-mono">include:spf.brevo.com ~all</span> agar lolos Spam Gmail),
+                    lalu pasang secret <span className="font-mono">BREVO_API_KEY</span> (kunci v3 maupun
+                    kunci MCP Base64 otomatis diekstrak).
                   </p>
                 </div>
 

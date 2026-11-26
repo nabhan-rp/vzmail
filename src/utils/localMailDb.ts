@@ -9,6 +9,10 @@ import {
   sanitizeExternalUrl,
   sanitizeSlug,
 } from './mailSecurity';
+import {
+  sanitizeExternalLinksArray,
+  type MailExternalLink,
+} from './mailExternalLinks';
 
 export type MailFolder =
   | 'inbox'
@@ -65,6 +69,8 @@ export interface LocalMailMessage {
   ephemeralQueueReceipt?: string; // Proof that server purged message upon local pull
   chatBridgeChannel?: string | null; // Optional bridge link with chat.vz.gay
   attachments: MailAttachment[];
+  /** Optional external file links (VZ Files >10 MB, Google Drive, Imgur, direct media) */
+  externalLinks?: MailExternalLink[];
 }
 
 export interface BioLinkCardItem {
@@ -695,6 +701,7 @@ export function normalizeInboundPacketToLocalMessage(
       expiresAt?: string;
       contentText?: string;
     }>;
+    externalLinks?: MailExternalLink[];
   },
   activeDomains: readonly string[] = ['imy.li']
 ): LocalMailMessage {
@@ -745,5 +752,6 @@ export function normalizeInboundPacketToLocalMessage(
       packet.ephemeralQueueReceipt || generateSecureId('PURGED-CF').toUpperCase(),
     chatBridgeChannel: null,
     attachments: normalizedAttachments,
+    externalLinks: sanitizeExternalLinksArray(packet.externalLinks),
   };
 }

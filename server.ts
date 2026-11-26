@@ -1,4 +1,5 @@
 import express from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -14,6 +15,13 @@ import {
   sanitizeSlug,
   stripHeaderInjection,
 } from './src/utils/mailSecurity.ts';
+import {
+  buildOutboundEmailPayload,
+  isAllowedVikingPartUrl,
+  isAllowedVikingServerUrl,
+  sanitizeExternalLinksArray,
+  type MailExternalLink,
+} from './src/utils/mailExternalLinks.ts';
 import {
   AVATAR_RAW_UPLOAD_MAX_BYTES,
   BIO_DELETE_COOLDOWN_MS,
@@ -75,6 +83,7 @@ interface EphemeralMailPacket {
   receivedAt: string;
   expiresAt: string;
   attachments?: EphemeralPacketAttachment[];
+  externalLinks?: MailExternalLink[];
 }
 
 interface StoredEphemeralAttachment {
@@ -210,12 +219,9 @@ async function startServer() {
   app.disable('x-powered-by');
   app.use(express.json({ limit: '512kb' }));
 
-  // Baseline security headers for local dev & Node preview
+  // Baseline security headers for local dev & Cloud Run preview
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    if (process.env.NODE_ENV === 'production') {
-      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-    }
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader(
       'Permissions-Policy',
@@ -494,6 +500,185 @@ async function startServer() {
     res.status(200).send(stored.bytes);
   });
 
+  // 3.6 VZ Files (https://files.vz.gay / VikingFile) Same-Origin Proxy for Large Files (>10 MB)
+  const VIKING_API_BASE = 'https://vikingfile.com/api';
+  const vzFilesPartRawParser = express.raw({
+    type: () => true,
+    limit: '25mb',
+  });
+  const vzFilesLegacyRawParser = express.raw({
+    type: () => true,
+    limit: '95mb',
+  });
+
+  async function fetchLocalVikingServer(): Promise<string> {
+    const srvRes = await fetch(`${VIKING_API_BASE}/get-server`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!srvRes.ok) {
+      throw new Error(`VikingFile get-server HTTP ${srvRes.status}`);
+    }
+    const srvData = (await srvRes.json()) as { server?: string };
+    if (!srvData.server || !isAllowedVikingServerUrl(srvData.server)) {
+      throw new Error('Server unggahan VikingFile tidak valid.');
+    }
+    return srvData.server.replace(/\/+$/, '');
+  }
+
+  app.get('/api/vzfiles/get-server', async (_req, res) => {
+    try {
+      const server = await fetchLocalVikingServer();
+      res.json({ ok: true, server });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Gagal menghubungi VikingFile.',
+      });
+    }
+  });
+
+  app.post('/api/vzfiles/get-upload-url', async (req, res) => {
+    try {
+      const size = Number(req.body?.size);
+      if (!Number.isFinite(size) || size <= 0) {
+        res.status(400).json({ ok: false, error: 'Ukuran file (bytes) tidak valid.' });
+        return;
+      }
+      const params = new URLSearchParams();
+      params.set('size', String(Math.floor(size)));
+      const upstream = await fetch(`${VIKING_API_BASE}/get-upload-url`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          Accept: 'application/json',
+        },
+        body: params.toString(),
+      });
+      const text = await upstream.text();
+      try {
+        res.status(upstream.status).json(JSON.parse(text));
+      } catch {
+        res.status(upstream.status || 502).json({ ok: false, error: text || 'Respons tidak valid.' });
+      }
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Gagal meminta URL unggahan VZ Files.',
+      });
+    }
+  });
+
+  app.put('/api/vzfiles/upload-part', vzFilesPartRawParser, async (req, res) => {
+    try {
+      const targetUrl = String(req.headers['x-target-url'] || '').trim();
+      if (!targetUrl || !isAllowedVikingPartUrl(targetUrl)) {
+        res.status(400).json({ ok: false, error: 'Target URL part VZ Files tidak diizinkan.' });
+        return;
+      }
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (buf.byteLength === 0) {
+        res.status(400).json({ ok: false, error: 'Part unggahan kosong.' });
+        return;
+      }
+      const upstream = await fetch(targetUrl, {
+        method: 'PUT',
+        headers: { 'Content-Length': String(buf.byteLength) },
+        body: new Uint8Array(buf),
+      });
+      const rawEtag = upstream.headers.get('etag') || upstream.headers.get('ETag') || '';
+      const etag = rawEtag.replace(/^"|"$/g, '');
+      if (!upstream.ok) {
+        const errText = await upstream.text().catch(() => '');
+        res.status(upstream.status).json({
+          ok: false,
+          error: errText || `Upload part gagal (HTTP ${upstream.status}).`,
+        });
+        return;
+      }
+      res.json({ ok: true, etag });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Gagal meneruskan part unggahan.',
+      });
+    }
+  });
+
+  app.post('/api/vzfiles/complete-upload', async (req, res) => {
+    try {
+      const { key, uploadId, name, user = '', parts } = req.body || {};
+      if (!key || !uploadId || !name || !Array.isArray(parts) || parts.length === 0) {
+        res.status(400).json({
+          ok: false,
+          error: 'Parameter key, uploadId, name, dan parts wajib diisi.',
+        });
+        return;
+      }
+      const params = new URLSearchParams();
+      params.set('key', String(key));
+      params.set('uploadId', String(uploadId));
+      params.set('name', String(name));
+      params.set('user', String(user));
+      parts.slice(0, 1000).forEach((part: { PartNumber: number; ETag: string }, index: number) => {
+        params.set(`parts[${index}][PartNumber]`, String(part.PartNumber));
+        params.set(`parts[${index}][ETag]`, String(part.ETag).replace(/^"|"$/g, ''));
+      });
+      const upstream = await fetch(`${VIKING_API_BASE}/complete-upload`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          Accept: 'application/json',
+        },
+        body: params.toString(),
+      });
+      const text = await upstream.text();
+      try {
+        res.status(upstream.status).json(JSON.parse(text));
+      } catch {
+        res.status(upstream.status || 502).json({ ok: false, error: text || 'Complete upload gagal.' });
+      }
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Gagal menyelesaikan unggahan VZ Files.',
+      });
+    }
+  });
+
+  app.post('/api/vzfiles/legacy-upload', vzFilesLegacyRawParser, async (req, res) => {
+    try {
+      const filenameHeader = String(req.headers['x-file-name'] || 'upload.bin');
+      let filename = 'upload.bin';
+      try {
+        filename = decodeURIComponent(filenameHeader).slice(0, 180) || 'upload.bin';
+      } catch {
+        filename = 'upload.bin';
+      }
+      const contentType = String(req.headers['content-type'] || 'application/octet-stream');
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (buf.byteLength === 0) {
+        res.status(400).json({ ok: false, error: 'File kosong.' });
+        return;
+      }
+      const serverUrl = await fetchLocalVikingServer();
+      const form = new FormData();
+      form.append('file', new Blob([new Uint8Array(buf)], { type: contentType }), filename);
+      form.append('user', '');
+      const upstream = await fetch(serverUrl, { method: 'POST', body: form });
+      const text = await upstream.text();
+      try {
+        res.status(upstream.status).json(JSON.parse(text));
+      } catch {
+        res.status(upstream.status || 502).json({ ok: false, error: text || 'Upload VZ Files gagal.' });
+      }
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Gagal mengunggah ke VZ Files.',
+      });
+    }
+  });
+
   // 4. POST /api/mail/send — Dispatch outbound email via Cloudflare Email Sending relay (dev simulation)
   app.post('/api/mail/send', (req, res) => {
     pruneExpiredAndBoundQueue();
@@ -598,6 +783,9 @@ async function startServer() {
       count: currentCount + 1,
     });
 
+    const safeExternalLinks = sanitizeExternalLinksArray(req.body?.externalLinks);
+    const renderedOutbound = buildOutboundEmailPayload(bodyText, safeExternalLinks);
+
     const rfcMessageId = `<${generateSecureId('out')}@imy.li>`;
     const resolvedRecipient = resolveCanonicalEmail(toAddress, DEFAULT_SUPPORTED_DOMAINS);
     let routedLoopbackPacket: EphemeralMailPacket | null = null;
@@ -643,6 +831,7 @@ async function startServer() {
         receivedAt: now.toISOString(),
         expiresAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
         attachments: recipientAttachments,
+        externalLinks: safeExternalLinks,
       };
       ephemeralQueue.set(pktId, routedLoopbackPacket);
     }
@@ -662,6 +851,8 @@ async function startServer() {
       sentAt: new Date().toISOString(),
       serverStoredCopy: false,
       r2AttachmentsPurged: loadedLocalAttachments.length,
+      externalLinksCount: safeExternalLinks.length,
+      htmlLength: renderedOutbound.htmlContent.length,
       quota: {
         usedToday: currentCount + 1,
         dailyLimit: DAILY_OUTBOUND_LIMIT,
@@ -1464,10 +1655,18 @@ async function startServer() {
     res.status(404).json({ ok: false, error: 'Endpoint API tidak ditemukan.' });
   });
 
+  const distPath = path.join(__dirname, 'dist');
+  const distIndexPath = path.join(distPath, 'index.html');
+
+  const isDevLifecycle = process.env.npm_lifecycle_event === 'dev';
+
   const isProduction =
-    process.env.NODE_ENV === 'production' ||
-    Boolean(process.env.K_SERVICE) ||
-    process.env.npm_lifecycle_event === 'start';
+    !isDevLifecycle &&
+    (process.env.NODE_ENV === 'production' ||
+      Boolean(process.env.K_SERVICE) ||
+      Boolean(process.env.CLOUD_RUN_JOB) ||
+      process.env.npm_lifecycle_event === 'start' ||
+      (process.env.NODE_ENV !== 'development' && fs.existsSync(distIndexPath)));
 
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
@@ -1477,18 +1676,36 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath, { maxAge: '1d' }));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    app.use((req, res, next) => {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        next();
+        return;
+      }
+      if (!fs.existsSync(distIndexPath)) {
+        res.status(503).send('Build output not found. Run npm run build.');
+        return;
+      }
+      res.sendFile(distIndexPath);
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(
-      `VZ Mail & VZ Links 2-in-1 Edge Server running on http://0.0.0.0:${PORT}`
+      `VZ Mail & VZ Links 2-in-1 Edge Server running on http://0.0.0.0:${PORT} (mode=${isProduction ? 'production' : 'development'})`
     );
   });
+
+  const shutdown = (signal: string) => {
+    console.log(`Received ${signal}, shutting down server gracefully...`);
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Fatal server startup error:', err);
+  process.exit(1);
+});

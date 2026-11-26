@@ -33,12 +33,18 @@ import {
 import {
   generateSecureId,
   isValidEmailAddress,
-  plainTextToSafeEmailHtml,
   sanitizeDisplayName,
   sanitizeExternalUrl,
   sanitizeSlug,
   stripHeaderInjection,
 } from '../src/utils/mailSecurity.ts';
+import {
+  buildOutboundEmailPayload,
+  isAllowedVikingPartUrl,
+  isAllowedVikingServerUrl,
+  sanitizeExternalLinksArray,
+  type MailExternalLink,
+} from '../src/utils/mailExternalLinks.ts';
 import {
   AVATAR_MAX_BYTES,
   AVATAR_RAW_UPLOAD_MAX_BYTES,
@@ -311,6 +317,7 @@ async function dispatchOutboundEmail(
       },
       body: JSON.stringify({
         from: `${payload.fromName} <${payload.fromEmail}>`,
+        reply_to: payload.fromEmail,
         to: [payload.toEmail],
         subject: payload.subject,
         text: payload.text,
@@ -325,7 +332,6 @@ async function dispatchOutboundEmail(
           : {}),
         headers: {
           'Message-ID': payload.rfcMessageId,
-          'X-VZ-Zero-Retention': 'true',
         },
       }),
     });
@@ -350,13 +356,16 @@ async function dispatchOutboundEmail(
         name: payload.fromName,
         email: payload.fromEmail,
       },
+      replyTo: {
+        name: payload.fromName,
+        email: payload.fromEmail,
+      },
       to: [{ email: payload.toEmail }],
       subject: payload.subject,
       textContent: payload.text,
       htmlContent: payload.html,
       headers: {
         'Message-ID': payload.rfcMessageId,
-        'X-VZ-Zero-Retention': 'true',
       },
     };
     if (payload.attachments && payload.attachments.length > 0) {
@@ -452,6 +461,7 @@ export interface EphemeralMailPacket {
   receivedAt: string;
   expiresAt: string;
   attachments?: EphemeralPacketAttachment[];
+  externalLinks?: MailExternalLink[];
 }
 
 const TRANSIT_TTL_SECONDS = 72 * 3600;
@@ -478,7 +488,7 @@ function buildAppCsp(auth0Domain?: string): string {
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com data:",
     "img-src 'self' data: blob: https:",
-    `connect-src 'self' ${authList}`,
+    `connect-src 'self' ${authList} https://*.vikingfile.com https://*.io.cloud.ovh.net`,
     `frame-src 'self' ${authList}`,
     "worker-src 'self'",
     "manifest-src 'self'",
@@ -2702,6 +2712,175 @@ async function handleApiRequest(
     });
   }
 
+  // 4.7 VZ Files (https://files.vz.gay / VikingFile) Same-Origin Proxy for Large Files (>10 MB)
+  if (url.pathname.startsWith('/api/vzfiles/')) {
+    const VIKING_API_BASE = 'https://vikingfile.com/api';
+    const action = url.pathname.replace('/api/vzfiles/', '').replace(/\/+$/, '');
+
+    const fetchVikingServer = async (): Promise<string> => {
+      const srvRes = await fetch(`${VIKING_API_BASE}/get-server`, {
+        headers: { Accept: 'application/json' },
+      });
+      if (!srvRes.ok) {
+        throw new Error(`VikingFile get-server HTTP ${srvRes.status}`);
+      }
+      const srvData = (await srvRes.json()) as { server?: string };
+      if (!srvData.server || !isAllowedVikingServerUrl(srvData.server)) {
+        throw new Error('Server unggahan VikingFile tidak valid.');
+      }
+      return srvData.server.replace(/\/+$/, '');
+    };
+
+    const postVikingForm = async (endpoint: string, params: URLSearchParams): Promise<Response> => {
+      const upstream = await fetch(`${VIKING_API_BASE}/${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          Accept: 'application/json',
+        },
+        body: params.toString(),
+      });
+      const text = await upstream.text();
+      try {
+        return jsonResponse(JSON.parse(text) as Record<string, unknown>, upstream.status);
+      } catch {
+        return jsonResponse(
+          { ok: false, error: text || 'Respons VikingFile tidak valid.' },
+          upstream.status || 502
+        );
+      }
+    };
+
+    try {
+      if (action === 'get-server' && request.method === 'GET') {
+        const server = await fetchVikingServer();
+        return jsonResponse({ ok: true, server });
+      }
+
+      if (action === 'get-upload-url' && request.method === 'POST') {
+        const parsed = await readBoundedJson<{ size?: number }>(request);
+        if (!parsed.ok) {
+          return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
+        }
+        const size = Number(parsed.data.size);
+        if (!Number.isFinite(size) || size <= 0) {
+          return jsonResponse({ ok: false, error: 'Ukuran file (bytes) tidak valid.' }, 400);
+        }
+        const params = new URLSearchParams();
+        params.set('size', String(Math.floor(size)));
+        return await postVikingForm('get-upload-url', params);
+      }
+
+      if (action === 'upload-part' && request.method === 'PUT') {
+        const targetUrl = (request.headers.get('x-target-url') || '').trim();
+        if (!targetUrl || !isAllowedVikingPartUrl(targetUrl)) {
+          return jsonResponse(
+            { ok: false, error: 'Target URL part VZ Files tidak diizinkan.' },
+            400
+          );
+        }
+        const buf = await request.arrayBuffer();
+        if (buf.byteLength <= 0 || buf.byteLength > 25 * 1024 * 1024) {
+          return jsonResponse(
+            { ok: false, error: 'Ukuran part unggahan tidak valid (maks 25 MB/part).' },
+            413
+          );
+        }
+        const upstream = await fetch(targetUrl, {
+          method: 'PUT',
+          headers: { 'Content-Length': String(buf.byteLength) },
+          body: buf,
+        });
+        const rawEtag = upstream.headers.get('etag') || upstream.headers.get('ETag') || '';
+        const etag = rawEtag.replace(/^"|"$/g, '');
+        if (!upstream.ok) {
+          const errText = await upstream.text().catch(() => '');
+          return jsonResponse(
+            { ok: false, error: errText || `Upload part gagal (HTTP ${upstream.status}).` },
+            upstream.status
+          );
+        }
+        return jsonResponse({ ok: true, etag });
+      }
+
+      if (action === 'complete-upload' && request.method === 'POST') {
+        const parsed = await readBoundedJson<{
+          key?: string;
+          uploadId?: string;
+          name?: string;
+          user?: string;
+          parts?: Array<{ PartNumber: number; ETag: string }>;
+        }>(request);
+        if (!parsed.ok) {
+          return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
+        }
+        const { key, uploadId, name, user = '', parts } = parsed.data;
+        if (!key || !uploadId || !name || !Array.isArray(parts) || parts.length === 0) {
+          return jsonResponse(
+            { ok: false, error: 'Parameter key, uploadId, name, dan parts wajib diisi.' },
+            400
+          );
+        }
+        const params = new URLSearchParams();
+        params.set('key', String(key));
+        params.set('uploadId', String(uploadId));
+        params.set('name', String(name));
+        params.set('user', String(user));
+        parts.slice(0, 1000).forEach((part, index) => {
+          params.set(`parts[${index}][PartNumber]`, String(part.PartNumber));
+          params.set(`parts[${index}][ETag]`, String(part.ETag).replace(/^"|"$/g, ''));
+        });
+        return await postVikingForm('complete-upload', params);
+      }
+
+      if (action === 'legacy-upload' && request.method === 'POST') {
+        const filenameHeader = request.headers.get('x-file-name') || 'upload.bin';
+        let filename = 'upload.bin';
+        try {
+          filename = decodeURIComponent(filenameHeader).slice(0, 180) || 'upload.bin';
+        } catch {
+          filename = 'upload.bin';
+        }
+        const contentType =
+          request.headers.get('content-type') || 'application/octet-stream';
+        const serverUrl = await fetchVikingServer();
+        const buf = await request.arrayBuffer();
+        if (buf.byteLength <= 0 || buf.byteLength > 95 * 1024 * 1024) {
+          return jsonResponse(
+            { ok: false, error: 'Ukuran file tidak valid untuk legacy upload.' },
+            413
+          );
+        }
+        const form = new FormData();
+        form.append('file', new Blob([buf], { type: contentType }), filename);
+        form.append('user', '');
+        const upstream = await fetch(serverUrl, { method: 'POST', body: form });
+        const text = await upstream.text();
+        try {
+          return jsonResponse(JSON.parse(text) as Record<string, unknown>, upstream.status);
+        } catch {
+          return jsonResponse(
+            { ok: false, error: text || 'Upload ke VZ Files gagal.' },
+            upstream.status || 502
+          );
+        }
+      }
+
+      return jsonResponse({ ok: false, error: 'Endpoint VZ Files tidak ditemukan.' }, 404);
+    } catch (err) {
+      return jsonResponse(
+        {
+          ok: false,
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Gagal menghubungi layanan VZ Files (files.vz.gay).',
+        },
+        502
+      );
+    }
+  }
+
   // 5. POST /api/mail/send — Dispatch outbound email via Brevo / Resend / cPanel / Cloudflare SEND_EMAIL
   if (url.pathname === '/api/mail/send' && request.method === 'POST') {
     const parsed = await readBoundedJson<{
@@ -2717,6 +2896,7 @@ async function handleApiRequest(
         mimeType?: string;
         sizeBytes?: number;
       }>;
+      externalLinks?: MailExternalLink[];
     }>(request);
     if (!parsed.ok) {
       return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
@@ -2840,6 +3020,9 @@ async function handleApiRequest(
       }
     }
 
+    const safeExternalLinks = sanitizeExternalLinksArray(parsed.data.externalLinks);
+    const renderedOutbound = buildOutboundEmailPayload(bodyText, safeExternalLinks);
+
     const messageIdToken = generateSecureId('out');
     const rfcMessageId = `<${messageIdToken}@${primaryDomain}>`;
     const activeProvider = resolveOutboundProvider(env);
@@ -2854,8 +3037,8 @@ async function handleApiRequest(
           fromName: sanitizeDisplayName(senderUser, senderUser),
           toEmail: toAddress,
           subject,
-          text: bodyText,
-          html: plainTextToSafeEmailHtml(bodyText),
+          text: renderedOutbound.textContent,
+          html: renderedOutbound.htmlContent,
           rfcMessageId,
           attachments: loadedAttachments.map((a) => ({
             filename: a.filename,
@@ -2967,6 +3150,7 @@ async function handleApiRequest(
         receivedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + TRANSIT_TTL_SECONDS * 1000).toISOString(),
         attachments: recipientAttachments,
+        externalLinks: safeExternalLinks,
       };
 
       if (env.MAIL_TRANSIT_KV) {

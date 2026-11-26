@@ -60,7 +60,17 @@ import {
   triggerBrowserDownload,
 } from '../utils/mailVaultCrypto';
 import { checkReservedUsername } from '../utils/reservedUsernames';
+import {
+  formatFileSizeLabel,
+  normalizeAndClassifyExternalLink,
+  type MailExternalLink,
+} from '../utils/mailExternalLinks';
+import {
+  uploadFileToVzFiles,
+  type VzFilesUploadProgress,
+} from '../utils/vzFilesUploader';
 import { ConfirmActionModal } from './ConfirmActionModal';
+import { MailExternalLinksView } from './MailExternalLinksView';
 import {
   MailFloatingComposer,
   type ComposeFeedbackState,
@@ -97,6 +107,7 @@ interface EphemeralEdgePacket {
   bodyText: string;
   receivedAt: string;
   attachments?: MailAttachment[];
+  externalLinks?: MailExternalLink[];
 }
 
 interface ToastNotification {
@@ -277,6 +288,9 @@ export function VzMailWorkspace({
   const [composeSubject, setComposeSubject] = useState('');
   const [composeBody, setComposeBody] = useState('');
   const [composeAttachments, setComposeAttachments] = useState<PendingComposeAttachment[]>([]);
+  const [composeExternalLinks, setComposeExternalLinks] = useState<MailExternalLink[]>([]);
+  const [oversizedFiles, setOversizedFiles] = useState<File[]>([]);
+  const [vzUploadProgress, setVzUploadProgress] = useState<VzFilesUploadProgress | null>(null);
   const [composeSending, setComposeSending] = useState(false);
   const [composeFeedback, setComposeFeedback] = useState<ComposeFeedbackState>({
     kind: 'idle',
@@ -666,6 +680,9 @@ export function VzMailWorkspace({
     setComposeSubject('');
     setComposeBody('');
     setComposeAttachments([]);
+    setComposeExternalLinks([]);
+    setOversizedFiles([]);
+    setVzUploadProgress(null);
     setComposeFeedback({ kind: 'idle', message: '' });
   }, [primaryEmail]);
 
@@ -678,6 +695,8 @@ export function VzMailWorkspace({
         setComposeSubject(prefill.subject || '');
         setComposeBody(prefill.body || '');
         setComposeAttachments([]);
+        setComposeExternalLinks([]);
+        setOversizedFiles([]);
       } else if (composeMode === 'closed') {
         setComposeFromAlias(primaryEmail);
       }
@@ -706,6 +725,8 @@ export function VzMailWorkspace({
           localDataBase64: att.localDataBase64,
         }))
       );
+      setComposeExternalLinks(draft.externalLinks || []);
+      setOversizedFiles([]);
       setComposeFeedback({ kind: 'idle', message: '' });
       setComposeMode('floating');
     },
@@ -720,29 +741,24 @@ export function VzMailWorkspace({
       const currentCount = composeAttachments.length;
       const currentTotal = composeAttachments.reduce((s, a) => s + a.sizeBytes, 0);
       const nextItems: PendingComposeAttachment[] = [];
+      const nextOversized: File[] = [];
       let runningTotal = currentTotal;
 
       for (const file of incoming) {
+        if (file.size <= 0) continue;
+        if (runningTotal + file.size > MAIL_ATTACHMENT_MAX_TOTAL_BYTES) {
+          nextOversized.push(file);
+          continue;
+        }
         if (currentCount + nextItems.length >= MAIL_ATTACHMENT_MAX_COUNT) {
           setComposeFeedback({
             kind: 'error',
             message:
               lang === 'id'
-                ? `Maksimal ${MAIL_ATTACHMENT_MAX_COUNT} lampiran per email.`
-                : `Maximum ${MAIL_ATTACHMENT_MAX_COUNT} attachments per email.`,
+                ? `Maksimal ${MAIL_ATTACHMENT_MAX_COUNT} lampiran R2 per email. Gunakan VZ Files (files.vz.gay) atau sisipkan link untuk file tambahan.`
+                : `Maximum ${MAIL_ATTACHMENT_MAX_COUNT} R2 attachments per email. Use VZ Files (files.vz.gay) or insert a link for extra files.`,
           });
           break;
-        }
-        if (file.size <= 0) continue;
-        if (runningTotal + file.size > MAIL_ATTACHMENT_MAX_TOTAL_BYTES) {
-          setComposeFeedback({
-            kind: 'error',
-            message:
-              lang === 'id'
-                ? `Total lampiran melebihi batas 10 MB (${file.name}: ${formatAttachmentBytes(file.size)}). Kompres file atau kirim terpisah.`
-                : `Total attachments exceed the 10 MB limit (${file.name}: ${formatAttachmentBytes(file.size)}). Compress or split the files.`,
-          });
-          continue;
         }
         runningTotal += file.size;
         nextItems.push({
@@ -751,6 +767,14 @@ export function VzMailWorkspace({
           mimeType: file.type || 'application/octet-stream',
           sizeBytes: file.size,
           file,
+        });
+      }
+
+      if (nextOversized.length > 0) {
+        setOversizedFiles((prev) => [...prev, ...nextOversized].slice(0, 5));
+        setComposeFeedback({
+          kind: 'idle',
+          message: '',
         });
       }
 
@@ -768,12 +792,76 @@ export function VzMailWorkspace({
     setComposeAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
+  const handleAddExternalLink = useCallback((link: MailExternalLink) => {
+    setComposeExternalLinks((prev) => {
+      if (prev.some((existing) => existing.url === link.url)) {
+        return prev;
+      }
+      return [...prev, link];
+    });
+  }, []);
+
+  const handleRemoveExternalLink = useCallback((id: string) => {
+    setComposeExternalLinks((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  const handleToggleExternalLinkInline = useCallback((id: string) => {
+    setComposeExternalLinks((prev) =>
+      prev.map((item) =>
+        item.id === id && item.directMediaUrl
+          ? { ...item, renderInline: !item.renderInline }
+          : item
+      )
+    );
+  }, []);
+
+  const handleUploadFileToVzFiles = useCallback(
+    async (file: File) => {
+      if (vzUploadProgress) return;
+      setComposeFeedback({ kind: 'idle', message: '' });
+      try {
+        const uploaded = await uploadFileToVzFiles(file, (progress) => {
+          setVzUploadProgress(progress);
+        });
+        const card = normalizeAndClassifyExternalLink(uploaded.shareUrl, {
+          label: uploaded.filename,
+          sizeLabel: formatFileSizeLabel(uploaded.sizeBytes),
+        });
+        if (card) {
+          setComposeExternalLinks((prev) =>
+            prev.some((item) => item.url === card.url) ? prev : [...prev, card]
+          );
+        }
+        setOversizedFiles((prev) => prev.filter((f) => f !== file));
+        setComposeFeedback({
+          kind: 'success',
+          message:
+            lang === 'id'
+              ? `"${uploaded.filename}" berhasil diunggah ke VZ Files (${uploaded.shareUrl}) dan disisipkan ke email.`
+              : `"${uploaded.filename}" uploaded to VZ Files (${uploaded.shareUrl}) and attached to your email.`,
+        });
+      } catch (err) {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : lang === 'id'
+              ? 'Gagal mengunggah ke VZ Files. Anda dapat mengunggah manual lewat https://files.vz.gay lalu menempel tautannya.'
+              : 'Failed to upload to VZ Files. You can upload manually at https://files.vz.gay and paste the link.';
+        setComposeFeedback({ kind: 'error', message: msg });
+      } finally {
+        setVzUploadProgress(null);
+      }
+    },
+    [vzUploadProgress, lang]
+  );
+
   const dispatchEmailPayload = async (params: {
     fromAlias: string;
     to: string;
     subject: string;
     body: string;
     attachments: PendingComposeAttachment[];
+    externalLinks: MailExternalLink[];
     draftIdToDelete?: string | null;
     surface: 'composer' | 'draft_pane';
   }): Promise<boolean> => {
@@ -922,6 +1010,7 @@ export function VzMailWorkspace({
           subject: cleanSubject,
           bodyText: cleanBody,
           attachments: uploadedMeta,
+          externalLinks: params.externalLinks,
         }),
       });
       const data = (await res.json().catch(() => null)) as {
@@ -991,6 +1080,7 @@ export function VzMailWorkspace({
                   : 'LOCAL-ONLY-ZERO-SERVER-COPY',
         chatBridgeChannel: null,
         attachments: localSavedAttachments,
+        externalLinks: params.externalLinks,
       };
 
       if (params.draftIdToDelete) {
@@ -1068,6 +1158,7 @@ export function VzMailWorkspace({
         subject: composeSubject,
         body: composeBody,
         attachments: composeAttachments,
+        externalLinks: composeExternalLinks,
         draftIdToDelete: editingDraftId,
         surface: 'composer',
       });
@@ -1096,6 +1187,7 @@ export function VzMailWorkspace({
           draft.subject === '(Draf Belum Berjudul)' ? '' : draft.subject,
         body: draft.bodyText === '(Draf kosong)' ? '' : draft.bodyText,
         attachments: draftAtts,
+        externalLinks: draft.externalLinks || [],
         draftIdToDelete: draft.id,
         surface: 'draft_pane',
       });
@@ -1155,6 +1247,7 @@ export function VzMailWorkspace({
         ephemeralQueueReceipt: 'LOCAL-DRAFT-INDEXEDDB',
         chatBridgeChannel: null,
         attachments: persistedAttachments,
+        externalLinks: composeExternalLinks,
       };
       await saveMessage(draftMsg);
       resetComposeForm();
@@ -2420,6 +2513,14 @@ export function VzMailWorkspace({
                                 {msg.bodyText}
                               </div>
 
+                              {/* Inline Direct Media (Imgur / Direct Images) & External File Links (VZ Files / Drive) */}
+                              <MailExternalLinksView
+                                bodyText={msg.bodyText}
+                                externalLinks={msg.externalLinks}
+                                lang={lang}
+                                invertedBubble={isOutbound}
+                              />
+
                               {/* WhatsApp-Style Ephemeral & Local Attachments */}
                               {msg.attachments && msg.attachments.length > 0 && (
                                 <div className="pt-2 space-y-1.5">
@@ -2964,6 +3065,15 @@ export function VzMailWorkspace({
                     {activeClassicMessage.bodyText}
                   </div>
 
+                  {/* Inline Direct Media (Imgur / Direct Images) & External Cloud/VZ Files Cards */}
+                  <div className="max-w-2xl">
+                    <MailExternalLinksView
+                      bodyText={activeClassicMessage.bodyText}
+                      externalLinks={activeClassicMessage.externalLinks}
+                      lang={lang}
+                    />
+                  </div>
+
                   {/* WhatsApp-Style Ephemeral & Local Attachments in Classic Reading Pane */}
                   {activeClassicMessage.attachments &&
                     activeClassicMessage.attachments.length > 0 && (
@@ -3086,6 +3196,14 @@ export function VzMailWorkspace({
         attachments={composeAttachments}
         onAddFiles={handleAddComposeFiles}
         onRemoveAttachment={handleRemoveComposeAttachment}
+        externalLinks={composeExternalLinks}
+        onAddExternalLink={handleAddExternalLink}
+        onRemoveExternalLink={handleRemoveExternalLink}
+        onToggleExternalLinkInline={handleToggleExternalLinkInline}
+        oversizedFiles={oversizedFiles}
+        onClearOversizedFiles={() => setOversizedFiles([])}
+        onUploadFileToVzFiles={handleUploadFileToVzFiles}
+        vzUploadProgress={vzUploadProgress}
         editingDraftId={editingDraftId}
         sending={composeSending}
         feedback={composeFeedback}

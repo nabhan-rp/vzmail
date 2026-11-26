@@ -1,23 +1,38 @@
 import {
   AlertCircle,
   CheckCircle2,
+  CloudUpload,
+  ExternalLink,
+  Eye,
+  EyeOff,
   File as FileIcon,
+  Image as ImageIcon,
+  Link2,
   Loader2,
   Maximize2,
   Minimize2,
   Minus,
   Paperclip,
+  Plus,
   Save,
   Send,
   Trash2,
   X,
 } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import {
   MAIL_ATTACHMENT_MAX_COUNT,
   MAIL_ATTACHMENT_MAX_TOTAL_BYTES,
 } from '../utils/linksModel';
+import {
+  MAIL_EXTERNAL_LINKS_MAX_COUNT,
+  formatFileSizeLabel,
+  getExternalProviderDisplayName,
+  normalizeAndClassifyExternalLink,
+  type MailExternalLink,
+} from '../utils/mailExternalLinks';
+import type { VzFilesUploadProgress } from '../utils/vzFilesUploader';
 
 export type ComposeWindowMode = 'closed' | 'floating' | 'minimized' | 'fullscreen';
 
@@ -59,6 +74,14 @@ interface MailFloatingComposerProps {
   attachments: PendingComposeAttachment[];
   onAddFiles: (files: FileList | File[]) => void;
   onRemoveAttachment: (id: string) => void;
+  externalLinks: MailExternalLink[];
+  onAddExternalLink: (link: MailExternalLink) => void;
+  onRemoveExternalLink: (id: string) => void;
+  onToggleExternalLinkInline: (id: string) => void;
+  oversizedFiles: File[];
+  onClearOversizedFiles: () => void;
+  onUploadFileToVzFiles: (file: File) => Promise<void>;
+  vzUploadProgress: VzFilesUploadProgress | null;
   editingDraftId: string | null;
   sending: boolean;
   feedback: ComposeFeedbackState;
@@ -97,6 +120,14 @@ export function MailFloatingComposer({
   attachments,
   onAddFiles,
   onRemoveAttachment,
+  externalLinks,
+  onAddExternalLink,
+  onRemoveExternalLink,
+  onToggleExternalLinkInline,
+  oversizedFiles,
+  onClearOversizedFiles,
+  onUploadFileToVzFiles,
+  vzUploadProgress,
   editingDraftId,
   sending,
   feedback,
@@ -108,16 +139,33 @@ export function MailFloatingComposer({
   onDiscard,
 }: MailFloatingComposerProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const vzFilesInputRef = useRef<HTMLInputElement | null>(null);
   const [dragActive, setDragActive] = useState(false);
+
+  // Inline "Add Link / Direct Media" drawer state
+  const [linkPanelOpen, setLinkPanelOpen] = useState(false);
+  const [linkUrlInput, setLinkUrlInput] = useState('');
+  const [linkLabelInput, setLinkLabelInput] = useState('');
+  const [linkInputError, setLinkInputError] = useState<string | null>(null);
+
+  const previewClassifiedLink = useMemo(() => {
+    const trimmed = linkUrlInput.trim();
+    if (!trimmed) return null;
+    return normalizeAndClassifyExternalLink(trimmed, {
+      label: linkLabelInput.trim() || undefined,
+    });
+  }, [linkUrlInput, linkLabelInput]);
 
   if (mode === 'closed') return null;
 
+  const isUploadingVzFiles = vzUploadProgress !== null;
   const totalAttachmentBytes = attachments.reduce((sum, a) => sum + a.sizeBytes, 0);
   const attachmentRatio = Math.min(
     100,
     Math.round((totalAttachmentBytes / MAIL_ATTACHMENT_MAX_TOTAL_BYTES) * 100)
   );
   const isOverAttachmentLimit = totalAttachmentBytes > MAIL_ATTACHMENT_MAX_TOTAL_BYTES;
+  const totalMediaCount = attachments.length + externalLinks.length;
 
   const headerTitle = subject.trim()
     ? subject.trim()
@@ -128,6 +176,42 @@ export function MailFloatingComposer({
       : lang === 'id'
         ? 'Pesan Baru'
         : 'New Message';
+
+  const handleAddExternalLinkClick = () => {
+    setLinkInputError(null);
+    const trimmed = linkUrlInput.trim();
+    if (!trimmed) {
+      setLinkInputError(
+        lang === 'id'
+          ? 'Tempel URL Google Drive, VZ Files, Imgur, atau tautan file langsung.'
+          : 'Paste a Google Drive, VZ Files, Imgur, or direct file URL.'
+      );
+      return;
+    }
+    if (externalLinks.length >= MAIL_EXTERNAL_LINKS_MAX_COUNT) {
+      setLinkInputError(
+        lang === 'id'
+          ? `Maksimal ${MAIL_EXTERNAL_LINKS_MAX_COUNT} tautan eksternal per email.`
+          : `Maximum ${MAIL_EXTERNAL_LINKS_MAX_COUNT} external links per email.`
+      );
+      return;
+    }
+    const normalized = normalizeAndClassifyExternalLink(trimmed, {
+      label: linkLabelInput.trim() || undefined,
+    });
+    if (!normalized) {
+      setLinkInputError(
+        lang === 'id'
+          ? 'URL tidak valid atau tidak diizinkan. Gunakan alamat https:// publik.'
+          : 'Invalid or disallowed URL. Use a public https:// link.'
+      );
+      return;
+    }
+    onAddExternalLink(normalized);
+    setLinkUrlInput('');
+    setLinkLabelInput('');
+    setLinkPanelOpen(false);
+  };
 
   // MINIMIZED DOCK BAR (Gmail / Hotmail style bottom-right bar)
   if (mode === 'minimized') {
@@ -145,9 +229,9 @@ export function MailFloatingComposer({
           >
             <Send className="w-3.5 h-3.5 text-blue-400 shrink-0" />
             <span className="text-xs font-semibold truncate">{headerTitle}</span>
-            {attachments.length > 0 && (
+            {totalMediaCount > 0 && (
               <span className="text-[11px] font-mono tabular-nums text-slate-300 shrink-0">
-                ({attachments.length})
+                ({totalMediaCount})
               </span>
             )}
           </button>
@@ -197,8 +281,8 @@ export function MailFloatingComposer({
       onDrop={handleDrop}
       className={
         isFullscreen
-          ? 'w-full max-w-4xl h-[min(86vh,760px)] bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#252B38] rounded-2xl shadow-2xl flex flex-col overflow-hidden'
-          : 'fixed bottom-16 lg:bottom-0 right-2 sm:right-6 z-50 w-[min(560px,calc(100vw-1rem))] max-h-[min(82vh,640px)] bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#282F3E] rounded-t-2xl lg:rounded-b-none rounded-b-2xl shadow-2xl flex flex-col overflow-hidden'
+          ? 'w-full max-w-4xl h-[min(88vh,780px)] bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#252B38] rounded-2xl shadow-2xl flex flex-col overflow-hidden'
+          : 'fixed bottom-16 lg:bottom-0 right-2 sm:right-6 z-50 w-[min(590px,calc(100vw-1rem))] max-h-[min(84vh,670px)] bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#282F3E] rounded-t-2xl lg:rounded-b-none rounded-b-2xl shadow-2xl flex flex-col overflow-hidden'
       }
     >
       {/* Top Window Chrome Bar */}
@@ -396,18 +480,341 @@ export function MailFloatingComposer({
           {/* Message Body */}
           <textarea
             id="vz-compose-body"
-            rows={isFullscreen ? 14 : 7}
+            rows={isFullscreen ? 12 : 6}
             required
             disabled={sending}
             value={body}
             onChange={(e) => onChangeBody(e.target.value)}
             placeholder={
               lang === 'id'
-                ? 'Tulis isi pesan Anda di sini... Anda dapat langsung menyeret file (maks 10 MB) ke area ini untuk melampirkan.'
-                : 'Write your message here... You can drag & drop files (max 10 MB) directly onto this area to attach.'
+                ? 'Tulis isi pesan Anda di sini... Seret file (<=10 MB ke R2, atau >10 MB langsung ke VZ Files) atau sisipkan tautan Google Drive / Imgur.'
+                : 'Write your message here... Drag & drop files (<=10 MB via R2, or >10 MB via VZ Files) or insert Google Drive / Imgur links.'
             }
-            className="w-full min-h-[140px] flex-1 px-2.5 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] rounded-lg text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-blue-600 resize-y leading-relaxed"
+            className="w-full min-h-[125px] flex-1 px-2.5 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] rounded-lg text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-blue-600 resize-y leading-relaxed"
           />
+
+          {/* Smart >10 MB Action Banner — Offers instant upload to VZ Files (https://files.vz.gay) */}
+          {oversizedFiles.length > 0 && (
+            <div className="p-3 rounded-xl bg-blue-50/90 dark:bg-blue-950/35 border border-blue-200 dark:border-blue-900/70 space-y-2 text-xs">
+              <div className="flex items-start justify-between gap-2">
+                <div className="space-y-0.5">
+                  <div className="font-bold text-blue-900 dark:text-blue-200 flex items-center gap-1.5">
+                    <CloudUpload className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                    <span>
+                      {lang === 'id'
+                        ? 'File melebihi batas lampiran 10 MB — Kirim via VZ Files (files.vz.gay)!'
+                        : 'File exceeds 10 MB limit — Send via VZ Files (files.vz.gay)!'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-blue-800/90 dark:text-blue-300/90 leading-relaxed">
+                    {lang === 'id'
+                      ? 'Agar penyimpanan R2 tetap 0 byte dan email lolos server penerima, unggah file besar langsung ke layanan VZ Files (https://files.vz.gay) atau tempel tautan Google Drive.'
+                      : 'Keep R2 storage lean and bypass email size limits by uploading large files straight to VZ Files (https://files.vz.gay) or pasting a Google Drive link.'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={onClearOversizedFiles}
+                  aria-label="Dismiss large file suggestion"
+                  className="p-1 text-blue-600 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/50 rounded cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="space-y-1.5">
+                {oversizedFiles.map((file, idx) => (
+                  <div
+                    key={`${file.name}-${idx}`}
+                    className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-2 rounded-lg bg-white dark:bg-[#141925] border border-blue-200/80 dark:border-blue-900/60"
+                  >
+                    <div className="min-w-0 flex items-center gap-2">
+                      <FileIcon className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                      <span className="font-medium text-slate-900 dark:text-white truncate">
+                        {file.name}
+                      </span>
+                      <span className="font-mono text-[11px] text-slate-500 shrink-0">
+                        {formatFileSizeLabel(file.size)}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isUploadingVzFiles || sending}
+                      onClick={() => void onUploadFileToVzFiles(file)}
+                      className="px-2.5 py-1.5 text-[11px] font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-md inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+                    >
+                      <CloudUpload className="w-3.5 h-3.5" />
+                      <span>
+                        {lang === 'id'
+                          ? 'Unggah ke VZ Files'
+                          : 'Upload to VZ Files'}
+                      </span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => setLinkPanelOpen(true)}
+                  className="text-[11px] font-semibold text-blue-700 dark:text-blue-300 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Link2 className="w-3 h-3" />
+                  <span>
+                    {lang === 'id'
+                      ? 'Atau sisipkan tautan Google Drive / Cloud'
+                      : 'Or insert Google Drive / Cloud link'}
+                  </span>
+                </button>
+                <span aria-hidden="true" className="text-blue-300 dark:text-blue-700">·</span>
+                <a
+                  href="https://files.vz.gay"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] font-semibold text-blue-700 dark:text-blue-300 hover:underline inline-flex items-center gap-1"
+                >
+                  <span>files.vz.gay</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+            </div>
+          )}
+
+          {/* Live VZ Files Upload Progress Bar */}
+          {vzUploadProgress && (
+            <div className="p-3 rounded-xl bg-slate-900 dark:bg-[#0D1119] text-white border border-slate-700 dark:border-[#263044] space-y-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-2 font-medium truncate">
+                  <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin shrink-0" />
+                  <span className="truncate">{vzUploadProgress.detail}</span>
+                </span>
+                <span className="font-mono tabular-nums font-bold text-blue-300 shrink-0">
+                  {vzUploadProgress.percent}%
+                </span>
+              </div>
+              <div className="h-1.5 w-full rounded-full bg-slate-700 overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 transition-all duration-200"
+                  style={{ width: `${Math.min(100, Math.max(4, vzUploadProgress.percent))}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Inline "Insert Link / Direct Media (Imgur, Google Drive, VZ Files)" Panel */}
+          {linkPanelOpen && (
+            <div className="p-3 rounded-xl bg-[#FAFAFA] dark:bg-[#0E121A] border border-slate-200 dark:border-[#262E3F] space-y-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <div className="font-semibold text-slate-900 dark:text-white inline-flex items-center gap-1.5">
+                  <Link2 className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                  <span>
+                    {lang === 'id'
+                      ? 'Sisipkan Tautan File / Media Langsung (>10 MB / Imgur / Drive)'
+                      : 'Insert File Link / Direct Media (>10 MB / Imgur / Drive)'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLinkPanelOpen(false);
+                    setLinkInputError(null);
+                  }}
+                  aria-label="Close link panel"
+                  className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <input
+                  type="url"
+                  value={linkUrlInput}
+                  onChange={(e) => {
+                    setLinkUrlInput(e.target.value);
+                    setLinkInputError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddExternalLinkClick();
+                    }
+                  }}
+                  placeholder="https://i.imgur.com/...png atau drive.google.com/..."
+                  className="w-full px-2.5 py-2 text-xs font-mono bg-white dark:bg-[#131822] border border-slate-200 dark:border-[#2A3244] rounded-lg text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-blue-600"
+                />
+                <input
+                  type="text"
+                  value={linkLabelInput}
+                  onChange={(e) => setLinkLabelInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddExternalLinkClick();
+                    }
+                  }}
+                  placeholder={
+                    lang === 'id'
+                      ? 'Nama tampilan (opsional, mis. Video Final 4K)'
+                      : 'Display title (optional, e.g. Final Video 4K)'
+                  }
+                  className="w-full px-2.5 py-2 text-xs bg-white dark:bg-[#131822] border border-slate-200 dark:border-[#2A3244] rounded-lg text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-blue-600"
+                />
+              </div>
+
+              {previewClassifiedLink && (
+                <div className="flex items-center gap-2.5 p-2 rounded-lg bg-white dark:bg-[#141924] border border-slate-200 dark:border-[#262E3F]">
+                  {previewClassifiedLink.renderInline && previewClassifiedLink.directMediaUrl ? (
+                    <img
+                      src={previewClassifiedLink.directMediaUrl}
+                      alt={previewClassifiedLink.label}
+                      referrerPolicy="no-referrer"
+                      className="w-10 h-10 rounded object-cover border border-slate-200 dark:border-[#2B3345] shrink-0"
+                    />
+                  ) : (
+                    <div className="w-10 h-10 rounded bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 inline-flex items-center justify-center shrink-0">
+                      <Link2 className="w-4 h-4" />
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-slate-900 dark:text-white truncate">
+                      {previewClassifiedLink.label}
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {getExternalProviderDisplayName(previewClassifiedLink.provider)} ·{' '}
+                      {previewClassifiedLink.renderInline
+                        ? lang === 'id'
+                          ? 'Gambar langsung — otomatis tampil inline di email'
+                          : 'Direct image — renders inline in email'
+                        : lang === 'id'
+                          ? 'Ditampilkan sebagai kartu tautan rapi di email'
+                          : 'Rendered as a clickable link card in email'}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {linkInputError && (
+                <div className="text-[11px] font-medium text-rose-600 dark:text-rose-400">
+                  {linkInputError}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <a
+                  href="https://files.vz.gay"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-1"
+                >
+                  <span>
+                    {lang === 'id'
+                      ? 'Butuh hosting file besar gratis? Buka files.vz.gay'
+                      : 'Need free large file hosting? Open files.vz.gay'}
+                  </span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+                <button
+                  type="button"
+                  onClick={handleAddExternalLinkClick}
+                  className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>{lang === 'id' ? 'Sisipkan Tautan' : 'Insert Link'}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Attached External Links & Direct Inline Media Preview Chips */}
+          {externalLinks.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                {lang === 'id'
+                  ? `Tautan File & Media Langsung (${externalLinks.length})`
+                  : `External File Links & Direct Media (${externalLinks.length})`}
+              </div>
+              {externalLinks.map((link) => {
+                const canInline = Boolean(link.directMediaUrl);
+                return (
+                  <div
+                    key={link.id}
+                    className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg bg-blue-50/60 dark:bg-blue-950/20 border border-blue-200/80 dark:border-blue-900/50 text-xs"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      {link.renderInline && link.directMediaUrl ? (
+                        <img
+                          src={link.directMediaUrl}
+                          alt={link.label}
+                          referrerPolicy="no-referrer"
+                          className="w-9 h-9 rounded object-cover border border-blue-200 dark:border-blue-900 shrink-0"
+                        />
+                      ) : (
+                        <div className="w-8 h-8 rounded bg-white dark:bg-[#151B27] border border-blue-200/70 dark:border-blue-900/50 text-blue-600 dark:text-blue-400 inline-flex items-center justify-center shrink-0">
+                          {canInline ? (
+                            <ImageIcon className="w-4 h-4" />
+                          ) : (
+                            <Link2 className="w-4 h-4" />
+                          )}
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <div className="font-semibold text-slate-900 dark:text-white truncate">
+                          {link.label}
+                        </div>
+                        <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 truncate">
+                          {getExternalProviderDisplayName(link.provider)}
+                          {link.sizeLabel ? ` · ${link.sizeLabel}` : ''}
+                          {link.renderInline
+                            ? lang === 'id'
+                              ? ' · Tampil Inline'
+                              : ' · Inline Preview'
+                            : ''}{' '}
+                          · {link.url}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1 shrink-0">
+                      {canInline && (
+                        <button
+                          type="button"
+                          disabled={sending}
+                          onClick={() => onToggleExternalLinkInline(link.id)}
+                          title={
+                            link.renderInline
+                              ? lang === 'id'
+                                ? 'Ubah ke kartu tautan saja'
+                                : 'Switch to link card only'
+                              : lang === 'id'
+                                ? 'Tampilkan gambar inline di email'
+                                : 'Show image inline in email'
+                          }
+                          className="p-1.5 text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 rounded cursor-pointer"
+                        >
+                          {link.renderInline ? (
+                            <Eye className="w-3.5 h-3.5" />
+                          ) : (
+                            <EyeOff className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={sending}
+                        onClick={() => onRemoveExternalLink(link.id)}
+                        aria-label={`Remove ${link.label}`}
+                        className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 rounded cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* Attachments List & 10 MB Ephemeral R2 Capacity Indicator */}
           <div className="space-y-2">
@@ -444,8 +851,8 @@ export function MailFloatingComposer({
             <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
               <span>
                 {lang === 'id'
-                  ? `Lampiran sementara R2 (maks ${MAIL_ATTACHMENT_MAX_COUNT} file · 10 MB total · hapus otomatis saat diunduh/7 hari)`
-                  : `Ephemeral R2 attachments (max ${MAIL_ATTACHMENT_MAX_COUNT} files · 10 MB total · auto-purged on download/7d)`}
+                  ? `Lampiran R2 (<=10 MB, maks ${MAIL_ATTACHMENT_MAX_COUNT} file) · File >10 MB pakai VZ Files (files.vz.gay) atau Link Drive/Imgur`
+                  : `R2 attachments (<=10 MB, max ${MAIL_ATTACHMENT_MAX_COUNT} files) · For >10 MB use VZ Files (files.vz.gay) or Drive/Imgur links`}
               </span>
               {attachments.length > 0 && (
                 <span
@@ -462,7 +869,7 @@ export function MailFloatingComposer({
           </div>
         </div>
 
-        {/* Hidden File Input */}
+        {/* Hidden Regular R2 File Input (<= 10 MB; >10 MB auto-offers VZ Files) */}
         <input
           ref={fileInputRef}
           type="file"
@@ -476,12 +883,26 @@ export function MailFloatingComposer({
           }}
         />
 
+        {/* Hidden Direct VZ Files Upload Input (for >10 MB or any file to files.vz.gay) */}
+        <input
+          ref={vzFilesInputRef}
+          type="file"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+              void onUploadFileToVzFiles(file);
+              e.target.value = '';
+            }
+          }}
+        />
+
         {/* Bottom Action Bar */}
         <div className="px-4 py-3 bg-[#FAFAFA] dark:bg-[#0E1117] border-t border-slate-200 dark:border-[#232732] flex flex-wrap items-center justify-between gap-2 shrink-0">
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             <button
               type="submit"
-              disabled={sending || isOverAttachmentLimit}
+              disabled={sending || isUploadingVzFiles || isOverAttachmentLimit}
               className="min-h-[40px] inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               {sending ? (
@@ -501,12 +922,48 @@ export function MailFloatingComposer({
               type="button"
               disabled={sending || attachments.length >= MAIL_ATTACHMENT_MAX_COUNT}
               onClick={() => fileInputRef.current?.click()}
-              title={lang === 'id' ? 'Lampirkan File (maks 10 MB)' : 'Attach File (max 10 MB)'}
-              className="min-h-[40px] inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#1F2532] border border-slate-200 dark:border-[#2A303E] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              title={lang === 'id' ? 'Lampirkan File (maks 10 MB via R2)' : 'Attach File (max 10 MB via R2)'}
+              className="min-h-[40px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#1F2532] border border-slate-200 dark:border-[#2A303E] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Paperclip className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">
-                {lang === 'id' ? 'Lampirkan' : 'Attach'}
+                {lang === 'id' ? 'File' : 'File'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              disabled={sending || isUploadingVzFiles || externalLinks.length >= MAIL_EXTERNAL_LINKS_MAX_COUNT}
+              onClick={() => vzFilesInputRef.current?.click()}
+              title={
+                lang === 'id'
+                  ? 'Unggah File Besar (>10 MB) ke VZ Files (files.vz.gay)'
+                  : 'Upload Large File (>10 MB) to VZ Files (files.vz.gay)'
+              }
+              className="min-h-[40px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <CloudUpload className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">VZ Files</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={sending || externalLinks.length >= MAIL_EXTERNAL_LINKS_MAX_COUNT}
+              onClick={() => setLinkPanelOpen((prev) => !prev)}
+              title={
+                lang === 'id'
+                  ? 'Sisipkan Link Google Drive, Imgur, atau Direct Media'
+                  : 'Insert Google Drive, Imgur, or Direct Media Link'
+              }
+              className={`min-h-[40px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium border rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 ${
+                linkPanelOpen
+                  ? 'bg-slate-900 dark:bg-blue-600 text-white border-slate-900 dark:border-blue-600'
+                  : 'text-slate-700 dark:text-slate-200 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#1F2532] border-slate-200 dark:border-[#2A303E]'
+              }`}
+            >
+              <Link2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">
+                {lang === 'id' ? 'Link / Media' : 'Link / Media'}
               </span>
             </button>
 
@@ -514,10 +971,12 @@ export function MailFloatingComposer({
               type="button"
               disabled={sending}
               onClick={onSaveDraft}
-              className="min-h-[40px] inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#1F2532] border border-slate-200 dark:border-[#2A303E] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="min-h-[40px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#1F2532] border border-slate-200 dark:border-[#2A303E] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Save className="w-3.5 h-3.5" />
-              <span>{lang === 'id' ? 'Simpan Draf' : 'Save Draft'}</span>
+              <span className="hidden sm:inline">
+                {lang === 'id' ? 'Draf' : 'Draft'}
+              </span>
             </button>
           </div>
 
@@ -527,10 +986,9 @@ export function MailFloatingComposer({
             onClick={onDiscard}
             title={lang === 'id' ? 'Buang pesan ini' : 'Discard message'}
             aria-label={lang === 'id' ? 'Buang pesan' : 'Discard message'}
-            className="min-h-[40px] px-2.5 py-2 text-xs font-medium text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 inline-flex items-center gap-1 rounded-lg transition-colors cursor-pointer"
+            className="min-h-[40px] px-2 py-2 text-xs font-medium text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 inline-flex items-center gap-1 rounded-lg transition-colors cursor-pointer"
           >
             <Trash2 className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">{lang === 'id' ? 'Buang' : 'Discard'}</span>
           </button>
         </div>
       </form>
