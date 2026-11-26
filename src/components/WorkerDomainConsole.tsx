@@ -41,6 +41,11 @@ interface HealthSnapshot {
   primaryDomain?: string;
   outboundProviderMode?: string;
   activeOutboundProvider?: string;
+  brevoKeyFormat?:
+    | 'v3_ready'
+    | 'mcp_base64_extracted'
+    | 'mcp_token_warning'
+    | 'missing';
   linksStorageEngine?: string;
   mediaStorageEngine?: string;
   bindings?: {
@@ -48,6 +53,7 @@ interface HealthSnapshot {
     linksKv?: boolean;
     linksDb?: boolean;
     linksMediaR2?: boolean;
+    imagesBinding?: boolean;
     sendEmail?: boolean;
     cpanelRelay?: boolean;
     resendApi?: boolean;
@@ -445,7 +451,9 @@ export function WorkerDomainConsole({
             </div>
 
             <div className="p-3.5 rounded-lg bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-1">
-              <div className="text-[11px] text-slate-500">Bio Avatar Media (AVIF)</div>
+              <div className="text-[11px] text-slate-500">
+                R2 Media &amp; Server AVIF Converter
+              </div>
               <div className="font-mono font-semibold text-slate-900 dark:text-white">
                 {health?.bindings?.linksMediaR2
                   ? 'LINKS_MEDIA_R2 (R2)'
@@ -453,16 +461,30 @@ export function WorkerDomainConsole({
                     ? 'LINKS_DB (D1 Fallback)'
                     : 'LINKS_KV (Fallback)'}
               </div>
-              <div
-                className={`text-[11px] font-mono font-semibold ${
-                  health?.bindings?.linksMediaR2
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : 'text-blue-600 dark:text-blue-400'
-                }`}
-              >
-                {health?.bindings?.linksMediaR2
-                  ? 'Cloudflare R2 Active'
-                  : 'Auto Fallback · R2 Ready'}
+              <div className="text-[11px] font-mono flex flex-wrap items-center gap-1.5">
+                <span
+                  className={`font-semibold ${
+                    health?.bindings?.linksMediaR2
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-blue-600 dark:text-blue-400'
+                  }`}
+                >
+                  {health?.bindings?.linksMediaR2
+                    ? 'R2 Active'
+                    : 'R2 Standby'}
+                </span>
+                <span aria-hidden="true" className="text-slate-400">·</span>
+                <span
+                  className={`font-semibold ${
+                    health?.bindings?.imagesBinding
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-amber-600 dark:text-amber-400'
+                  }`}
+                >
+                  {health?.bindings?.imagesBinding
+                    ? 'IMAGES→AVIF Active'
+                    : 'IMAGES Not Bound'}
+                </span>
               </div>
             </div>
 
@@ -491,7 +513,11 @@ export function WorkerDomainConsole({
                 {health?.bindings?.resendApi
                   ? 'Resend Active'
                   : health?.bindings?.brevoApi
-                    ? 'Brevo Active'
+                    ? health?.brevoKeyFormat === 'mcp_token_warning'
+                      ? 'Brevo Set (MCP Key Warning)'
+                      : health?.brevoKeyFormat === 'mcp_base64_extracted'
+                        ? 'Brevo Active (MCP→v3 OK)'
+                        : 'Brevo v3 Active'
                     : health?.bindings?.sendEmail
                       ? 'CF SEND_EMAIL Active'
                       : 'Standby'}
@@ -508,6 +534,22 @@ export function WorkerDomainConsole({
               <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 truncate">
                 {health?.service || 'vzmail'}
               </div>
+            </div>
+          </div>
+        )}
+
+        {health?.brevoKeyFormat === 'mcp_token_warning' && (
+          <div className="p-3.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60 text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2.5 leading-relaxed">
+            <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <strong>
+                {lang === 'id'
+                  ? 'Perhatian Kunci BREVO_API_KEY (Format MCP Terdeteksi):'
+                  : 'BREVO_API_KEY Format Warning (MCP Token Detected):'}
+              </strong>{' '}
+              {lang === 'id'
+                ? 'Secret BREVO_API_KEY yang terpasang tampak bukan kunci API v3 standar (awalan xkeysib-...), melainkan token MCP. Jika pengiriman email ditolak Brevo (HTTP 401), buat kunci baru bertipe API Key (v3) di Brevo → Settings → SMTP & API → API keys (xkeysib-...) lalu perbarui secret BREVO_API_KEY di panel Cloudflare Workers.'
+                : 'Your BREVO_API_KEY secret does not start with xkeysib- and looks like an MCP token. If Brevo rejects sending with HTTP 401, generate a standard API v3 key (xkeysib-...) in Brevo → Settings → SMTP & API → API keys and update BREVO_API_KEY in Cloudflare Workers Secrets.'}
             </div>
           </div>
         )}

@@ -41,10 +41,15 @@ import {
 } from '../src/utils/mailSecurity.ts';
 import {
   AVATAR_MAX_BYTES,
+  AVATAR_RAW_UPLOAD_MAX_BYTES,
   BIO_DELETE_COOLDOWN_MS,
   BIO_DELETE_COOLDOWN_SECONDS,
+  MAIL_ATTACHMENT_MAX_COUNT,
+  MAIL_ATTACHMENT_MAX_TOTAL_BYTES,
+  MAIL_ATTACHMENT_TTL_MS,
   RECYCLE_BIN_RETENTION_MS,
   RECYCLE_BIN_TTL_SECONDS,
+  detectRawImageMime,
   detectValidatedAvatarMime,
   generateShortlinkCode,
   getDefaultQrDesignForTheme,
@@ -79,6 +84,26 @@ import {
   type SeoRouteKind,
 } from '../src/utils/seoConfig.ts';
 
+export interface CloudflareImagesTransformResult {
+  response(): Response;
+}
+
+export interface CloudflareImagesTransformer {
+  transform(options: {
+    width?: number;
+    height?: number;
+    fit?: 'scale-down' | 'contain' | 'cover' | 'crop' | 'pad';
+  }): CloudflareImagesTransformer;
+  output(options: {
+    format: 'image/avif' | 'image/webp' | 'image/jpeg' | 'image/png';
+    quality?: number;
+  }): Promise<CloudflareImagesTransformResult>;
+}
+
+export interface CloudflareImagesBinding {
+  input(stream: ReadableStream<Uint8Array>): CloudflareImagesTransformer;
+}
+
 export interface CloudflareSendEmailMessage {
   from: string | { email: string; name?: string };
   to: string | string[] | { email: string; name?: string }[];
@@ -99,6 +124,7 @@ export interface WorkerEnv {
   LINKS_KV?: KVNamespace;
   LINKS_DB?: D1Database;
   LINKS_MEDIA_R2?: R2Bucket;
+  IMAGES?: CloudflareImagesBinding;
   SEND_EMAIL?: SendEmailBinding;
   APP_DOMAIN?: string;
   LINKS_DOMAIN?: string;
@@ -116,6 +142,18 @@ export interface WorkerEnv {
 }
 
 type OutboundProviderId = 'cpanel_relay' | 'resend' | 'brevo' | 'cloudflare' | 'none';
+type BrevoKeyFormatStatus =
+  | 'v3_ready'
+  | 'mcp_base64_extracted'
+  | 'mcp_token_warning'
+  | 'missing';
+
+interface OutboundAttachmentBinary {
+  filename: string;
+  mimeType: string;
+  contentBase64: string;
+  sizeBytes: number;
+}
 
 interface OutboundDispatchPayload {
   fromEmail: string;
@@ -125,6 +163,46 @@ interface OutboundDispatchPayload {
   text: string;
   html: string;
   rfcMessageId: string;
+  attachments?: OutboundAttachmentBinary[];
+}
+
+function inspectBrevoApiKey(raw?: string): {
+  apiKey: string | null;
+  keyFormat: BrevoKeyFormatStatus;
+} {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) {
+    return { apiKey: null, keyFormat: 'missing' };
+  }
+  if (trimmed.startsWith('xkeysib-')) {
+    return { apiKey: trimmed, keyFormat: 'v3_ready' };
+  }
+  // Brevo MCP tokens are frequently Base64-encoded JSON (`eyJ...==`). Try extracting embedded xkeysib- key safely.
+  if (trimmed.startsWith('eyJ') || trimmed.endsWith('=')) {
+    try {
+      const normalized = trimmed.replace(/-/g, '+').replace(/_/g, '/');
+      const decoded = atob(normalized);
+      const parsed = JSON.parse(decoded) as Record<string, unknown>;
+      const candidateKeys = [
+        parsed?.api_key,
+        parsed?.apiKey,
+        parsed?.key,
+        parsed?.v3_api_key,
+      ];
+      for (const candidate of candidateKeys) {
+        if (typeof candidate === 'string' && candidate.trim().startsWith('xkeysib-')) {
+          return {
+            apiKey: candidate.trim(),
+            keyFormat: 'mcp_base64_extracted',
+          };
+        }
+      }
+      return { apiKey: trimmed, keyFormat: 'mcp_token_warning' };
+    } catch {
+      return { apiKey: trimmed, keyFormat: 'mcp_token_warning' };
+    }
+  }
+  return { apiKey: trimmed, keyFormat: 'v3_ready' };
 }
 
 function getOutboundCapabilities(env: WorkerEnv) {
@@ -141,10 +219,19 @@ function getOutboundCapabilities(env: WorkerEnv) {
       env.CPANEL_RELAY_SECRET.trim().length >= 16
   );
   const resend = Boolean(env.RESEND_API_KEY && env.RESEND_API_KEY.trim().length > 0);
-  const brevo = Boolean(env.BREVO_API_KEY && env.BREVO_API_KEY.trim().length > 0);
+  const brevoInfo = inspectBrevoApiKey(env.BREVO_API_KEY);
+  const brevo = Boolean(brevoInfo.apiKey);
   const cloudflare = Boolean(env.SEND_EMAIL);
 
-  return { safeRelayUrl, cpanelRelay, resend, brevo, cloudflare };
+  return {
+    safeRelayUrl,
+    cpanelRelay,
+    resend,
+    brevo,
+    brevoKeyFormat: brevoInfo.keyFormat,
+    brevoResolvedKey: brevoInfo.apiKey,
+    cloudflare,
+  };
 }
 
 function resolveOutboundProvider(env: WorkerEnv): OutboundProviderId {
@@ -228,6 +315,14 @@ async function dispatchOutboundEmail(
         subject: payload.subject,
         text: payload.text,
         html: payload.html,
+        ...(payload.attachments && payload.attachments.length > 0
+          ? {
+              attachments: payload.attachments.map((att) => ({
+                filename: att.filename,
+                content: att.contentBase64,
+              })),
+            }
+          : {}),
         headers: {
           'Message-ID': payload.rfcMessageId,
           'X-VZ-Zero-Retention': 'true',
@@ -249,35 +344,57 @@ async function dispatchOutboundEmail(
   }
 
   if (provider === 'brevo') {
+    const resolvedBrevoKey = caps.brevoResolvedKey || env.BREVO_API_KEY!.trim();
+    const brevoBody: Record<string, unknown> = {
+      sender: {
+        name: payload.fromName,
+        email: payload.fromEmail,
+      },
+      to: [{ email: payload.toEmail }],
+      subject: payload.subject,
+      textContent: payload.text,
+      htmlContent: payload.html,
+      headers: {
+        'Message-ID': payload.rfcMessageId,
+        'X-VZ-Zero-Retention': 'true',
+      },
+    };
+    if (payload.attachments && payload.attachments.length > 0) {
+      brevoBody.attachment = payload.attachments.map((att) => ({
+        name: att.filename,
+        content: att.contentBase64,
+      }));
+    }
+
     const res = await fetch('https://api.brevo.com/v3/smtp/email', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'api-key': env.BREVO_API_KEY!.trim(),
+        'api-key': resolvedBrevoKey,
       },
-      body: JSON.stringify({
-        sender: {
-          name: payload.fromName,
-          email: payload.fromEmail,
-        },
-        to: [{ email: payload.toEmail }],
-        subject: payload.subject,
-        textContent: payload.text,
-        htmlContent: payload.html,
-        headers: {
-          'Message-ID': payload.rfcMessageId,
-          'X-VZ-Zero-Retention': 'true',
-        },
-      }),
+      body: JSON.stringify(brevoBody),
     });
 
     if (!res.ok) {
-      const errBody = (await res.json().catch(() => null)) as { message?: string } | null;
+      const errBody = (await res.json().catch(() => null)) as {
+        message?: string;
+        code?: string;
+      } | null;
+      const rawMsg = errBody?.message || '';
+      if (
+        (res.status === 401 || res.status === 403) &&
+        caps.brevoKeyFormat === 'mcp_token_warning'
+      ) {
+        return {
+          ok: false,
+          error: `Brevo menolak autentikasi (HTTP ${res.status}): secret BREVO_API_KEY terdeteksi bertipe token MCP (bukan API key v3 standar xkeysib-...). Buat kunci API v3 baru di Brevo -> Settings -> SMTP & API -> API keys (tanpa opsi MCP) lalu perbarui secret BREVO_API_KEY di Cloudflare Workers.`,
+        };
+      }
       return {
         ok: false,
-        error:
-          errBody?.message ||
-          `Pengiriman via Brevo API gagal (HTTP ${res.status}). Pastikan domain pengirim imy.li sudah terverifikasi di Brevo.`,
+        error: rawMsg
+          ? `Brevo API menolak pengiriman (HTTP ${res.status}): ${rawMsg}`
+          : `Pengiriman via Brevo API gagal (HTTP ${res.status}). Pastikan kunci BREVO_API_KEY (xkeysib-...) valid dan domain pengirim imy.li sudah terverifikasi di Brevo.`,
       };
     }
 
@@ -311,6 +428,16 @@ async function dispatchOutboundEmail(
   };
 }
 
+export interface EphemeralPacketAttachment {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  ephemeralId: string;
+  ephemeralOwner: string;
+  expiresAt: string;
+}
+
 export interface EphemeralMailPacket {
   id: string;
   rfcMessageId: string;
@@ -324,6 +451,7 @@ export interface EphemeralMailPacket {
   bodyText: string;
   receivedAt: string;
   expiresAt: string;
+  attachments?: EphemeralPacketAttachment[];
 }
 
 const TRANSIT_TTL_SECONDS = 72 * 3600;
@@ -698,38 +826,111 @@ async function readBoundedStreamText(
 }
 
 /**
- * Extracts a clean plain-text body from raw RFC 5322 / MIME text without external dependencies.
+ * Extracts a clean plain-text body and any base64-encoded MIME attachments from raw RFC 5322 email text.
  */
-function extractReadableBodyFromRawMime(rawMime: string): string {
+function extractBodyAndAttachmentsFromRawMime(rawMime: string): {
+  bodyText: string;
+  attachments: Array<{
+    filename: string;
+    mimeType: string;
+    bytes: Uint8Array;
+  }>;
+} {
   const normalized = rawMime.replace(/\r\n/g, '\n');
   const headerBodySplit = normalized.indexOf('\n\n');
   if (headerBodySplit < 0) {
-    return normalized.trim().slice(0, MAX_EMAIL_BODY_CHARS);
+    return { bodyText: normalized.trim().slice(0, MAX_EMAIL_BODY_CHARS), attachments: [] };
   }
 
   const headersPart = normalized.slice(0, headerBodySplit);
   const bodyPart = normalized.slice(headerBodySplit + 2);
+  let extractedText = '';
+  const attachments: Array<{ filename: string; mimeType: string; bytes: Uint8Array }> = [];
+  let totalAttBytes = 0;
 
-  // Check if multipart and extract first text/plain section if present
-  const boundaryMatch = headersPart.match(/boundary=(?:"([^"]+)"|([^\s;]+))/i);
-  if (boundaryMatch) {
+  const parseMultipart = (partHeaders: string, partBody: string, depth: number) => {
+    if (depth > 3) return;
+    const boundaryMatch = partHeaders.match(/boundary=(?:"([^"]+)"|([^\s;]+))/i);
+    if (!boundaryMatch) return;
     const boundary = boundaryMatch[1] || boundaryMatch[2];
-    const sections = bodyPart.split(`--${boundary}`);
-    for (const section of sections) {
-      if (/content-type:\s*text\/plain/i.test(section)) {
-        const partSplit = section.indexOf('\n\n');
-        if (partSplit >= 0) {
-          return section
-            .slice(partSplit + 2)
-            .replace(/--\s*$/, '')
-            .trim()
-            .slice(0, MAX_EMAIL_BODY_CHARS);
+    const sections = partBody.split(`--${boundary}`);
+    for (const rawSection of sections) {
+      const section = rawSection.replace(/^\n+/, '');
+      if (!section || section.startsWith('--')) continue;
+      const splitIdx = section.indexOf('\n\n');
+      if (splitIdx < 0) continue;
+      const secHeaders = section.slice(0, splitIdx);
+      const secBody = section.slice(splitIdx + 2).replace(/\n--$/, '').trim();
+
+      if (/content-type:\s*multipart\//i.test(secHeaders)) {
+        parseMultipart(secHeaders, secBody, depth + 1);
+        continue;
+      }
+
+      const isAttachment =
+        /content-disposition:\s*attachment/i.test(secHeaders) ||
+        /filename\s*=/i.test(secHeaders);
+
+      if (isAttachment && attachments.length < MAIL_ATTACHMENT_MAX_COUNT) {
+        const nameMatch =
+          secHeaders.match(/filename="?([^";\n]+)"?/i) ||
+          secHeaders.match(/name="?([^";\n]+)"?/i);
+        const ctMatch = secHeaders.match(/content-type:\s*([^;\n]+)/i);
+        const isBase64 = /content-transfer-encoding:\s*base64/i.test(secHeaders);
+        const filename = sanitizeAttachmentFilename(nameMatch?.[1] || 'attachment.bin');
+        const mimeType = (ctMatch?.[1] || 'application/octet-stream').trim().toLowerCase();
+
+        try {
+          const bytes = isBase64
+            ? base64ToUint8(secBody.replace(/\s+/g, ''))
+            : new TextEncoder().encode(secBody);
+          if (bytes.byteLength > 0 && totalAttBytes + bytes.byteLength <= MAIL_ATTACHMENT_MAX_TOTAL_BYTES) {
+            totalAttBytes += bytes.byteLength;
+            attachments.push({ filename, mimeType, bytes });
+          }
+        } catch {
+          // Skip malformed attachment chunk safely
+        }
+        continue;
+      }
+
+      if (!extractedText && /content-type:\s*text\/plain/i.test(secHeaders)) {
+        const isBase64 = /content-transfer-encoding:\s*base64/i.test(secHeaders);
+        try {
+          extractedText = isBase64
+            ? new TextDecoder('utf-8', { fatal: false }).decode(
+                base64ToUint8(secBody.replace(/\s+/g, ''))
+              )
+            : secBody;
+        } catch {
+          extractedText = secBody;
         }
       }
     }
+  };
+
+  if (/content-type:\s*multipart\//i.test(headersPart)) {
+    parseMultipart(headersPart, bodyPart, 0);
   }
 
-  return bodyPart.trim().slice(0, MAX_EMAIL_BODY_CHARS);
+  return {
+    bodyText: (extractedText || bodyPart).trim().slice(0, MAX_EMAIL_BODY_CHARS),
+    attachments,
+  };
+}
+
+function sanitizeAttachmentFilename(raw: string): string {
+  const cleaned = stripHeaderInjection(raw, 120)
+    .replace(/[/\\:*?"<>|]/g, '_')
+    .replace(/^\.+/, '')
+    .trim();
+  return cleaned || 'attachment.bin';
+}
+
+function buildEphemeralAttachmentKey(ownerUser: string, attId: string): string {
+  const safeOwner = sanitizeHandle(ownerUser);
+  const safeId = attId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+  return `mail-ephemeral/${safeOwner}/${safeId}`;
 }
 
 function getDailyLimit(env: WorkerEnv): number {
@@ -1579,7 +1780,7 @@ async function putAvatarToStorage(
   username: string,
   pageSlug: string,
   bytes: Uint8Array,
-  contentType: 'image/avif' | 'image/webp'
+  contentType: string
 ): Promise<MediaStorageEngine> {
   const key = buildAvatarStorageKey(username, pageSlug);
   const now = new Date().toISOString();
@@ -1630,6 +1831,21 @@ async function putAvatarToStorage(
   return 'none';
 }
 
+const SAFE_STORED_AVATAR_MIMES = new Set([
+  'image/avif',
+  'image/webp',
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+]);
+
+function normalizeStoredAvatarContentType(raw?: string): string {
+  if (raw && SAFE_STORED_AVATAR_MIMES.has(raw.toLowerCase())) {
+    return raw.toLowerCase();
+  }
+  return 'image/avif';
+}
+
 async function getAvatarFromStorage(
   env: WorkerEnv,
   username: string,
@@ -1640,8 +1856,7 @@ async function getAvatarFromStorage(
   if (env.LINKS_MEDIA_R2) {
     const obj = await env.LINKS_MEDIA_R2.get(key);
     if (obj && obj.body) {
-      const ct =
-        obj.httpMetadata?.contentType === 'image/webp' ? 'image/webp' : 'image/avif';
+      const ct = normalizeStoredAvatarContentType(obj.httpMetadata?.contentType);
       return { body: obj.body, contentType: ct };
     }
   }
@@ -1654,7 +1869,7 @@ async function getAvatarFromStorage(
         .bind(key)
         .first<{ content_type: string; data_base64: string }>();
       if (row && row.data_base64) {
-        const ct = row.content_type === 'image/webp' ? 'image/webp' : 'image/avif';
+        const ct = normalizeStoredAvatarContentType(row.content_type);
         const bytes = base64ToUint8(row.data_base64);
         return { body: bytes.buffer as ArrayBuffer, contentType: ct };
       }
@@ -1669,7 +1884,7 @@ async function getAvatarFromStorage(
       dataBase64?: string;
     }>(`avatar:${key}`, 'json');
     if (raw?.dataBase64) {
-      const ct = raw.contentType === 'image/webp' ? 'image/webp' : 'image/avif';
+      const ct = normalizeStoredAvatarContentType(raw.contentType);
       const bytes = base64ToUint8(raw.dataBase64);
       return { body: bytes.buffer as ArrayBuffer, contentType: ct };
     }
@@ -2071,11 +2286,12 @@ async function emptyRecycleBinForOwner(
 async function handleApiRequest(
   request: Request,
   url: URL,
-  env: WorkerEnv
+  env: WorkerEnv,
+  ctx: ExecutionContext
 ): Promise<Response> {
   const primaryDomain = getPrimaryDomain(env);
 
-  // Public health check endpoint (booleans only — never exposes secret values)
+  // Public health check endpoint (booleans & safe format enums only — never exposes secret values)
   if (url.pathname === '/api/health' && request.method === 'GET') {
     const caps = getOutboundCapabilities(env);
     const activeOutboundProvider = resolveOutboundProvider(env);
@@ -2087,6 +2303,7 @@ async function handleApiRequest(
       retentionPolicy: 'EPHEMERAL_POP_AND_PURGE',
       outboundProviderMode: (env.OUTBOUND_PROVIDER || 'auto').trim().toLowerCase(),
       activeOutboundProvider,
+      brevoKeyFormat: caps.brevoKeyFormat,
       linksStorageEngine: d1Ready
         ? 'cloudflare-d1'
         : env.LINKS_KV
@@ -2099,6 +2316,7 @@ async function handleApiRequest(
         linksKv: Boolean(env.LINKS_KV),
         linksDb: Boolean(env.LINKS_DB),
         linksMediaR2: Boolean(env.LINKS_MEDIA_R2),
+        imagesBinding: Boolean(env.IMAGES),
         sendEmail: caps.cloudflare,
         cpanelRelay: caps.cpanelRelay,
         resendApi: caps.resend,
@@ -2346,7 +2564,145 @@ async function handleApiRequest(
     });
   }
 
-  // 5. POST /api/mail/send — Dispatch via Cloudflare Email Sending (`env.SEND_EMAIL`)
+  // 4.5 POST /api/mail/attachments/upload — Store temporary attachment in R2 (max 10 MB, 7-day TTL, purged on download/send)
+  if (url.pathname === '/api/mail/attachments/upload' && request.method === 'POST') {
+    const ownerUser = sanitizeHandle(url.searchParams.get('ownerUser') || 'fadhil');
+    const filename = sanitizeAttachmentFilename(url.searchParams.get('filename') || 'attachment.bin');
+    const mimeType = stripHeaderInjection(
+      request.headers.get('content-type') || 'application/octet-stream',
+      120
+    )
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+
+    const bin = await readBoundedBinary(request, MAIL_ATTACHMENT_MAX_TOTAL_BYTES);
+    if (!bin.ok) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: 'Ukuran lampiran melebihi batas maksimal 10 MB per email.',
+        },
+        bin.status
+      );
+    }
+    if (bin.bytes.byteLength === 0) {
+      return jsonResponse({ ok: false, error: 'File lampiran kosong.' }, 400);
+    }
+    if (!env.LINKS_MEDIA_R2) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: 'Bucket R2 LINKS_MEDIA_R2 belum aktif untuk menampung lampiran sementara.',
+        },
+        503
+      );
+    }
+
+    const attId = generateSecureId('att');
+    const key = buildEphemeralAttachmentKey(ownerUser, attId);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + MAIL_ATTACHMENT_TTL_MS).toISOString();
+
+    await env.LINKS_MEDIA_R2.put(key, bin.bytes, {
+      httpMetadata: {
+        contentType: mimeType || 'application/octet-stream',
+        cacheControl: 'private, no-store',
+      },
+      customMetadata: {
+        ownerUser,
+        filename,
+        mimeType: mimeType || 'application/octet-stream',
+        sizeBytes: String(bin.bytes.byteLength),
+        uploadedAt: now.toISOString(),
+        expiresAt,
+      },
+    });
+
+    return jsonResponse({
+      ok: true,
+      id: attId,
+      ephemeralId: attId,
+      ephemeralOwner: ownerUser,
+      filename,
+      mimeType: mimeType || 'application/octet-stream',
+      sizeBytes: bin.bytes.byteLength,
+      expiresAt,
+      storageEngine: 'cloudflare-r2-ephemeral',
+    });
+  }
+
+  // 4.6 GET /api/mail/attachments/:ownerUser/:attId — WhatsApp-style one-time download + immediate R2 purge
+  if (url.pathname.startsWith('/api/mail/attachments/') && request.method === 'GET') {
+    const rest = url.pathname.replace('/api/mail/attachments/', '').replace(/\/+$/, '');
+    const parts = rest.split('/').filter(Boolean);
+    if (parts.length < 2) {
+      return jsonResponse({ ok: false, error: 'Parameter lampiran tidak valid.' }, 400);
+    }
+    const ownerUser = sanitizeHandle(decodeURIComponent(parts[0]));
+    const attId = decodeURIComponent(parts[1]).replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!attId) {
+      return jsonResponse({ ok: false, error: 'ID lampiran tidak valid.' }, 400);
+    }
+    if (!env.LINKS_MEDIA_R2) {
+      return jsonResponse(
+        {
+          ok: false,
+          code: 'EXPIRED_OR_PURGED',
+          error: 'Penyimpanan lampiran R2 tidak aktif atau media sudah terhapus.',
+        },
+        410
+      );
+    }
+
+    const key = buildEphemeralAttachmentKey(ownerUser, attId);
+    const obj = await env.LINKS_MEDIA_R2.get(key);
+    if (!obj) {
+      return jsonResponse(
+        {
+          ok: false,
+          code: 'EXPIRED_OR_PURGED',
+          error:
+            'Media ini sudah tidak ada di server R2 (otomatis terhapus setelah diunduh atau melewati batas 7 hari). Minta pengirim untuk mengirim ulang.',
+        },
+        410
+      );
+    }
+
+    const expiresAtStr = obj.customMetadata?.expiresAt || '';
+    if (expiresAtStr && Date.now() > new Date(expiresAtStr).getTime()) {
+      ctx.waitUntil(env.LINKS_MEDIA_R2.delete(key));
+      return jsonResponse(
+        {
+          ok: false,
+          code: 'EXPIRED_OR_PURGED',
+          error:
+            'Lampiran ini telah melewati batas simpan sementara 7 hari dan dihapus dari server R2. Minta pengirim untuk mengirim ulang.',
+        },
+        410
+      );
+    }
+
+    const bytes = await obj.arrayBuffer();
+    const filename = sanitizeAttachmentFilename(obj.customMetadata?.filename || 'attachment.bin');
+    const contentType = obj.httpMetadata?.contentType || 'application/octet-stream';
+
+    // WhatsApp-style Zero Retention: purge object from R2 immediately after serving to recipient
+    ctx.waitUntil(env.LINKS_MEDIA_R2.delete(key));
+
+    return new Response(bytes, {
+      status: 200,
+      headers: {
+        'Content-Type': contentType,
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'X-VZ-R2-Purged': 'true',
+      },
+    });
+  }
+
+  // 5. POST /api/mail/send — Dispatch outbound email via Brevo / Resend / cPanel / Cloudflare SEND_EMAIL
   if (url.pathname === '/api/mail/send' && request.method === 'POST') {
     const parsed = await readBoundedJson<{
       senderUser?: string;
@@ -2354,6 +2710,13 @@ async function handleApiRequest(
       toAddress?: string;
       subject?: string;
       bodyText?: string;
+      attachments?: Array<{
+        id?: string;
+        ephemeralId?: string;
+        filename?: string;
+        mimeType?: string;
+        sizeBytes?: number;
+      }>;
     }>(request);
     if (!parsed.ok) {
       return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
@@ -2423,6 +2786,60 @@ async function handleApiRequest(
       );
     }
 
+    // Load temporary R2 attachments (if any), enforcing max 5 files & 10 MB total
+    const rawAttRefs = Array.isArray(parsed.data.attachments)
+      ? parsed.data.attachments.slice(0, MAIL_ATTACHMENT_MAX_COUNT)
+      : [];
+    const loadedAttachments: Array<{
+      r2Key: string;
+      filename: string;
+      mimeType: string;
+      bytes: Uint8Array;
+      contentBase64: string;
+    }> = [];
+    let totalAttachmentBytes = 0;
+
+    if (rawAttRefs.length > 0 && env.LINKS_MEDIA_R2) {
+      for (const ref of rawAttRefs) {
+        const attId = String(ref.ephemeralId || ref.id || '').replace(/[^a-zA-Z0-9_-]/g, '');
+        if (!attId) continue;
+        const r2Key = buildEphemeralAttachmentKey(senderUser, attId);
+        const obj = await env.LINKS_MEDIA_R2.get(r2Key);
+        if (!obj) {
+          return jsonResponse(
+            {
+              ok: false,
+              error: `Lampiran "${ref.filename || attId}" sudah kedaluwarsa di R2. Unggah ulang file sebelum mengirim.`,
+            },
+            410
+          );
+        }
+        const buf = new Uint8Array(await obj.arrayBuffer());
+        totalAttachmentBytes += buf.byteLength;
+        if (totalAttachmentBytes > MAIL_ATTACHMENT_MAX_TOTAL_BYTES) {
+          return jsonResponse(
+            {
+              ok: false,
+              error: 'Total ukuran seluruh lampiran melebihi batas maksimal 10 MB per email.',
+            },
+            413
+          );
+        }
+        loadedAttachments.push({
+          r2Key,
+          filename: sanitizeAttachmentFilename(
+            ref.filename || obj.customMetadata?.filename || 'attachment.bin'
+          ),
+          mimeType:
+            ref.mimeType ||
+            obj.httpMetadata?.contentType ||
+            'application/octet-stream',
+          bytes: buf,
+          contentBase64: uint8ToBase64(buf),
+        });
+      }
+    }
+
     const messageIdToken = generateSecureId('out');
     const rfcMessageId = `<${messageIdToken}@${primaryDomain}>`;
     const activeProvider = resolveOutboundProvider(env);
@@ -2440,6 +2857,12 @@ async function handleApiRequest(
           text: bodyText,
           html: plainTextToSafeEmailHtml(bodyText),
           rfcMessageId,
+          attachments: loadedAttachments.map((a) => ({
+            filename: a.filename,
+            mimeType: a.mimeType,
+            contentBase64: a.contentBase64,
+            sizeBytes: a.bytes.byteLength,
+          })),
         });
         if (!result.ok) {
           logError('outbound_provider_rejected', new Error(result.error), {
@@ -2447,7 +2870,14 @@ async function handleApiRequest(
             provider: activeProvider,
             domain: primaryDomain,
           });
-          return jsonResponse({ ok: false, error: result.error }, 502);
+          return jsonResponse(
+            {
+              ok: false,
+              providerUsed: activeProvider,
+              error: result.error,
+            },
+            502
+          );
         }
         dispatchedVia = result.label;
         liveEmailDispatched = true;
@@ -2460,7 +2890,8 @@ async function handleApiRequest(
         return jsonResponse(
           {
             ok: false,
-            error: `Pengiriman email via ${activeProvider} mengalami gangguan koneksi. Periksa konfigurasi provider di Konsol Admin.`,
+            providerUsed: activeProvider,
+            error: `Pengiriman email via ${activeProvider} mengalami gangguan koneksi. Periksa konfigurasi provider di Konsol Worker & Domain.`,
           },
           502
         );
@@ -2485,6 +2916,43 @@ async function handleApiRequest(
     if (resolvedRecipient.isValid && resolvedRecipient.isSupportedDomain) {
       const now = new Date();
       const pktId = generateSecureId('cf-loop');
+      const recipientAttachments: EphemeralPacketAttachment[] = [];
+
+      // Clone ephemeral R2 attachment for internal recipient (7-day TTL, purged on download)
+      if (loadedAttachments.length > 0 && env.LINKS_MEDIA_R2) {
+        const expiresAt = new Date(now.getTime() + MAIL_ATTACHMENT_TTL_MS).toISOString();
+        for (const att of loadedAttachments) {
+          const recAttId = generateSecureId('att');
+          const recKey = buildEphemeralAttachmentKey(
+            resolvedRecipient.canonicalUsername,
+            recAttId
+          );
+          await env.LINKS_MEDIA_R2.put(recKey, att.bytes, {
+            httpMetadata: {
+              contentType: att.mimeType,
+              cacheControl: 'private, no-store',
+            },
+            customMetadata: {
+              ownerUser: resolvedRecipient.canonicalUsername,
+              filename: att.filename,
+              mimeType: att.mimeType,
+              sizeBytes: String(att.bytes.byteLength),
+              uploadedAt: now.toISOString(),
+              expiresAt,
+            },
+          });
+          recipientAttachments.push({
+            id: recAttId,
+            filename: att.filename,
+            mimeType: att.mimeType,
+            sizeBytes: att.bytes.byteLength,
+            ephemeralId: recAttId,
+            ephemeralOwner: resolvedRecipient.canonicalUsername,
+            expiresAt,
+          });
+        }
+      }
+
       loopbackPacket = {
         id: pktId,
         rfcMessageId,
@@ -2498,6 +2966,7 @@ async function handleApiRequest(
         bodyText,
         receivedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + TRANSIT_TTL_SECONDS * 1000).toISOString(),
+        attachments: recipientAttachments,
       };
 
       if (env.MAIL_TRANSIT_KV) {
@@ -2509,9 +2978,19 @@ async function handleApiRequest(
       }
     }
 
+    // Immediately purge sender's temporary outbound R2 uploads so R2 stays at 0 bytes for sent mail!
+    if (loadedAttachments.length > 0 && env.LINKS_MEDIA_R2) {
+      const keysToDelete = loadedAttachments.map((a) => a.r2Key);
+      ctx.waitUntil(
+        Promise.allSettled(keysToDelete.map((k) => env.LINKS_MEDIA_R2!.delete(k)))
+      );
+    }
+
     logInfo('mail_outbound_processed', {
       senderUser,
       liveEmailDispatched,
+      providerUsed: activeProvider,
+      attachmentCount: loadedAttachments.length,
       routedToImyQueue: Boolean(loopbackPacket),
     });
 
@@ -2524,6 +3003,7 @@ async function handleApiRequest(
       rfcMessageId,
       sentAt: new Date().toISOString(),
       serverStoredCopy: false,
+      r2AttachmentsPurged: loadedAttachments.length,
       quota: {
         usedToday: quota.usedToday + 1,
         dailyLimit: quota.dailyLimit,
@@ -3095,28 +3575,99 @@ async function handleApiRequest(
           429
         );
       }
-      const bin = await readBoundedBinary(request, AVATAR_MAX_BYTES);
+
+      // Accept ANY supported image format up to 10 MB for server-side AVIF conversion
+      const bin = await readBoundedBinary(request, AVATAR_RAW_UPLOAD_MAX_BYTES);
       if (!bin.ok) {
-        return jsonResponse({ ok: false, error: bin.error }, bin.status);
+        return jsonResponse(
+          { ok: false, error: 'Ukuran gambar sumber melebihi batas maksimal 10 MB.' },
+          bin.status
+        );
       }
-      const validatedMime = detectValidatedAvatarMime(bin.bytes);
-      if (!validatedMime) {
+
+      const sourceBytes = bin.bytes.byteLength;
+      const sourceMime = detectRawImageMime(bin.bytes);
+      if (!sourceMime) {
         return jsonResponse(
           {
             ok: false,
             error:
-              'Format berkas ditolak. Hanya gambar AVIF atau WebP terkompresi (maks 128 KB) yang diizinkan.',
+              'Format berkas tidak dikenali sebagai gambar yang aman (mendukung JPG, PNG, WebP, GIF, AVIF, HEIC, BMP, TIFF, SVG).',
           },
           400
         );
+      }
+
+      let finalBytes: Uint8Array = bin.bytes;
+      let finalMime: string = sourceMime;
+      let convertedBy:
+        | 'cloudflare-images-avif'
+        | 'client-avif'
+        | 'client-webp-fallback'
+        | 'passthrough-raw' = 'passthrough-raw';
+
+      const alreadyCompactAvifOrWebp = detectValidatedAvatarMime(bin.bytes);
+      const forceServerConvert = url.searchParams.get('convert') === 'server';
+
+      // Server-side Image Converter: convert ANY uploaded image -> AVIF (512x512 cover) via Cloudflare Images Binding
+      if (
+        env.IMAGES &&
+        (forceServerConvert || alreadyCompactAvifOrWebp !== 'image/avif')
+      ) {
+        try {
+          const stream = new Response(bin.bytes.slice()).body;
+          if (stream) {
+            const transformed = await env.IMAGES.input(stream)
+              .transform({ width: 512, height: 512, fit: 'cover' })
+              .output({ format: 'image/avif', quality: 80 });
+            const avifRes = transformed.response();
+            const avifBuf = new Uint8Array(await avifRes.arrayBuffer());
+            if (avifBuf.byteLength > 12) {
+              finalBytes = avifBuf;
+              finalMime = 'image/avif';
+              convertedBy = 'cloudflare-images-avif';
+            }
+          }
+        } catch (imgErr) {
+          logError('cf_images_avif_convert_fallback', imgErr, {
+            username,
+            sourceMime,
+            sourceBytes,
+          });
+        }
+      }
+
+      if (convertedBy !== 'cloudflare-images-avif') {
+        if (alreadyCompactAvifOrWebp === 'image/avif') {
+          finalMime = 'image/avif';
+          convertedBy = 'client-avif';
+        } else if (alreadyCompactAvifOrWebp === 'image/webp') {
+          finalMime = 'image/webp';
+          convertedBy = 'client-webp-fallback';
+        } else if (
+          SAFE_STORED_AVATAR_MIMES.has(sourceMime) &&
+          sourceBytes <= 2 * 1024 * 1024
+        ) {
+          finalMime = sourceMime;
+          convertedBy = 'passthrough-raw';
+        } else {
+          return jsonResponse(
+            {
+              ok: false,
+              error:
+                'Konverter AVIF Cloudflare Images (env.IMAGES) belum aktif pada akun Cloudflare ini. Gunakan opsi Crop 1:1 untuk kompresi otomatis AVIF di browser atau aktifkan Cloudflare Images Free Tier (5.000/bulan gratis).',
+            },
+            422
+          );
+        }
       }
 
       const mediaEngine = await putAvatarToStorage(
         env,
         username,
         pageSlug,
-        bin.bytes,
-        validatedMime
+        finalBytes,
+        finalMime
       );
       const version = Date.now().toString(36);
       const avatarPath = pageSlug
@@ -3126,8 +3677,11 @@ async function handleApiRequest(
       return jsonResponse({
         ok: true,
         avatarUrl: avatarPath,
-        contentType: validatedMime,
-        byteSize: bin.bytes.byteLength,
+        contentType: finalMime,
+        sourceMime,
+        sourceBytes,
+        byteSize: finalBytes.byteLength,
+        convertedBy,
         mediaStorageEngine: mediaEngine,
       });
     }
@@ -3287,7 +3841,7 @@ export default {
     try {
       // 1. API endpoints (always JSON, never fall back to SPA index.html)
       if (url.pathname.startsWith('/api/')) {
-        return await handleApiRequest(request, url, env);
+        return await handleApiRequest(request, url, env, ctx);
       }
 
       // 2. Dynamic PWA Web App Manifests & Service Worker (Multi-OS PWA for mail.vz.gay & links.vz.gay)
@@ -3501,16 +4055,54 @@ export default {
         message.from.split('@')[0] || message.from
       );
 
+      // Read full inbound MIME up to 10 MB so real attachments can be extracted to ephemeral R2
+      const scanLimit = env.LINKS_MEDIA_R2
+        ? Math.min(message.rawSize || MAX_RAW_EMAIL_SCAN_BYTES, MAIL_ATTACHMENT_MAX_TOTAL_BYTES)
+        : MAX_RAW_EMAIL_SCAN_BYTES;
       const { text: rawPrefix, truncated } = await readBoundedStreamText(
         message.raw,
-        MAX_RAW_EMAIL_SCAN_BYTES
+        Math.max(MAX_RAW_EMAIL_SCAN_BYTES, scanLimit)
       );
-      let bodyText = extractReadableBodyFromRawMime(rawPrefix);
+      const parsedMime = extractBodyAndAttachmentsFromRawMime(rawPrefix);
+      let bodyText = parsedMime.bodyText;
       if (truncated) {
-        bodyText += '\n\n[VZ Mail Edge Note: Pesan melebihi 256 KB, pratinjau dipotong demi keamanan memori edge.]';
+        bodyText +=
+          '\n\n[VZ Mail Edge Note: Pesan melebihi batas baca edge, sebagian isi dipotong demi keamanan memori.]';
       }
 
       const now = new Date();
+      const inboundAttachments: EphemeralPacketAttachment[] = [];
+      if (parsedMime.attachments.length > 0 && env.LINKS_MEDIA_R2) {
+        const attExpiresAt = new Date(now.getTime() + MAIL_ATTACHMENT_TTL_MS).toISOString();
+        for (const att of parsedMime.attachments) {
+          const attId = generateSecureId('att');
+          const r2Key = buildEphemeralAttachmentKey(resolved.canonicalUser, attId);
+          await env.LINKS_MEDIA_R2.put(r2Key, att.bytes, {
+            httpMetadata: {
+              contentType: att.mimeType,
+              cacheControl: 'private, no-store',
+            },
+            customMetadata: {
+              ownerUser: resolved.canonicalUser,
+              filename: att.filename,
+              mimeType: att.mimeType,
+              sizeBytes: String(att.bytes.byteLength),
+              uploadedAt: now.toISOString(),
+              expiresAt: attExpiresAt,
+            },
+          });
+          inboundAttachments.push({
+            id: attId,
+            filename: att.filename,
+            mimeType: att.mimeType,
+            sizeBytes: att.bytes.byteLength,
+            ephemeralId: attId,
+            ephemeralOwner: resolved.canonicalUser,
+            expiresAt: attExpiresAt,
+          });
+        }
+      }
+
       const packet: EphemeralMailPacket = {
         id: packetId,
         rfcMessageId: stripHeaderInjection(
@@ -3527,6 +4119,7 @@ export default {
         bodyText: bodyText.slice(0, MAX_EMAIL_BODY_CHARS),
         receivedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + TRANSIT_TTL_SECONDS * 1000).toISOString(),
+        attachments: inboundAttachments,
       };
 
       if (env.MAIL_TRANSIT_KV) {
@@ -3542,6 +4135,7 @@ export default {
         plusTag: resolved.plusTag,
         dotNormalized: resolved.dotNormalized,
         rawSize: message.rawSize,
+        attachmentCount: inboundAttachments.length,
         kvStored: Boolean(env.MAIL_TRANSIT_KV),
       });
     } catch (error) {

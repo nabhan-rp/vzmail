@@ -30,6 +30,16 @@ export interface MailAttachment {
   mimeType: string;
   sizeBytes: number;
   contentText?: string;
+  /** Local offline binary payload (base64) stored on device after sending or downloading from R2 */
+  localDataBase64?: string;
+  /** Ephemeral R2 attachment ID for one-time WhatsApp-style download before auto-purge */
+  ephemeralId?: string;
+  /** Owner canonical username for ephemeral R2 lookup */
+  ephemeralOwner?: string;
+  /** ISO expiration timestamp (max 7 days in R2 before permanent purge) */
+  expiresAt?: string;
+  /** Lifecycle status: saved locally on device, waiting in ephemeral R2, or purged/expired */
+  storageStatus?: 'local_saved' | 'ephemeral_r2' | 'expired_purged';
 }
 
 export interface LocalMailMessage {
@@ -675,10 +685,34 @@ export function normalizeInboundPacketToLocalMessage(
     bodyText: string;
     receivedAt: string;
     ephemeralQueueReceipt?: string;
+    attachments?: Array<{
+      id: string;
+      filename: string;
+      mimeType: string;
+      sizeBytes: number;
+      ephemeralId?: string;
+      ephemeralOwner?: string;
+      expiresAt?: string;
+      contentText?: string;
+    }>;
   },
   activeDomains: readonly string[] = ['imy.li']
 ): LocalMailMessage {
   const resolved = resolveCanonicalEmail(packet.toAddress, activeDomains);
+  const normalizedAttachments: MailAttachment[] = Array.isArray(packet.attachments)
+    ? packet.attachments.map((att) => ({
+        id: att.id || generateSecureId('att'),
+        filename: att.filename || 'attachment.bin',
+        mimeType: att.mimeType || 'application/octet-stream',
+        sizeBytes: Number.isFinite(att.sizeBytes) ? att.sizeBytes : 0,
+        contentText: att.contentText,
+        ephemeralId: att.ephemeralId || att.id,
+        ephemeralOwner: att.ephemeralOwner || resolved.canonicalUsername,
+        expiresAt: att.expiresAt,
+        storageStatus: att.contentText ? 'local_saved' : 'ephemeral_r2',
+      }))
+    : [];
+
   return {
     id: packet.id || generateSecureId('msg-in'),
     rfcMessageId: packet.rfcMessageId || `<${packet.id}@imy.li>`,
@@ -710,6 +744,6 @@ export function normalizeInboundPacketToLocalMessage(
     ephemeralQueueReceipt:
       packet.ephemeralQueueReceipt || generateSecureId('PURGED-CF').toUpperCase(),
     chatBridgeChannel: null,
-    attachments: [],
+    attachments: normalizedAttachments,
   };
 }

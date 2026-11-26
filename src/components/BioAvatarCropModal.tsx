@@ -26,6 +26,7 @@ interface BioAvatarCropModalProps {
   uploading: boolean;
   onCancel: () => void;
   onConfirm: (result: EncodedAvatarResult) => Promise<void> | void;
+  onConfirmDirectServer: (rawFile: File) => Promise<void> | void;
 }
 
 const VIEWPORT_SIZE = 280;
@@ -40,11 +41,13 @@ export function BioAvatarCropModal({
   uploading,
   onCancel,
   onConfirm,
+  onConfirmDirectServer,
 }: BioAvatarCropModalProps) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [naturalDims, setNaturalDims] = useState<{ w: number; h: number } | null>(
     null
   );
+  const [previewUnavailable, setPreviewUnavailable] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [offsetX, setOffsetX] = useState(0);
   const [offsetY, setOffsetY] = useState(0);
@@ -69,6 +72,7 @@ export function BioAvatarCropModal({
     if (!isOpen || !imageFile) {
       setObjectUrl(null);
       setNaturalDims(null);
+      setPreviewUnavailable(false);
       setEncodedPreview(null);
       setErrorMsg(null);
       return;
@@ -77,6 +81,7 @@ export function BioAvatarCropModal({
     const url = URL.createObjectURL(imageFile);
     setObjectUrl(url);
     setNaturalDims(null);
+    setPreviewUnavailable(false);
     setZoom(1);
     setOffsetX(0);
     setOffsetY(0);
@@ -152,8 +157,8 @@ export function BioAvatarCropModal({
             err instanceof Error
               ? err.message
               : lang === 'id'
-                ? 'Gagal mengompresi gambar ke AVIF.'
-                : 'Failed to compress image to AVIF.'
+                ? 'Pratinjau crop browser tidak tersedia. Gunakan tombol "Konversi Langsung di Server" di bawah.'
+                : 'Browser crop preview unavailable. Use "Direct Server AVIF Convert" below.'
           );
         }
       } finally {
@@ -176,6 +181,7 @@ export function BioAvatarCropModal({
   const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
     const img = e.currentTarget;
     imageRef.current = img;
+    setPreviewUnavailable(false);
     setNaturalDims({
       w: img.naturalWidth || img.width || 1,
       h: img.naturalHeight || img.height || 1,
@@ -283,11 +289,11 @@ export function BioAvatarCropModal({
               className="text-sm font-bold text-slate-900 dark:text-white font-display"
             >
               {lang === 'id'
-                ? 'Atur Foto Profil Bio (AVIF)'
-                : 'Crop Bio Profile Photo (AVIF)'}
+                ? 'Konverter Gambar AVIF & Crop Opsional'
+                : 'Server AVIF Converter & Optional Crop'}
             </h2>
             <div className="text-[11px] font-mono text-slate-500 truncate">
-              {scopeLabel}
+              {scopeLabel} · {imageFile.name} ({formatBytesCompact(imageFile.size)})
             </div>
           </div>
 
@@ -302,132 +308,143 @@ export function BioAvatarCropModal({
           </button>
         </div>
 
-        {/* Crop Viewport */}
+        {/* Crop Viewport or Direct Server Conversion Notice */}
         <div className="p-5 space-y-4">
-          <div className="flex flex-col items-center space-y-2.5">
-            <div
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerEnd}
-              onPointerCancel={handlePointerEnd}
-              className={`relative overflow-hidden rounded-2xl border-2 border-slate-300 dark:border-[#32394A] bg-slate-950 select-none touch-none ${
-                dragging ? 'cursor-grabbing' : 'cursor-grab'
-              }`}
-              style={{ width: VIEWPORT_SIZE, height: VIEWPORT_SIZE }}
-            >
-              {objectUrl && (
-                <img
-                  src={objectUrl}
-                  alt="Crop source"
-                  draggable={false}
-                  onLoad={handleImageLoad}
-                  onError={() =>
-                    setErrorMsg(
-                      lang === 'id'
-                        ? 'File gambar tidak dapat dibaca oleh browser.'
-                        : 'Selected image file could not be decoded.'
-                    )
-                  }
-                  className="pointer-events-none select-none max-w-none absolute left-1/2 top-1/2"
-                  style={{
-                    width: clamped.drawWidth,
-                    height: clamped.drawHeight,
-                    transform: `translate(-50%, -50%) translate(${clamped.offsetX}px, ${clamped.offsetY}px)`,
-                  }}
-                />
-              )}
-
-              {/* Subtle 1:1 crop frame guide */}
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-0 rounded-2xl ring-1 ring-inset ring-white/30"
-              />
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-3 rounded-2xl border border-dashed border-white/45"
-              />
-            </div>
-
-            <div className="inline-flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
-              <Move className="w-3 h-3" />
-              <span>
+          {previewUnavailable ? (
+            <div className="p-4 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/60 space-y-2 text-xs text-slate-700 dark:text-slate-200">
+              <div className="font-semibold text-blue-800 dark:text-blue-300">
                 {lang === 'id'
-                  ? 'Geser foto untuk memposisikan wajah atau logo di tengah'
-                  : 'Drag photo to center your face or logo'}
-              </span>
-            </div>
-          </div>
-
-          {/* Zoom Controls */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-medium text-slate-700 dark:text-slate-300">
-                Zoom
-              </span>
-              <div className="flex items-center gap-2">
-                <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300">
-                  {zoom.toFixed(2)}×
-                </span>
-                <button
-                  type="button"
-                  onClick={handleReset}
-                  disabled={uploading || (zoom === 1 && offsetX === 0 && offsetY === 0)}
-                  className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-40 cursor-pointer"
-                >
-                  <RotateCcw className="w-3 h-3" />
-                  <span>Reset</span>
-                </button>
+                  ? 'Pratinjau format mentah tidak didukung browser ini — siap dikonversi otomatis di server!'
+                  : 'Raw format preview is unsupported in this browser — ready for automatic server AVIF conversion!'}
               </div>
+              <p className="leading-relaxed text-slate-600 dark:text-slate-300">
+                {lang === 'id'
+                  ? 'Klik "Konversi Server -> AVIF" di bawah untuk langsung mengirim file asli ke Cloudflare Images agar otomatis dipotong tengah 1:1, diubah menjadi AVIF ringan, dan disimpan ke R2.'
+                  : 'Click "Server Convert -> AVIF" below to upload the raw file directly to Cloudflare Images for automatic center crop, AVIF encoding, and R2 storage.'}
+              </p>
             </div>
+          ) : (
+            <>
+              <div className="flex flex-col items-center space-y-2.5">
+                <div
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={handlePointerEnd}
+                  onPointerCancel={handlePointerEnd}
+                  className={`relative overflow-hidden rounded-2xl border-2 border-slate-300 dark:border-[#32394A] bg-slate-950 select-none touch-none ${
+                    dragging ? 'cursor-grabbing' : 'cursor-grab'
+                  }`}
+                  style={{ width: VIEWPORT_SIZE, height: VIEWPORT_SIZE }}
+                >
+                  {objectUrl && (
+                    <img
+                      src={objectUrl}
+                      alt="Crop source"
+                      draggable={false}
+                      onLoad={handleImageLoad}
+                      onError={() => {
+                        setPreviewUnavailable(true);
+                        setNaturalDims(null);
+                      }}
+                      className="pointer-events-none select-none max-w-none absolute left-1/2 top-1/2"
+                      style={{
+                        width: clamped.drawWidth,
+                        height: clamped.drawHeight,
+                        transform: `translate(-50%, -50%) translate(${clamped.offsetX}px, ${clamped.offsetY}px)`,
+                      }}
+                    />
+                  )}
 
-            <div className="flex items-center gap-2.5">
-              <button
-                type="button"
-                onClick={() => handleZoomChange(zoom - 0.15)}
-                disabled={uploading || zoom <= MIN_ZOOM}
-                aria-label="Zoom out"
-                className="p-1.5 rounded-lg border border-slate-200 dark:border-[#2A303E] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#1C212C] disabled:opacity-40 cursor-pointer"
-              >
-                <ZoomOut className="w-3.5 h-3.5" />
-              </button>
+                  {/* Subtle 1:1 crop frame guide */}
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-0 rounded-2xl ring-1 ring-inset ring-white/30"
+                  />
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-3 rounded-2xl border border-dashed border-white/45"
+                  />
+                </div>
 
-              <input
-                type="range"
-                min={MIN_ZOOM}
-                max={MAX_ZOOM}
-                step={0.05}
-                value={zoom}
-                disabled={uploading}
-                onChange={(e) => handleZoomChange(Number(e.target.value))}
-                aria-label="Zoom level"
-                className="flex-1 accent-blue-600 cursor-pointer"
-              />
+                <div className="inline-flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                  <Move className="w-3 h-3" />
+                  <span>
+                    {lang === 'id'
+                      ? 'Opsional: geser/zoom untuk crop manual, atau langsung konversi AVIF di server'
+                      : 'Optional: drag/zoom to crop manually, or convert directly on server to AVIF'}
+                  </span>
+                </div>
+              </div>
 
-              <button
-                type="button"
-                onClick={() => handleZoomChange(zoom + 0.15)}
-                disabled={uploading || zoom >= MAX_ZOOM}
-                aria-label="Zoom in"
-                className="p-1.5 rounded-lg border border-slate-200 dark:border-[#2A303E] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#1C212C] disabled:opacity-40 cursor-pointer"
-              >
-                <ZoomIn className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
+              {/* Zoom Controls */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium text-slate-700 dark:text-slate-300">
+                    Zoom
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300">
+                      {zoom.toFixed(2)}×
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleReset}
+                      disabled={uploading || (zoom === 1 && offsetX === 0 && offsetY === 0)}
+                      className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-40 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Reset</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => handleZoomChange(zoom - 0.15)}
+                    disabled={uploading || zoom <= MIN_ZOOM}
+                    aria-label="Zoom out"
+                    className="p-1.5 rounded-lg border border-slate-200 dark:border-[#2A303E] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#1C212C] disabled:opacity-40 cursor-pointer"
+                  >
+                    <ZoomOut className="w-3.5 h-3.5" />
+                  </button>
+
+                  <input
+                    type="range"
+                    min={MIN_ZOOM}
+                    max={MAX_ZOOM}
+                    step={0.05}
+                    value={zoom}
+                    disabled={uploading}
+                    onChange={(e) => handleZoomChange(Number(e.target.value))}
+                    aria-label="Zoom level"
+                    className="flex-1 accent-blue-600 cursor-pointer"
+                  />
+
+                  <button
+                    type="button"
+                    onClick={() => handleZoomChange(zoom + 0.15)}
+                    disabled={uploading || zoom >= MAX_ZOOM}
+                    aria-label="Zoom in"
+                    className="p-1.5 rounded-lg border border-slate-200 dark:border-[#2A303E] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#1C212C] disabled:opacity-40 cursor-pointer"
+                  >
+                    <ZoomIn className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
 
           {/* Live Output Metadata Bar */}
           <div className="px-3.5 py-2.5 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] flex items-center justify-between gap-2 text-xs">
             <div className="space-y-0.5">
               <div className="text-[11px] text-slate-500">
-                {lang === 'id' ? 'Hasil Kompresi Otomatis' : 'Automatic Output'}
+                {lang === 'id'
+                  ? 'Target Penyimpanan Cloudflare R2'
+                  : 'Cloudflare R2 Storage Target'}
               </div>
               <div className="font-mono tabular-nums font-semibold text-slate-900 dark:text-white">
-                {AVATAR_OUTPUT_SIZE}×{AVATAR_OUTPUT_SIZE} px ·{' '}
-                {encodedPreview
-                  ? encodedPreview.fallbackUsed
-                    ? 'WebP (fallback)'
-                    : 'AVIF'
-                  : 'AVIF'}
+                AVIF · Cloudflare Images / Edge R2
               </div>
             </div>
 
@@ -443,7 +460,9 @@ export function BioAvatarCropModal({
                   <span>{formatBytesCompact(encodedPreview.byteSize)}</span>
                 </span>
               ) : (
-                <span className="text-[11px] text-slate-400">—</span>
+                <span className="text-[11px] text-slate-500">
+                  {formatBytesCompact(imageFile.size)}
+                </span>
               )}
             </div>
           </div>
@@ -456,36 +475,58 @@ export function BioAvatarCropModal({
         </div>
 
         {/* Footer Actions */}
-        <div className="px-5 py-3.5 border-t border-slate-200 dark:border-[#232732] bg-slate-50/70 dark:bg-[#0E1117] flex items-center justify-end gap-2">
+        <div className="px-5 py-3.5 border-t border-slate-200 dark:border-[#232732] bg-slate-50/70 dark:bg-[#0E1117] flex flex-wrap items-center justify-between gap-2">
           <button
             type="button"
-            onClick={onCancel}
+            onClick={() => void onConfirmDirectServer(imageFile)}
             disabled={uploading}
-            className="min-h-[38px] px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-300 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#202634] border border-slate-200 dark:border-[#2A303E] rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap cursor-pointer"
-          >
-            {lang === 'id' ? 'Batal' : 'Cancel'}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => void handleConfirmClick()}
-            disabled={uploading || encoding || !naturalDims || Boolean(errorMsg)}
-            className="min-h-[38px] px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+            className="min-h-[38px] px-3 py-2 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 rounded-lg inline-flex items-center gap-1.5 transition-colors disabled:opacity-50 whitespace-nowrap cursor-pointer"
           >
             {uploading ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span>{lang === 'id' ? 'Mengunggah...' : 'Uploading...'}</span>
-              </>
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
             ) : (
-              <>
-                <Upload className="w-3.5 h-3.5" />
-                <span>
-                  {lang === 'id' ? 'Kompres & Unggah' : 'Compress & Upload'}
-                </span>
-              </>
+              <Upload className="w-3.5 h-3.5" />
             )}
+            <span>
+              {lang === 'id'
+                ? 'Langsung Server -> AVIF'
+                : 'Direct Server -> AVIF'}
+            </span>
           </button>
+
+          <div className="flex items-center gap-2 ml-auto">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={uploading}
+              className="min-h-[38px] px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-300 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#202634] border border-slate-200 dark:border-[#2A303E] rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap cursor-pointer"
+            >
+              {lang === 'id' ? 'Batal' : 'Cancel'}
+            </button>
+
+            {!previewUnavailable && (
+              <button
+                type="button"
+                onClick={() => void handleConfirmClick()}
+                disabled={uploading || encoding || !naturalDims || Boolean(errorMsg)}
+                className="min-h-[38px] px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              >
+                {uploading ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>{lang === 'id' ? 'Mengunggah...' : 'Uploading...'}</span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    <span>
+                      {lang === 'id' ? 'Crop & Unggah AVIF' : 'Crop & Upload AVIF'}
+                    </span>
+                  </>
+                )}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

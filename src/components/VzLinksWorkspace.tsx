@@ -451,12 +451,15 @@ export function VzLinksWorkspace({
     e.target.value = '';
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
+    const lowerName = file.name.toLowerCase();
+    const hasRecognizedImageExt =
+      /\.(jpe?g|png|webp|gif|avif|heic|heif|bmp|tiff?|ico|svg)$/.test(lowerName);
+    if (!file.type.startsWith('image/') && !hasRecognizedImageExt) {
       flashStatus(
         'error',
         lang === 'id'
-          ? 'Pilih file gambar yang valid (JPG, PNG, WebP, atau AVIF).'
-          : 'Please choose a valid image file (JPG, PNG, WebP, or AVIF).'
+          ? 'Pilih file gambar yang valid (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF, SVG, atau AVIF).'
+          : 'Please choose a valid image file (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF, SVG, or AVIF).'
       );
       return;
     }
@@ -473,6 +476,63 @@ export function VzLinksWorkspace({
 
     setCropTargetScope(scope);
     setCropFile(file);
+  };
+
+  const applyUploadedAvatarResult = async (
+    scope: 'main' | string,
+    json: {
+      avatarUrl: string;
+      storageEngine?: string;
+      mediaStorageEngine?: string;
+      contentType?: string;
+      sourceBytes?: number;
+      byteSize?: number;
+      convertedBy?: string;
+    },
+    fallbackLabel: string,
+    fallbackBytes: number
+  ) => {
+    const nextWorkspace: BioWorkspaceData =
+      scope === 'main'
+        ? { ...workspace, avatarUrl: json.avatarUrl }
+        : {
+            ...workspace,
+            pages: workspace.pages.map((p) =>
+              p.pageSlug === scope
+                ? { ...p, avatarUrl: json.avatarUrl || '' }
+                : p
+            ),
+          };
+
+    setWorkspace(nextWorkspace);
+    setCropFile(null);
+    setCropTargetScope(null);
+
+    const outSizeText = formatBytesCompact(json.byteSize || fallbackBytes);
+    const srcSizeText =
+      json.sourceBytes && json.sourceBytes > (json.byteSize || 0)
+        ? `${formatBytesCompact(json.sourceBytes)} → ${outSizeText}`
+        : outSizeText;
+    const formatBadge =
+      json.convertedBy === 'cloudflare-images-avif'
+        ? 'Server AVIF'
+        : json.contentType === 'image/avif'
+          ? 'AVIF'
+          : fallbackLabel;
+    const storageLabel = formatMediaStorageBadge(
+      json.mediaStorageEngine || json.storageEngine || ''
+    );
+    const scopeText =
+      scope === 'main'
+        ? `${username}.${domain}`
+        : `${username}.${domain}/${scope}`;
+
+    await persistWorkspace(
+      nextWorkspace,
+      lang === 'id'
+        ? `Foto profil ${scopeText} tersimpan (${formatBadge} · ${srcSizeText} · ${storageLabel}).`
+        : `Profile photo for ${scopeText} saved (${formatBadge} · ${srcSizeText} · ${storageLabel}).`
+    );
   };
 
   const handleConfirmCroppedAvatar = async (encoded: EncodedAvatarResult) => {
@@ -495,7 +555,11 @@ export function VzLinksWorkspace({
         error?: string;
         avatarUrl?: string;
         storageEngine?: string;
+        mediaStorageEngine?: string;
+        contentType?: string;
+        sourceBytes?: number;
         byteSize?: number;
+        convertedBy?: string;
       } | null;
 
       if (!res.ok || !json?.ok || !json.avatarUrl) {
@@ -509,34 +573,11 @@ export function VzLinksWorkspace({
         return;
       }
 
-      const nextWorkspace: BioWorkspaceData =
-        cropTargetScope === 'main'
-          ? { ...workspace, avatarUrl: json.avatarUrl }
-          : {
-              ...workspace,
-              pages: workspace.pages.map((p) =>
-                p.pageSlug === cropTargetScope
-                  ? { ...p, avatarUrl: json.avatarUrl || '' }
-                  : p
-              ),
-            };
-
-      setWorkspace(nextWorkspace);
-      setCropFile(null);
-      setCropTargetScope(null);
-
-      const sizeText = formatBytesCompact(json.byteSize || encoded.byteSize);
-      const storageLabel = formatMediaStorageBadge(json.storageEngine || '');
-      const scopeText =
-        cropTargetScope === 'main'
-          ? `${username}.${domain}`
-          : `${username}.${domain}/${cropTargetScope}`;
-
-      await persistWorkspace(
-        nextWorkspace,
-        lang === 'id'
-          ? `Foto profil ${scopeText} diperbarui (${encoded.formatLabel} · ${sizeText} · ${storageLabel}).`
-          : `Profile photo for ${scopeText} updated (${encoded.formatLabel} · ${sizeText} · ${storageLabel}).`
+      await applyUploadedAvatarResult(
+        cropTargetScope,
+        { ...json, avatarUrl: json.avatarUrl },
+        encoded.formatLabel,
+        encoded.byteSize
       );
     } catch {
       flashStatus(
@@ -544,6 +585,64 @@ export function VzLinksWorkspace({
         lang === 'id'
           ? 'Koneksi gagal saat mengunggah foto profil bio.'
           : 'Network error while uploading bio profile photo.'
+      );
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
+
+  const handleDirectServerAvatarUpload = async (rawFile: File) => {
+    if (!cropTargetScope) return;
+    setUploadingAvatar(true);
+    try {
+      const baseEndpoint =
+        cropTargetScope === 'main'
+          ? `/api/links/avatar/${encodeURIComponent(username)}`
+          : `/api/links/avatar/${encodeURIComponent(username)}/${encodeURIComponent(cropTargetScope)}`;
+
+      const res = await fetch(`${baseEndpoint}?convert=server`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': rawFile.type || 'application/octet-stream',
+        },
+        body: rawFile,
+      });
+
+      const json = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        avatarUrl?: string;
+        storageEngine?: string;
+        mediaStorageEngine?: string;
+        contentType?: string;
+        sourceBytes?: number;
+        byteSize?: number;
+        convertedBy?: string;
+      } | null;
+
+      if (!res.ok || !json?.ok || !json.avatarUrl) {
+        flashStatus(
+          'error',
+          json?.error ||
+            (lang === 'id'
+              ? 'Server gagal mengonversi gambar ini ke AVIF.'
+              : 'Server failed to convert this image to AVIF.')
+        );
+        return;
+      }
+
+      await applyUploadedAvatarResult(
+        cropTargetScope,
+        { ...json, avatarUrl: json.avatarUrl },
+        'Server AVIF',
+        rawFile.size
+      );
+    } catch {
+      flashStatus(
+        'error',
+        lang === 'id'
+          ? 'Koneksi gagal saat mengirim gambar ke konverter AVIF server.'
+          : 'Network error sending image to server AVIF converter.'
       );
     } finally {
       setUploadingAvatar(false);
@@ -1621,7 +1720,7 @@ export function VzLinksWorkspace({
                         <input
                           ref={subpageAvatarInputRef}
                           type="file"
-                          accept="image/*"
+                          accept="image/*,.heic,.heif,.bmp,.tiff,.tif,.svg,.avif,.webp"
                           onChange={(e) =>
                             handleSelectAvatarFile(e, activePage.pageSlug)
                           }
@@ -1937,13 +2036,13 @@ export function VzLinksWorkspace({
                         <div className="min-w-0 space-y-1">
                           <div className="text-xs font-semibold text-slate-900 dark:text-white">
                             {lang === 'id'
-                              ? 'Foto Profil Khusus Bio Link (AVIF 256×256)'
-                              : 'Dedicated Bio Link Photo (AVIF 256×256)'}
+                              ? 'Foto Profil Khusus Bio Link (Auto Konversi Server → AVIF R2)'
+                              : 'Dedicated Bio Link Photo (Auto Server Convert → R2 AVIF)'}
                           </div>
                           <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
                             {lang === 'id'
-                              ? 'Terpisah sepenuhnya dari foto akun SSO myaccount.vz.gay. Otomatis dipotong 1:1 & dikompres ke AVIF ultra-ringan sebelum diunggah.'
-                              : 'Completely independent from your myaccount.vz.gay SSO avatar. Automatically cropped 1:1 & compressed to ultra-light AVIF before upload.'}
+                              ? 'Terpisah dari foto SSO myaccount.vz.gay. Unggah gambar format apa saja (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF, SVG maks 10 MB) — bisa potong 1:1 atau langsung biarkan server mengonversi otomatis ke AVIF ultra-ringan di R2.'
+                              : 'Independent from your myaccount.vz.gay SSO photo. Upload any image format (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF, SVG up to 10 MB) — crop 1:1 or let the server convert automatically to ultra-light AVIF in R2.'}
                           </p>
                         </div>
                       </div>
@@ -1952,7 +2051,7 @@ export function VzLinksWorkspace({
                         <input
                           ref={mainAvatarInputRef}
                           type="file"
-                          accept="image/*"
+                          accept="image/*,.heic,.heif,.bmp,.tiff,.tif,.svg,.avif,.webp"
                           onChange={(e) => handleSelectAvatarFile(e, 'main')}
                           className="hidden"
                         />
@@ -2804,7 +2903,7 @@ export function VzLinksWorkspace({
         </div>
       </div>
 
-      {/* Interactive 1:1 AVIF Crop & Upload Modal */}
+      {/* Interactive 1:1 Crop or Direct Server -> AVIF Upload Modal */}
       <BioAvatarCropModal
         isOpen={Boolean(cropFile && cropTargetScope)}
         lang={lang}
@@ -2821,6 +2920,7 @@ export function VzLinksWorkspace({
           setCropTargetScope(null);
         }}
         onConfirm={handleConfirmCroppedAvatar}
+        onConfirmDirectServer={handleDirectServerAvatarUpload}
       />
 
       {/* Universal Deletion & Danger Confirmation Modal (Yes/Cancel + GitHub Type-to-Confirm) */}

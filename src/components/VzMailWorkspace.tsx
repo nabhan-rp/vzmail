@@ -1,8 +1,11 @@
 import {
+  AlertCircle,
   Archive,
   ArrowLeft,
   CheckCircle2,
+  Clock,
   Download,
+  Edit3,
   ExternalLink,
   FileText,
   FolderArchive,
@@ -10,9 +13,11 @@ import {
   HardDrive,
   Inbox,
   Link2,
+  Loader2,
   Lock,
   MailPlus,
   MessageSquare,
+  Paperclip,
   QrCode,
   RefreshCw,
   Search,
@@ -30,6 +35,10 @@ import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import type { ThemePreference } from '../hooks/useTheme';
 import {
+  MAIL_ATTACHMENT_MAX_COUNT,
+  MAIL_ATTACHMENT_MAX_TOTAL_BYTES,
+} from '../utils/linksModel';
+import {
   deleteMessageFromLocalDb,
   ensureUserMessagesSeeded,
   markMessagesAsRead,
@@ -37,6 +46,7 @@ import {
   saveMessage,
   saveMessagesBatch,
   type LocalMailMessage,
+  type MailAttachment,
   type MailFolder,
 } from '../utils/localMailDb';
 import {
@@ -51,6 +61,12 @@ import {
 } from '../utils/mailVaultCrypto';
 import { checkReservedUsername } from '../utils/reservedUsernames';
 import { ConfirmActionModal } from './ConfirmActionModal';
+import {
+  MailFloatingComposer,
+  type ComposeFeedbackState,
+  type ComposeWindowMode,
+  type PendingComposeAttachment,
+} from './MailFloatingComposer';
 import type { ActiveHostView } from './MailLinksTopBar';
 import { MailSearchGroundingDrawer } from './MailSearchGroundingDrawer';
 import { MailQrModal } from './QrCodeModal';
@@ -80,6 +96,61 @@ interface EphemeralEdgePacket {
   subject: string;
   bodyText: string;
   receivedAt: string;
+  attachments?: MailAttachment[];
+}
+
+interface ToastNotification {
+  kind: 'success' | 'error' | 'info';
+  message: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}
+
+function formatAttachmentBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${bytes} B`;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  return arrayBufferToBase64(buf);
+}
+
+function base64ToBlob(base64: string, mimeType: string): Blob {
+  const binary = atob(base64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType || 'application/octet-stream' });
+}
+
+function triggerBinaryBrowserDownload(filename: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 const SESSION_FALLBACK_KEY_PREFIX = 'vz_ephemeral_transit_fallback_v1:';
@@ -196,15 +267,23 @@ export function VzMailWorkspace({
   );
   const [quotaUsed, setQuotaUsed] = useState(1);
   const [quotaLimit, setQuotaLimit] = useState(25);
-  const [toastNotice, setToastNotice] = useState<string | null>(null);
+  const [toastNotice, setToastNotice] = useState<ToastNotification | null>(null);
 
-  // Compose Modal state
-  const [composeOpen, setComposeOpen] = useState(false);
+  // Floating Gmail / Hotmail-Style Composer state
+  const [composeMode, setComposeMode] = useState<ComposeWindowMode>('closed');
+  const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
   const [composeTo, setComposeTo] = useState('');
   const [composeFromAlias, setComposeFromAlias] = useState(primaryEmail);
   const [composeSubject, setComposeSubject] = useState('');
   const [composeBody, setComposeBody] = useState('');
+  const [composeAttachments, setComposeAttachments] = useState<PendingComposeAttachment[]>([]);
   const [composeSending, setComposeSending] = useState(false);
+  const [composeFeedback, setComposeFeedback] = useState<ComposeFeedbackState>({
+    kind: 'idle',
+    message: '',
+  });
+  const [downloadingAttId, setDownloadingAttId] = useState<string | null>(null);
+  const [sendingDraftId, setSendingDraftId] = useState<string | null>(null);
 
   // Inbound Alias Simulator Modal state
   const [simulatorOpen, setSimulatorOpen] = useState(false);
@@ -222,15 +301,34 @@ export function VzMailWorkspace({
 
   const toastTimerRef = useRef<number | null>(null);
 
-  const showToast = useCallback((msg: string) => {
-    setToastNotice(msg);
-    if (toastTimerRef.current !== null) {
-      window.clearTimeout(toastTimerRef.current);
-    }
-    toastTimerRef.current = window.setTimeout(() => {
-      setToastNotice((curr) => (curr === msg ? null : curr));
-    }, 4500);
-  }, []);
+  const showToast = useCallback(
+    (
+      msg: string,
+      options?: {
+        kind?: 'success' | 'error' | 'info';
+        actionLabel?: string;
+        onAction?: () => void;
+        durationMs?: number;
+      }
+    ) => {
+      const nextToast: ToastNotification = {
+        kind: options?.kind || 'info',
+        message: msg,
+        actionLabel: options?.actionLabel,
+        onAction: options?.onAction,
+      };
+      setToastNotice(nextToast);
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+      const timeoutMs =
+        options?.durationMs ?? (nextToast.kind === 'error' ? 8000 : 5500);
+      toastTimerRef.current = window.setTimeout(() => {
+        setToastNotice((curr) => (curr?.message === msg ? null : curr));
+      }, timeoutMs);
+    },
+    []
+  );
 
   useEffect(() => {
     return () => {
@@ -250,19 +348,21 @@ export function VzMailWorkspace({
     );
   }, [user, domain, primaryEmail]);
 
-  // Escape key closes Compose, Simulator, and mobile Folders drawer cleanly
+  // Escape key closes Simulator & mobile Folders drawer, or shrinks fullscreen composer back to floating
   useEffect(() => {
-    if (!composeOpen && !simulatorOpen && !mobileFoldersOpen) return;
+    if (composeMode !== 'fullscreen' && !simulatorOpen && !mobileFoldersOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        setComposeOpen(false);
+        if (composeMode === 'fullscreen' && !composeSending) {
+          setComposeMode('floating');
+        }
         setSimulatorOpen(false);
         setMobileFoldersOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [composeOpen, simulatorOpen, mobileFoldersOpen]);
+  }, [composeMode, composeSending, simulatorOpen, mobileFoldersOpen]);
 
   // Lock body scroll and close mobile Folders drawer when resizing to desktop
   useEffect(() => {
@@ -290,7 +390,8 @@ export function VzMailWorkspace({
   useEffect(() => {
     if (composeRequested > 0) {
       setComposeFromAlias(primaryEmail);
-      setComposeOpen(true);
+      setComposeFeedback({ kind: 'idle', message: '' });
+      setComposeMode((prev) => (prev === 'closed' ? 'floating' : prev));
     }
   }, [composeRequested, primaryEmail]);
 
@@ -558,130 +659,633 @@ export function VzMailWorkspace({
     }
   };
 
-  const handleSendOutboundEmail = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!composeTo.trim()) return;
-    setComposeSending(true);
+  const resetComposeForm = useCallback(() => {
+    setEditingDraftId(null);
+    setComposeFromAlias(primaryEmail);
+    setComposeTo('');
+    setComposeSubject('');
+    setComposeBody('');
+    setComposeAttachments([]);
+    setComposeFeedback({ kind: 'idle', message: '' });
+  }, [primaryEmail]);
+
+  const handleOpenNewComposer = useCallback(
+    (prefill?: { to?: string; subject?: string; body?: string }) => {
+      if (prefill) {
+        setEditingDraftId(null);
+        setComposeFromAlias(primaryEmail);
+        setComposeTo(prefill.to || '');
+        setComposeSubject(prefill.subject || '');
+        setComposeBody(prefill.body || '');
+        setComposeAttachments([]);
+      } else if (composeMode === 'closed') {
+        setComposeFromAlias(primaryEmail);
+      }
+      setComposeFeedback({ kind: 'idle', message: '' });
+      setComposeMode('floating');
+    },
+    [primaryEmail, composeMode]
+  );
+
+  const handleEditDraft = useCallback(
+    (draft: LocalMailMessage) => {
+      setEditingDraftId(draft.id);
+      setComposeFromAlias(draft.from.address || primaryEmail);
+      const rawTo = draft.to[0]?.address || '';
+      setComposeTo(rawTo === `draft@${domain}` ? '' : rawTo);
+      setComposeSubject(
+        draft.subject === '(Draf Belum Berjudul)' ? '' : draft.subject
+      );
+      setComposeBody(draft.bodyText === '(Draf kosong)' ? '' : draft.bodyText);
+      setComposeAttachments(
+        (draft.attachments || []).map((att) => ({
+          id: att.id,
+          filename: att.filename,
+          mimeType: att.mimeType,
+          sizeBytes: att.sizeBytes,
+          localDataBase64: att.localDataBase64,
+        }))
+      );
+      setComposeFeedback({ kind: 'idle', message: '' });
+      setComposeMode('floating');
+    },
+    [primaryEmail, domain]
+  );
+
+  const handleAddComposeFiles = useCallback(
+    (filesInput: FileList | File[]) => {
+      const incoming = Array.from(filesInput);
+      if (incoming.length === 0) return;
+
+      const currentCount = composeAttachments.length;
+      const currentTotal = composeAttachments.reduce((s, a) => s + a.sizeBytes, 0);
+      const nextItems: PendingComposeAttachment[] = [];
+      let runningTotal = currentTotal;
+
+      for (const file of incoming) {
+        if (currentCount + nextItems.length >= MAIL_ATTACHMENT_MAX_COUNT) {
+          setComposeFeedback({
+            kind: 'error',
+            message:
+              lang === 'id'
+                ? `Maksimal ${MAIL_ATTACHMENT_MAX_COUNT} lampiran per email.`
+                : `Maximum ${MAIL_ATTACHMENT_MAX_COUNT} attachments per email.`,
+          });
+          break;
+        }
+        if (file.size <= 0) continue;
+        if (runningTotal + file.size > MAIL_ATTACHMENT_MAX_TOTAL_BYTES) {
+          setComposeFeedback({
+            kind: 'error',
+            message:
+              lang === 'id'
+                ? `Total lampiran melebihi batas 10 MB (${file.name}: ${formatAttachmentBytes(file.size)}). Kompres file atau kirim terpisah.`
+                : `Total attachments exceed the 10 MB limit (${file.name}: ${formatAttachmentBytes(file.size)}). Compress or split the files.`,
+          });
+          continue;
+        }
+        runningTotal += file.size;
+        nextItems.push({
+          id: generateSecureId('att'),
+          filename: file.name || 'attachment.bin',
+          mimeType: file.type || 'application/octet-stream',
+          sizeBytes: file.size,
+          file,
+        });
+      }
+
+      if (nextItems.length > 0) {
+        setComposeAttachments((prev) => [...prev, ...nextItems]);
+        setComposeFeedback((prev) =>
+          prev.kind === 'error' ? { kind: 'idle', message: '' } : prev
+        );
+      }
+    },
+    [composeAttachments, lang]
+  );
+
+  const handleRemoveComposeAttachment = useCallback((id: string) => {
+    setComposeAttachments((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  const dispatchEmailPayload = async (params: {
+    fromAlias: string;
+    to: string;
+    subject: string;
+    body: string;
+    attachments: PendingComposeAttachment[];
+    draftIdToDelete?: string | null;
+    surface: 'composer' | 'draft_pane';
+  }): Promise<boolean> => {
+    const cleanTo = params.to.trim();
+    const cleanSubject = params.subject.trim() || '(Tanpa Subjek)';
+    const cleanBody = params.body.trim();
+    const cleanFrom = params.fromAlias || primaryEmail;
+
+    if (!cleanTo || !cleanTo.includes('@') || cleanTo === `draft@${domain}`) {
+      const msg =
+        lang === 'id'
+          ? 'Alamat tujuan (Kepada) belum valid. Isi alamat email tujuan terlebih dahulu.'
+          : 'Recipient (To) email address is missing or invalid.';
+      if (params.surface === 'composer') {
+        setComposeFeedback({ kind: 'error', message: msg });
+      } else {
+        showToast(msg, { kind: 'error' });
+      }
+      return false;
+    }
+
+    if (!cleanBody || cleanBody === '(Draf kosong)') {
+      const msg =
+        lang === 'id'
+          ? 'Isi pesan masih kosong. Tulis pesan sebelum mengirim.'
+          : 'Message body is empty. Write your message before sending.';
+      if (params.surface === 'composer') {
+        setComposeFeedback({ kind: 'error', message: msg });
+      } else {
+        showToast(msg, { kind: 'error' });
+      }
+      return false;
+    }
+
     try {
+      // Step 1: Upload any attachments to ephemeral R2 before sending
+      const uploadedMeta: Array<{
+        id: string;
+        filename: string;
+        mimeType: string;
+        sizeBytes: number;
+      }> = [];
+      const localSavedAttachments: MailAttachment[] = [];
+
+      for (let i = 0; i < params.attachments.length; i += 1) {
+        const att = params.attachments[i];
+        if (params.surface === 'composer') {
+          setComposeFeedback({
+            kind: 'sending',
+            message:
+              lang === 'id'
+                ? `Mengunggah lampiran ${i + 1}/${params.attachments.length}: ${att.filename}...`
+                : `Uploading attachment ${i + 1}/${params.attachments.length}: ${att.filename}...`,
+          });
+        }
+
+        let blob: Blob;
+        let b64: string;
+        if (att.file) {
+          blob = att.file;
+          b64 = await fileToBase64(att.file);
+        } else if (att.localDataBase64) {
+          b64 = att.localDataBase64;
+          blob = base64ToBlob(att.localDataBase64, att.mimeType);
+        } else {
+          continue;
+        }
+
+        const uploadUrl = `/api/mail/attachments/upload?ownerUser=${encodeURIComponent(
+          user
+        )}&filename=${encodeURIComponent(att.filename)}`;
+
+        const upRes = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': att.mimeType || 'application/octet-stream',
+          },
+          body: blob,
+        });
+        const upJson = (await upRes.json().catch(() => null)) as {
+          ok?: boolean;
+          error?: string;
+          id?: string;
+          ephemeralId?: string;
+          ephemeralOwner?: string;
+          filename?: string;
+          mimeType?: string;
+          sizeBytes?: number;
+          expiresAt?: string;
+        } | null;
+
+        const uploadedId = upJson?.ephemeralId || upJson?.id;
+        if (!upRes.ok || !upJson?.ok || !uploadedId) {
+          const errMsg =
+            upJson?.error ||
+            (lang === 'id'
+              ? `Gagal mengunggah lampiran "${att.filename}".`
+              : `Failed to upload attachment "${att.filename}".`);
+          if (params.surface === 'composer') {
+            setComposeFeedback({ kind: 'error', message: errMsg });
+          } else {
+            showToast(errMsg, { kind: 'error' });
+          }
+          return false;
+        }
+
+        const resolvedMeta = {
+          id: uploadedId,
+          ephemeralId: uploadedId,
+          filename: upJson.filename || att.filename,
+          mimeType: upJson.mimeType || att.mimeType || 'application/octet-stream',
+          sizeBytes: upJson.sizeBytes ?? att.sizeBytes,
+        };
+        uploadedMeta.push(resolvedMeta);
+        localSavedAttachments.push({
+          id: resolvedMeta.id,
+          ephemeralId: resolvedMeta.ephemeralId,
+          ephemeralOwner: upJson.ephemeralOwner || user,
+          expiresAt: upJson.expiresAt,
+          filename: resolvedMeta.filename,
+          mimeType: resolvedMeta.mimeType,
+          sizeBytes: resolvedMeta.sizeBytes,
+          localDataBase64: b64,
+          storageStatus: 'local_saved',
+        });
+      }
+
+      // Step 2: Dispatch email via Edge Worker (/api/mail/send)
+      if (params.surface === 'composer') {
+        setComposeFeedback({
+          kind: 'sending',
+          message:
+            lang === 'id'
+              ? `Mengirim email ke ${cleanTo} melalui Edge Worker...`
+              : `Sending email to ${cleanTo} via Edge Worker...`,
+        });
+      }
+
       const res = await fetch('/api/mail/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           senderUser: user,
-          fromAddress: composeFromAlias || primaryEmail,
-          toAddress: composeTo.trim(),
-          subject: composeSubject.trim() || '(Tanpa Subjek)',
-          bodyText: composeBody.trim(),
+          fromAddress: cleanFrom,
+          toAddress: cleanTo,
+          subject: cleanSubject,
+          bodyText: cleanBody,
+          attachments: uploadedMeta,
         }),
       });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        showToast(data.error || 'Gagal mengirim email.');
-        return;
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        kvBound?: boolean;
+        loopbackPacket?: EphemeralEdgePacket;
+        rfcMessageId?: string;
+        dispatchedVia?: string;
+        liveEmailDispatched?: boolean;
+        quota?: { usedToday: number; dailyLimit: number };
+      } | null;
+
+      if (!res.ok || !data?.ok) {
+        const errMsg =
+          data?.error ||
+          (lang === 'id'
+            ? `Pengiriman gagal (HTTP ${res.status}). Periksa konfigurasi provider email (Brevo/cPanel/Resend) atau simpan sebagai Draf Lokal.`
+            : `Email delivery failed (HTTP ${res.status}). Check your outbound provider secret or save as Local Draft.`);
+        if (params.surface === 'composer') {
+          setComposeFeedback({ kind: 'error', message: errMsg });
+        } else {
+          showToast(errMsg, { kind: 'error' });
+        }
+        return false;
       }
 
       if (!data.kvBound && data.loopbackPacket) {
-        enqueueLocalFallbackPacket(data.loopbackPacket as EphemeralEdgePacket);
+        enqueueLocalFallbackPacket(data.loopbackPacket);
       }
 
       const newLocalSent: LocalMailMessage = {
         id: generateSecureId('msg-sent'),
-        rfcMessageId: data.rfcMessageId || `<${generateSecureId('sent')}@${domain}>`,
+        rfcMessageId:
+          data.rfcMessageId || `<${generateSecureId('sent')}@${domain}>`,
         ownerUser: user,
-        threadId: composeTo.trim().toLowerCase(),
+        threadId: cleanTo.toLowerCase(),
         folder: 'sent',
         direction: 'outbound',
-        from: { name: user, address: composeFromAlias || primaryEmail },
+        from: { name: user, address: cleanFrom },
         to: [
           {
-            name: composeTo.trim().split('@')[0],
-            address: composeTo.trim().toLowerCase(),
+            name: cleanTo.split('@')[0],
+            address: cleanTo.toLowerCase(),
           },
         ],
         cc: [],
-        deliveredToAlias: composeTo.trim().toLowerCase(),
+        deliveredToAlias: cleanTo.toLowerCase(),
         plusTag: null,
         dotNormalized: false,
-        subject: composeSubject.trim() || '(Tanpa Subjek)',
-        bodyText: composeBody.trim(),
+        subject: cleanSubject,
+        bodyText: cleanBody,
         timestamp: new Date().toISOString(),
         read: true,
         starred: false,
         verifiedSpfDkim: true,
         dmarcPolicy: 'local-relay',
-        ephemeralQueueReceipt: 'LOCAL-ONLY-ZERO-SERVER-COPY',
+        ephemeralQueueReceipt:
+          data.dispatchedVia === 'brevo'
+            ? 'DISPATCHED-BREVO-ZERO-SERVER-COPY'
+            : data.dispatchedVia === 'cpanel_relay'
+              ? 'DISPATCHED-CPANEL-ZERO-SERVER-COPY'
+              : data.dispatchedVia === 'resend'
+                ? 'DISPATCHED-RESEND-ZERO-SERVER-COPY'
+                : data.dispatchedVia === 'cloudflare'
+                  ? 'DISPATCHED-CF-SEND-ZERO-SERVER-COPY'
+                  : 'LOCAL-ONLY-ZERO-SERVER-COPY',
         chatBridgeChannel: null,
-        attachments: [],
+        attachments: localSavedAttachments,
       };
 
+      if (params.draftIdToDelete) {
+        await deleteMessageFromLocalDb(params.draftIdToDelete);
+      }
       await saveMessage(newLocalSent);
+
       if (data.quota) {
         setQuotaUsed(data.quota.usedToday);
       }
-      setComposeOpen(false);
-      setComposeTo('');
-      setComposeSubject('');
-      setComposeBody('');
+
+      if (params.surface === 'composer') {
+        resetComposeForm();
+        setComposeMode('closed');
+      }
+
       await loadLocalMessages();
       await checkEdgeTransitQueue();
       setSelectedThreadId(newLocalSent.threadId);
       setSelectedMessageId(newLocalSent.id);
 
+      const providerLabel =
+        data.dispatchedVia === 'brevo'
+          ? 'Brevo API'
+          : data.dispatchedVia === 'cpanel_relay'
+            ? 'cPanel Relay'
+            : data.dispatchedVia === 'resend'
+              ? 'Resend API'
+              : data.dispatchedVia === 'cloudflare'
+                ? 'Cloudflare Email Sending'
+                : data.dispatchedVia === 'internal_loopback'
+                  ? 'Internal @imy.li Edge'
+                  : lang === 'id'
+                    ? 'Mode Simulasi Lokal'
+                    : 'Local Relay Simulation';
+
       showToast(
         lang === 'id'
-          ? `Email diproses (${data.liveEmailDispatched ? 'Cloudflare Email Sending aktif' : 'Mode Simulasi Relay'}) & disimpan di IndexedDB perangkat lokal.`
-          : `Email processed (${data.liveEmailDispatched ? 'Live Cloudflare Email Sending' : 'Relay Simulation Mode'}) & saved in local device IndexedDB.`
+          ? `Email terkirim ke ${cleanTo} via ${providerLabel} & tersimpan di folder Terkirim Lokal.`
+          : `Email sent to ${cleanTo} via ${providerLabel} & saved to Local Sent.`,
+        {
+          kind: 'success',
+          actionLabel: lang === 'id' ? 'Lihat di Terkirim' : 'Open Sent',
+          onAction: () => {
+            setActiveFolder('sent');
+            setViewMode('classic');
+            setSelectedMessageId(newLocalSent.id);
+            setMobileShowDetail(true);
+          },
+        }
       );
+      return true;
     } catch {
-      showToast(
+      const netErr =
         lang === 'id'
-          ? 'Gagal terhubung ke relay pengiriman email.'
-          : 'Failed to reach outbound email relay.'
-      );
+          ? 'Gagal terhubung ke server relay pengiriman email. Periksa koneksi internet Anda atau simpan sebagai Draf Lokal.'
+          : 'Could not reach the outbound email relay. Check your connection or save as Local Draft.';
+      if (params.surface === 'composer') {
+        setComposeFeedback({ kind: 'error', message: netErr });
+      } else {
+        showToast(netErr, { kind: 'error' });
+      }
+      return false;
+    }
+  };
+
+  const handleSendOutboundEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (composeSending) return;
+    setComposeSending(true);
+    try {
+      await dispatchEmailPayload({
+        fromAlias: composeFromAlias || primaryEmail,
+        to: composeTo,
+        subject: composeSubject,
+        body: composeBody,
+        attachments: composeAttachments,
+        draftIdToDelete: editingDraftId,
+        surface: 'composer',
+      });
     } finally {
       setComposeSending(false);
     }
   };
 
+  const handleSendDraftDirectly = async (draft: LocalMailMessage) => {
+    if (sendingDraftId) return;
+    setSendingDraftId(draft.id);
+    try {
+      const draftAtts: PendingComposeAttachment[] = (draft.attachments || []).map(
+        (att) => ({
+          id: att.id,
+          filename: att.filename,
+          mimeType: att.mimeType,
+          sizeBytes: att.sizeBytes,
+          localDataBase64: att.localDataBase64,
+        })
+      );
+      const ok = await dispatchEmailPayload({
+        fromAlias: draft.from.address || primaryEmail,
+        to: draft.to[0]?.address || '',
+        subject:
+          draft.subject === '(Draf Belum Berjudul)' ? '' : draft.subject,
+        body: draft.bodyText === '(Draf kosong)' ? '' : draft.bodyText,
+        attachments: draftAtts,
+        draftIdToDelete: draft.id,
+        surface: 'draft_pane',
+      });
+      if (ok) {
+        setActiveFolder('sent');
+        setViewMode('classic');
+      }
+    } finally {
+      setSendingDraftId(null);
+    }
+  };
+
   const handleSaveDraft = async () => {
-    const draftMsg: LocalMailMessage = {
-      id: generateSecureId('msg-draft'),
-      rfcMessageId: `<${generateSecureId('draft')}@${domain}>`,
-      ownerUser: user,
-      threadId: (composeTo.trim() || `draft@${domain}`).toLowerCase(),
-      folder: 'drafts',
-      direction: 'outbound',
-      from: { name: user, address: composeFromAlias || primaryEmail },
-      to: [
-        {
-          name: (composeTo.trim() || 'draft').split('@')[0],
-          address: (composeTo.trim() || `draft@${domain}`).toLowerCase(),
-        },
-      ],
-      cc: [],
-      deliveredToAlias: (composeTo.trim() || primaryEmail).toLowerCase(),
-      plusTag: null,
-      dotNormalized: false,
-      subject: composeSubject.trim() || '(Draf Belum Berjudul)',
-      bodyText: composeBody.trim() || '(Draf kosong)',
-      timestamp: new Date().toISOString(),
-      read: true,
-      starred: false,
-      verifiedSpfDkim: true,
-      dmarcPolicy: 'local-relay',
-      ephemeralQueueReceipt: 'LOCAL-DRAFT-INDEXEDDB',
-      chatBridgeChannel: null,
-      attachments: [],
-    };
-    await saveMessage(draftMsg);
-    setComposeOpen(false);
-    setActiveFolder('drafts');
-    await loadLocalMessages();
-    showToast(
-      lang === 'id'
-        ? 'Draf disimpan secara lokal di perangkat Anda.'
-        : 'Draft saved locally on your device.'
-    );
+    try {
+      const persistedAttachments: MailAttachment[] = [];
+      for (const att of composeAttachments) {
+        let b64 = att.localDataBase64;
+        if (!b64 && att.file) {
+          b64 = await fileToBase64(att.file);
+        }
+        persistedAttachments.push({
+          id: att.id,
+          filename: att.filename,
+          mimeType: att.mimeType,
+          sizeBytes: att.sizeBytes,
+          localDataBase64: b64,
+          storageStatus: 'local_saved',
+        });
+      }
+
+      const draftId = editingDraftId || generateSecureId('msg-draft');
+      const draftMsg: LocalMailMessage = {
+        id: draftId,
+        rfcMessageId: `<${draftId}@${domain}>`,
+        ownerUser: user,
+        threadId: (composeTo.trim() || `draft@${domain}`).toLowerCase(),
+        folder: 'drafts',
+        direction: 'outbound',
+        from: { name: user, address: composeFromAlias || primaryEmail },
+        to: [
+          {
+            name: (composeTo.trim() || 'draft').split('@')[0],
+            address: (composeTo.trim() || `draft@${domain}`).toLowerCase(),
+          },
+        ],
+        cc: [],
+        deliveredToAlias: (composeTo.trim() || primaryEmail).toLowerCase(),
+        plusTag: null,
+        dotNormalized: false,
+        subject: composeSubject.trim() || '(Draf Belum Berjudul)',
+        bodyText: composeBody.trim() || '(Draf kosong)',
+        timestamp: new Date().toISOString(),
+        read: true,
+        starred: false,
+        verifiedSpfDkim: true,
+        dmarcPolicy: 'local-relay',
+        ephemeralQueueReceipt: 'LOCAL-DRAFT-INDEXEDDB',
+        chatBridgeChannel: null,
+        attachments: persistedAttachments,
+      };
+      await saveMessage(draftMsg);
+      resetComposeForm();
+      setComposeMode('closed');
+      setActiveFolder('drafts');
+      setViewMode('classic');
+      await loadLocalMessages();
+      setSelectedMessageId(draftMsg.id);
+      setMobileShowDetail(true);
+      showToast(
+        lang === 'id'
+          ? 'Draf tersimpan di IndexedDB perangkat lokal (folder Draf Lokal).'
+          : 'Draft saved to local device IndexedDB (Local Drafts folder).',
+        { kind: 'success' }
+      );
+    } catch {
+      setComposeFeedback({
+        kind: 'error',
+        message:
+          lang === 'id'
+            ? 'Gagal menyimpan draf ke IndexedDB lokal.'
+            : 'Failed to save draft to local IndexedDB.',
+      });
+    }
+  };
+
+  const handleDownloadAttachment = async (
+    msg: LocalMailMessage,
+    att: MailAttachment
+  ) => {
+    // 1. Offline local hit (already downloaded or locally sent/drafted)
+    if (att.localDataBase64) {
+      const blob = base64ToBlob(att.localDataBase64, att.mimeType);
+      triggerBinaryBrowserDownload(att.filename, blob);
+      return;
+    }
+    if (att.contentText) {
+      triggerBrowserDownload(att.filename, att.contentText, att.mimeType);
+      return;
+    }
+
+    // 2. Already marked expired/purged on server
+    if (att.storageStatus === 'expired_purged') {
+      showToast(
+        lang === 'id'
+          ? `Lampiran "${att.filename}" sudah terhapus dari server R2 (karena sudah diunduh atau >7 hari). Minta pengirim mengirim ulang.`
+          : `Attachment "${att.filename}" was already purged from R2 (downloaded or >7 days old). Ask the sender to resend it.`,
+        { kind: 'error' }
+      );
+      return;
+    }
+
+    // 3. Ephemeral R2 one-time download (WhatsApp-style: download once -> save locally -> purged from R2)
+    const owner = att.ephemeralOwner || msg.ownerUser || user;
+    const ephemId = att.ephemeralId || att.id;
+    setDownloadingAttId(att.id);
+    try {
+      const res = await fetch(
+        `/api/mail/attachments/${encodeURIComponent(owner)}/${encodeURIComponent(ephemId)}`
+      );
+
+      if (res.status === 410 || res.status === 404) {
+        const updatedMsg: LocalMailMessage = {
+          ...msg,
+          attachments: (msg.attachments || []).map((item) =>
+            item.id === att.id
+              ? { ...item, storageStatus: 'expired_purged' }
+              : item
+          ),
+        };
+        await saveMessage(updatedMsg);
+        await loadLocalMessages();
+        showToast(
+          lang === 'id'
+            ? `Lampiran "${att.filename}" sudah kedaluwarsa atau telah dihapus dari server R2 (>7 hari / sudah diunduh). Minta pengirim kirim ulang.`
+            : `Attachment "${att.filename}" has expired or been purged from R2 (>7 days / already downloaded). Ask the sender to resend.`,
+          { kind: 'error' }
+        );
+        return;
+      }
+
+      if (!res.ok) {
+        showToast(
+          lang === 'id'
+            ? `Gagal mengunduh lampiran "${att.filename}" (HTTP ${res.status}).`
+            : `Failed to download "${att.filename}" (HTTP ${res.status}).`,
+          { kind: 'error' }
+        );
+        return;
+      }
+
+      const buf = await res.arrayBuffer();
+      const b64 = arrayBufferToBase64(buf);
+      const contentType =
+        res.headers.get('Content-Type') || att.mimeType || 'application/octet-stream';
+      const blob = new Blob([buf], { type: contentType });
+
+      const updatedMsg: LocalMailMessage = {
+        ...msg,
+        attachments: (msg.attachments || []).map((item) =>
+          item.id === att.id
+            ? {
+                ...item,
+                mimeType: contentType,
+                sizeBytes: buf.byteLength || item.sizeBytes,
+                localDataBase64: b64,
+                storageStatus: 'local_saved',
+              }
+            : item
+        ),
+      };
+      await saveMessage(updatedMsg);
+      await loadLocalMessages();
+
+      triggerBinaryBrowserDownload(att.filename, blob);
+      showToast(
+        lang === 'id'
+          ? `Lampiran "${att.filename}" tersimpan offline di perangkat Anda & langsung dihapus dari server R2 (Zero Retention).`
+          : `Attachment "${att.filename}" saved offline on your device & immediately purged from R2 (Zero Retention).`,
+        { kind: 'success' }
+      );
+    } catch {
+      showToast(
+        lang === 'id'
+          ? `Gagal mengunduh lampiran "${att.filename}" karena kendala jaringan.`
+          : `Network error downloading "${att.filename}".`,
+        { kind: 'error' }
+      );
+    } finally {
+      setDownloadingAttId(null);
+    }
   };
 
   const handleQuickBubbleReply = async (e: React.FormEvent) => {
@@ -1049,8 +1653,7 @@ export function VzMailWorkspace({
         type="button"
         onClick={() => {
           onCloseDrawer?.();
-          setComposeFromAlias(primaryEmail);
-          setComposeOpen(true);
+          handleOpenNewComposer();
         }}
         className="w-full min-h-[44px] py-2.5 px-4 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer"
       >
@@ -1293,18 +1896,48 @@ export function VzMailWorkspace({
         </div>
       )}
 
-      {/* Toast Notification */}
+      {/* Fixed Floating Toast Notification (ALWAYS above modals & floating composer) */}
       {toastNotice && (
-        <div className="bg-slate-900 dark:bg-blue-950 text-white border border-slate-700 dark:border-blue-800 rounded-lg px-4 py-2.5 text-xs flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 min-w-0">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span className="break-words">{toastNotice}</span>
+        <div
+          role={toastNotice.kind === 'error' ? 'alert' : 'status'}
+          className={`fixed top-4 right-4 z-[70] w-[min(440px,calc(100vw-2rem))] rounded-xl px-4 py-3 text-xs shadow-2xl border flex items-start justify-between gap-3 ${
+            toastNotice.kind === 'error'
+              ? 'bg-rose-950 text-rose-50 border-rose-700'
+              : toastNotice.kind === 'success'
+                ? 'bg-emerald-950 text-emerald-50 border-emerald-700'
+                : 'bg-slate-900 dark:bg-[#171E2E] text-white border-slate-700 dark:border-blue-800'
+          }`}
+        >
+          <div className="flex items-start gap-2.5 min-w-0">
+            {toastNotice.kind === 'error' ? (
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+            )}
+            <div className="space-y-1.5 min-w-0">
+              <p className="break-words leading-snug font-medium">
+                {toastNotice.message}
+              </p>
+              {toastNotice.actionLabel && toastNotice.onAction && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const fn = toastNotice.onAction;
+                    setToastNotice(null);
+                    fn?.();
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-white/15 hover:bg-white/25 text-white rounded-md transition-colors cursor-pointer"
+                >
+                  {toastNotice.actionLabel}
+                </button>
+              )}
+            </div>
           </div>
           <button
             type="button"
             onClick={() => setToastNotice(null)}
             aria-label="Dismiss notification"
-            className="w-8 h-8 inline-flex items-center justify-center text-slate-400 hover:text-white shrink-0 cursor-pointer"
+            className="w-7 h-7 inline-flex items-center justify-center text-white/70 hover:text-white shrink-0 cursor-pointer"
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -1333,10 +1966,7 @@ export function VzMailWorkspace({
 
             <button
               type="button"
-              onClick={() => {
-                setComposeFromAlias(primaryEmail);
-                setComposeOpen(true);
-              }}
+              onClick={() => handleOpenNewComposer()}
               className="min-h-[44px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Send className="w-3.5 h-3.5" />
@@ -1721,13 +2351,12 @@ export function VzMailWorkspace({
                         </button>
                         <button
                           type="button"
-                          onClick={() => {
-                            setComposeTo(activeThread.peerAddress);
-                            setComposeSubject(
-                              `Re: ${activeThread.latestMessage.subject}`
-                            );
-                            setComposeOpen(true);
-                          }}
+                          onClick={() =>
+                            handleOpenNewComposer({
+                              to: activeThread.peerAddress,
+                              subject: `Re: ${activeThread.latestMessage.subject}`,
+                            })
+                          }
                           className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#242B3A] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                         >
                           {lang === 'id' ? 'Editor Penuh' : 'Full Composer'}
@@ -1791,30 +2420,59 @@ export function VzMailWorkspace({
                                 {msg.bodyText}
                               </div>
 
-                              {/* Attachments */}
+                              {/* WhatsApp-Style Ephemeral & Local Attachments */}
                               {msg.attachments && msg.attachments.length > 0 && (
-                                <div className="pt-2 space-y-1">
-                                  {msg.attachments.map((att) => (
-                                    <button
-                                      key={att.id}
-                                      type="button"
-                                      onClick={() =>
-                                        triggerBrowserDownload(
-                                          att.filename,
-                                          att.contentText || msg.bodyText,
-                                          att.mimeType
-                                        )
-                                      }
-                                      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded text-xs font-mono cursor-pointer ${
-                                        isOutbound
-                                          ? 'bg-blue-700 text-white hover:bg-blue-800'
-                                          : 'bg-slate-100 dark:bg-[#1F2533] text-slate-800 dark:text-slate-200'
-                                      }`}
-                                    >
-                                      <Download className="w-3.5 h-3.5" />
-                                      <span>{att.filename}</span>
-                                    </button>
-                                  ))}
+                                <div className="pt-2 space-y-1.5">
+                                  {msg.attachments.map((att) => {
+                                    const isLocal = Boolean(
+                                      att.localDataBase64 ||
+                                        att.contentText ||
+                                        att.storageStatus === 'local_saved'
+                                    );
+                                    const isExpired =
+                                      att.storageStatus === 'expired_purged';
+                                    const isDownloading =
+                                      downloadingAttId === att.id;
+                                    return (
+                                      <button
+                                        key={att.id}
+                                        type="button"
+                                        disabled={isDownloading}
+                                        onClick={() =>
+                                          void handleDownloadAttachment(msg, att)
+                                        }
+                                        className={`w-full text-left inline-flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-xs font-mono transition-colors cursor-pointer ${
+                                          isExpired
+                                            ? 'bg-rose-950/30 border border-rose-400/50 text-rose-100'
+                                            : isOutbound
+                                              ? 'bg-blue-700 text-white hover:bg-blue-800'
+                                              : 'bg-slate-100 dark:bg-[#1F2533] text-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-[#272F40]'
+                                        }`}
+                                      >
+                                        <span className="inline-flex items-center gap-2 min-w-0">
+                                          {isDownloading ? (
+                                            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                                          ) : isExpired ? (
+                                            <Clock className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+                                          ) : (
+                                            <Download className="w-3.5 h-3.5 shrink-0" />
+                                          )}
+                                          <span className="truncate">
+                                            {att.filename}
+                                          </span>
+                                        </span>
+                                        <span className="text-[10px] opacity-85 shrink-0">
+                                          {isExpired
+                                            ? lang === 'id'
+                                              ? 'Kedaluwarsa (Minta Kirim Ulang)'
+                                              : 'Expired (Ask Resend)'
+                                            : isLocal
+                                              ? `${formatAttachmentBytes(att.sizeBytes)} · Lokal`
+                                              : `${formatAttachmentBytes(att.sizeBytes)} · Unduh (R2)`}
+                                        </span>
+                                      </button>
+                                    );
+                                  })}
                                 </div>
                               )}
 
@@ -2169,85 +2827,135 @@ export function VzMailWorkspace({
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          openSearchGrounding(
-                            activeClassicMessage.from.address,
-                            activeClassicMessage.from.name,
-                            activeClassicMessage.subject
-                          )
-                        }
-                        className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 rounded-md inline-flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <ShieldCheck className="w-3.5 h-3.5" />
-                        <span>
-                          {lang === 'id'
-                            ? 'Verifikasi Pengirim & Cari'
-                            : 'Verify Sender & Search'}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setComposeTo(
-                            activeClassicMessage.direction === 'inbound'
-                              ? activeClassicMessage.from.address
-                              : activeClassicMessage.to[0]?.address || ''
-                          );
-                          setComposeSubject(
-                            `Re: ${activeClassicMessage.subject}`
-                          );
-                          setComposeOpen(true);
-                        }}
-                        className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-md cursor-pointer"
-                      >
-                        {lang === 'id' ? 'Balas' : 'Reply'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          triggerBrowserDownload(
-                            `${activeClassicMessage.id}.eml`,
-                            serializeToEml(activeClassicMessage),
-                            'message/rfc822'
-                          )
-                        }
-                        className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
-                      >
-                        .eml
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleMoveFolder(activeClassicMessage, 'archive')
-                        }
-                        className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
-                      >
-                        {lang === 'id' ? 'Arsipkan' : 'Archive'}
-                      </button>
-                      {activeClassicMessage.folder === 'trash' ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setPendingPermanentDeleteMsg(activeClassicMessage)
-                          }
-                          className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-md cursor-pointer"
-                        >
-                          {lang === 'id'
-                            ? 'Hapus Permanen Lokal'
-                            : 'Wipe from Device'}
-                        </button>
+                      {activeClassicMessage.folder === 'drafts' ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={sendingDraftId === activeClassicMessage.id}
+                            onClick={() =>
+                              void handleSendDraftDirectly(activeClassicMessage)
+                            }
+                            className="min-h-[38px] px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-md inline-flex items-center gap-1.5 cursor-pointer"
+                          >
+                            {sendingDraftId === activeClassicMessage.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Send className="w-3.5 h-3.5" />
+                            )}
+                            <span>
+                              {sendingDraftId === activeClassicMessage.id
+                                ? lang === 'id'
+                                  ? 'Mengirim...'
+                                  : 'Sending...'
+                                : lang === 'id'
+                                  ? 'Kirim Sekarang'
+                                  : 'Send Now'}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleEditDraft(activeClassicMessage)}
+                            className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 rounded-md inline-flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            <span>
+                              {lang === 'id' ? 'Lanjutkan Edit' : 'Edit Draft'}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPendingPermanentDeleteMsg(activeClassicMessage)
+                            }
+                            className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] hover:bg-rose-50 dark:hover:bg-rose-950/30 rounded-md inline-flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>
+                              {lang === 'id' ? 'Hapus Draf' : 'Delete Draft'}
+                            </span>
+                          </button>
+                        </>
                       ) : (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleMoveFolder(activeClassicMessage, 'trash')
-                          }
-                          className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
-                        >
-                          {lang === 'id' ? 'Sampah' : 'Trash'}
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openSearchGrounding(
+                                activeClassicMessage.from.address,
+                                activeClassicMessage.from.name,
+                                activeClassicMessage.subject
+                              )
+                            }
+                            className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 rounded-md inline-flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                            <span>
+                              {lang === 'id'
+                                ? 'Verifikasi Pengirim & Cari'
+                                : 'Verify Sender & Search'}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleOpenNewComposer({
+                                to:
+                                  activeClassicMessage.direction === 'inbound'
+                                    ? activeClassicMessage.from.address
+                                    : activeClassicMessage.to[0]?.address || '',
+                                subject: `Re: ${activeClassicMessage.subject}`,
+                              })
+                            }
+                            className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-md cursor-pointer"
+                          >
+                            {lang === 'id' ? 'Balas' : 'Reply'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              triggerBrowserDownload(
+                                `${activeClassicMessage.id}.eml`,
+                                serializeToEml(activeClassicMessage),
+                                'message/rfc822'
+                              )
+                            }
+                            className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
+                          >
+                            .eml
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleMoveFolder(activeClassicMessage, 'archive')
+                            }
+                            className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
+                          >
+                            {lang === 'id' ? 'Arsipkan' : 'Archive'}
+                          </button>
+                          {activeClassicMessage.folder === 'trash' ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPendingPermanentDeleteMsg(activeClassicMessage)
+                              }
+                              className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-md cursor-pointer"
+                            >
+                              {lang === 'id'
+                                ? 'Hapus Permanen Lokal'
+                                : 'Wipe from Device'}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleMoveFolder(activeClassicMessage, 'trash')
+                              }
+                              className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 bg-white dark:bg-[#191E28] border border-slate-200 dark:border-[#282F3D] rounded-md cursor-pointer"
+                            >
+                              {lang === 'id' ? 'Sampah' : 'Trash'}
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
                   </div>
@@ -2255,6 +2963,104 @@ export function VzMailWorkspace({
                   <div className="text-sm text-slate-800 dark:text-slate-200 whitespace-pre-line leading-relaxed max-w-[70ch]">
                     {activeClassicMessage.bodyText}
                   </div>
+
+                  {/* WhatsApp-Style Ephemeral & Local Attachments in Classic Reading Pane */}
+                  {activeClassicMessage.attachments &&
+                    activeClassicMessage.attachments.length > 0 && (
+                      <div className="pt-4 border-t border-slate-200 dark:border-[#232732] space-y-2.5 max-w-2xl">
+                        <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 dark:text-slate-300">
+                          <Paperclip className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                          <span>
+                            {lang === 'id'
+                              ? `Lampiran (${activeClassicMessage.attachments.length})`
+                              : `Attachments (${activeClassicMessage.attachments.length})`}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {activeClassicMessage.attachments.map((att) => {
+                            const isLocal = Boolean(
+                              att.localDataBase64 ||
+                                att.contentText ||
+                                att.storageStatus === 'local_saved'
+                            );
+                            const isExpired =
+                              att.storageStatus === 'expired_purged';
+                            const isDownloading = downloadingAttId === att.id;
+                            return (
+                              <div
+                                key={att.id}
+                                className={`p-3 rounded-lg border flex flex-col gap-2 ${
+                                  isExpired
+                                    ? 'bg-rose-50/70 dark:bg-rose-950/20 border-rose-200 dark:border-rose-900/60'
+                                    : 'bg-white dark:bg-[#151922] border-slate-200 dark:border-[#262C3B]'
+                                }`}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                                      {att.filename}
+                                    </div>
+                                    <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 tabular-nums">
+                                      {formatAttachmentBytes(att.sizeBytes)} ·{' '}
+                                      {att.mimeType}
+                                    </div>
+                                  </div>
+                                  {!isExpired && (
+                                    <button
+                                      type="button"
+                                      disabled={isDownloading}
+                                      onClick={() =>
+                                        void handleDownloadAttachment(
+                                          activeClassicMessage,
+                                          att
+                                        )
+                                      }
+                                      className="min-h-[34px] px-2.5 py-1 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-md inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                                    >
+                                      {isDownloading ? (
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                      ) : (
+                                        <Download className="w-3.5 h-3.5" />
+                                      )}
+                                      <span>
+                                        {isLocal
+                                          ? lang === 'id'
+                                            ? 'Unduh'
+                                            : 'Download'
+                                          : lang === 'id'
+                                            ? 'Unduh & Simpan'
+                                            : 'Download & Save'}
+                                      </span>
+                                    </button>
+                                  )}
+                                </div>
+                                <div className="text-[11px] leading-snug">
+                                  {isExpired ? (
+                                    <span className="text-rose-700 dark:text-rose-300 font-medium">
+                                      {lang === 'id'
+                                        ? 'Media sudah terhapus dari server R2 (setelah diunduh / >7 hari). Minta pengirim kirim ulang.'
+                                        : 'Media was purged from R2 (downloaded / >7 days old). Ask the sender to resend.'}
+                                    </span>
+                                  ) : isLocal ? (
+                                    <span className="text-emerald-700 dark:text-emerald-400 font-mono">
+                                      {lang === 'id'
+                                        ? 'Tersimpan lokal di perangkat (0 byte di server R2)'
+                                        : 'Saved locally on device (0 bytes on R2 server)'}
+                                    </span>
+                                  ) : (
+                                    <span className="text-amber-700 dark:text-amber-400">
+                                      {lang === 'id'
+                                        ? 'Transit sementara R2 (maks 7 hari) — otomatis terhapus dari server saat Anda unduh.'
+                                        : 'Ephemeral R2 transit (max 7 days) — auto-purged from server upon download.'}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                 </div>
               )}
             </div>
@@ -2262,147 +3068,37 @@ export function VzMailWorkspace({
         </section>
       </div>
 
-      {/* Outbound Compose Modal */}
-      {composeOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Compose Outbound Email"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setComposeOpen(false);
-          }}
-          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
-        >
-          <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl max-w-xl w-full max-h-[90vh] overflow-y-auto p-5 sm:p-6 space-y-4">
-            <div className="flex items-start justify-between gap-3 border-b border-slate-200 dark:border-[#232732] pb-3">
-              <div className="min-w-0">
-                <h3 className="text-base font-bold text-slate-900 dark:text-white font-display">
-                  {lang === 'id'
-                    ? 'Tulis Email Baru (Cloudflare Email Sending)'
-                    : 'Compose Outbound Email (Cloudflare Email Sending)'}
-                </h3>
-                <p className="text-xs text-slate-500 font-mono">
-                  Zero VPS · Disimpan lokal di IndexedDB ({quotaUsed}/
-                  {quotaLimit} kuota harian)
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setComposeOpen(false)}
-                aria-label="Close composer"
-                className="w-11 h-11 -mr-2 -mt-2 inline-flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-white shrink-0 cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleSendOutboundEmail} className="space-y-3">
-              <div>
-                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
-                  {lang === 'id'
-                    ? 'Dari Alamat / Alias (+ atau .):'
-                    : 'From Address / Alias (+ or .):'}
-                </label>
-                <select
-                  value={composeFromAlias}
-                  onChange={(e) => setComposeFromAlias(e.target.value)}
-                  className="w-full px-3 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                >
-                  <option value={primaryEmail}>
-                    {primaryEmail} (Primary Canonical)
-                  </option>
-                  {aliasExamples.map((ex) => (
-                    <option key={ex.address} value={ex.address}>
-                      {ex.address} ({ex.rule})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
-                  {lang === 'id' ? 'Kepada (To):' : 'To Recipient:'}
-                </label>
-                <input
-                  type="email"
-                  required
-                  value={composeTo}
-                  onChange={(e) => setComposeTo(e.target.value)}
-                  placeholder="rina@imy.li atau alamat eksternal..."
-                  className="w-full px-3.5 py-2 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
-                  {lang === 'id' ? 'Subjek:' : 'Subject:'}
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={composeSubject}
-                  onChange={(e) => setComposeSubject(e.target.value)}
-                  placeholder={
-                    lang === 'id' ? 'Subjek pesan...' : 'Email subject...'
-                  }
-                  className="w-full px-3.5 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
-                  {lang === 'id' ? 'Isi Pesan:' : 'Message Body:'}
-                </label>
-                <textarea
-                  rows={6}
-                  required
-                  value={composeBody}
-                  onChange={(e) => setComposeBody(e.target.value)}
-                  placeholder={
-                    lang === 'id'
-                      ? 'Tulis isi surat elektronik Anda...'
-                      : 'Write your email message...'
-                  }
-                  className="w-full px-3.5 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white"
-                />
-              </div>
-
-              <div className="pt-2 flex flex-wrap items-center justify-between gap-2.5">
-                <button
-                  type="button"
-                  onClick={handleSaveDraft}
-                  className="min-h-[42px] px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] rounded-lg hover:bg-slate-200 cursor-pointer"
-                >
-                  {lang === 'id' ? 'Simpan Draf Lokal' : 'Save Local Draft'}
-                </button>
-                <div className="flex items-center gap-2 ml-auto">
-                  <button
-                    type="button"
-                    onClick={() => setComposeOpen(false)}
-                    className="min-h-[42px] px-3.5 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 cursor-pointer"
-                  >
-                    {lang === 'id' ? 'Batal' : 'Cancel'}
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={composeSending}
-                    className="min-h-[42px] inline-flex items-center gap-1.5 px-5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg cursor-pointer"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    <span>
-                      {composeSending
-                        ? 'Sending...'
-                        : lang === 'id'
-                          ? 'Kirim via Edge Worker'
-                          : 'Send via Edge Worker'}
-                    </span>
-                  </button>
-                </div>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Gmail / Hotmail-Style Floating, Minimizable & Fullscreen Composer */}
+      <MailFloatingComposer
+        mode={composeMode}
+        onChangeMode={setComposeMode}
+        lang={lang}
+        primaryEmail={primaryEmail}
+        aliasExamples={aliasExamples}
+        fromAlias={composeFromAlias}
+        onChangeFromAlias={setComposeFromAlias}
+        to={composeTo}
+        onChangeTo={setComposeTo}
+        subject={composeSubject}
+        onChangeSubject={setComposeSubject}
+        body={composeBody}
+        onChangeBody={setComposeBody}
+        attachments={composeAttachments}
+        onAddFiles={handleAddComposeFiles}
+        onRemoveAttachment={handleRemoveComposeAttachment}
+        editingDraftId={editingDraftId}
+        sending={composeSending}
+        feedback={composeFeedback}
+        onClearFeedback={() => setComposeFeedback({ kind: 'idle', message: '' })}
+        quotaUsed={quotaUsed}
+        quotaLimit={quotaLimit}
+        onSend={handleSendOutboundEmail}
+        onSaveDraft={handleSaveDraft}
+        onDiscard={() => {
+          resetComposeForm();
+          setComposeMode('closed');
+        }}
+      />
 
       {/* Inbound Email Routing & Alias Simulator Modal */}
       {simulatorOpen && (

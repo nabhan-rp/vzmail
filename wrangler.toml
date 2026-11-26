@@ -76,27 +76,31 @@ id = "9fb255e46c7b4501922aa6881c806493"
  database_name = "vzlinks-db"
  database_id = "9b82b9f1-e78c-4194-a038-435892efacfe"
 
-# 4. Recommended Upgrade — Cloudflare R2 Bucket for Bio Link AVIF Profile Photos (`LINKS_MEDIA_R2`):
-#    Free Tier: 10 GB storage, 10M reads/mo, $0 egress. Automatically falls back to D1/KV until enabled.
-#    Run:
-#      npx wrangler r2 bucket create vzlinks-media
-#    Then uncomment below:
+# 4. Cloudflare R2 Bucket for Bio Link AVIF Profile Photos & Ephemeral Email Attachments (`LINKS_MEDIA_R2`):
+#    Free Tier: 10 GB storage, 10M reads/mo, $0 egress.
+#    Recommended R2 Lifecycle Rule (Cloudflare Dashboard -> R2 -> vzlinks-media -> Settings):
+#      Prefix: mail-ephemeral/  |  Action: Delete objects after 7 days
 [[r2_buckets]]
 binding = "LINKS_MEDIA_R2"
 bucket_name = "vzlinks-media"
 
-# 5. Optional Cloudflare Email Sending (uncomment after onboarding imy.li in Compute > Email Service):
+# 5. Cloudflare Images Binding (`IMAGES`) for automatic server-side image -> AVIF conversion:
+#    Free Tier: 5,000 unique transformations/month. Automatically falls back if not enabled on account.
+[images]
+binding = "IMAGES"
+
+# 6. Optional Cloudflare Email Sending (uncomment after onboarding imy.li in Compute > Email Service):
 #    Free plan: verified destination addresses only; Workers Paid: any recipient.
 # [[send_email]]
 # name = "SEND_EMAIL"
 
-# 5. Outbound Provider Secrets (set via CLI — NEVER commit secrets into wrangler.toml):
+# 7. Outbound Provider Secrets (set via Workers Dashboard Settings -> Variables and Secrets, or CLI):
 #    Option A — Hybrid cPanel/WHM Outbound Relay ($0, zero storage on karya.kreasi.org):
 #      npx wrangler secret put CPANEL_RELAY_URL
 #      npx wrangler secret put CPANEL_RELAY_SECRET
 #    Option B — Resend Free Tier (3,000 emails/month):
 #      npx wrangler secret put RESEND_API_KEY
-#    Option C — Brevo Free Tier (300 emails/day):
+#    Option C — Brevo Free Tier (300 emails/day — use standard v3 API key `xkeysib-...`):
 #      npx wrangler secret put BREVO_API_KEY
 #    Optional API Relay Protection Token:
 #      npx wrangler secret put RELAY_AUTH_TOKEN

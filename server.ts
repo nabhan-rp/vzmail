@@ -15,9 +15,13 @@ import {
   stripHeaderInjection,
 } from './src/utils/mailSecurity.ts';
 import {
-  AVATAR_MAX_BYTES,
+  AVATAR_RAW_UPLOAD_MAX_BYTES,
   BIO_DELETE_COOLDOWN_MS,
+  MAIL_ATTACHMENT_MAX_COUNT,
+  MAIL_ATTACHMENT_MAX_TOTAL_BYTES,
+  MAIL_ATTACHMENT_TTL_MS,
   RECYCLE_BIN_RETENTION_MS,
+  detectRawImageMime,
   detectValidatedAvatarMime,
   generateShortlinkCode,
   isValidBioThemeId,
@@ -47,6 +51,16 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+interface EphemeralPacketAttachment {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  ephemeralId: string;
+  ephemeralOwner: string;
+  expiresAt: string;
+}
+
 interface EphemeralMailPacket {
   id: string;
   rfcMessageId: string;
@@ -60,6 +74,17 @@ interface EphemeralMailPacket {
   bodyText: string;
   receivedAt: string;
   expiresAt: string;
+  attachments?: EphemeralPacketAttachment[];
+}
+
+interface StoredEphemeralAttachment {
+  id: string;
+  ownerUser: string;
+  filename: string;
+  mimeType: string;
+  bytes: Buffer;
+  uploadedAt: string;
+  expiresAt: string;
 }
 
 const MAX_QUEUE_PACKETS = 500;
@@ -68,15 +93,37 @@ const DAILY_OUTBOUND_LIMIT = 25;
 
 // Ephemeral in-memory local dev buffer (Zero permanent retention: purged immediately upon client ACK)
 const ephemeralQueue: Map<string, EphemeralMailPacket> = new Map();
+const localEphemeralAttachments: Map<string, StoredEphemeralAttachment> = new Map();
 const outboundQuotaCounter: Map<string, { date: string; count: number }> = new Map();
 const localShortlinks: Map<string, ShortlinkRecord> = new Map();
 const localBioWorkspaces: Map<string, BioWorkspaceData> = new Map();
 const localBioAvatars: Map<
   string,
-  { bytes: Buffer; contentType: 'image/avif' | 'image/webp'; updatedAt: string }
+  { bytes: Buffer; contentType: string; updatedAt: string }
 > = new Map();
 const localRecycleBin: Map<string, RecycleBinRecord> = new Map();
 const localBioDeleteCooldowns: Map<string, { deletedAt: string; unlockAt: string }> = new Map();
+
+function sanitizeLocalFilename(raw: string): string {
+  const cleaned = stripHeaderInjection(raw, 120)
+    .replace(/[/\\:*?"<>|]/g, '_')
+    .replace(/^\.+/, '')
+    .trim();
+  return cleaned || 'attachment.bin';
+}
+
+function buildLocalAttachmentKey(ownerUser: string, attId: string): string {
+  return `${sanitizeHandle(ownerUser)}:${attId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+}
+
+function pruneExpiredLocalAttachments(): void {
+  const now = Date.now();
+  for (const [key, item] of localEphemeralAttachments.entries()) {
+    if (new Date(item.expiresAt).getTime() <= now) {
+      localEphemeralAttachments.delete(key);
+    }
+  }
+}
 
 function pruneExpiredLocalRecycleBin(): void {
   const now = Date.now();
@@ -204,6 +251,11 @@ async function startServer() {
       retentionPolicy: 'EPHEMERAL_POP_AND_PURGE',
       outboundProviderMode: (process.env.OUTBOUND_PROVIDER || 'auto').toLowerCase(),
       activeOutboundProvider,
+      brevoKeyFormat: !process.env.BREVO_API_KEY
+        ? 'missing'
+        : process.env.BREVO_API_KEY.trim().startsWith('xkeysib-')
+          ? 'v3_ready'
+          : 'mcp_token_warning',
       linksStorageEngine: 'local-dev-memory',
       mediaStorageEngine: 'local-dev-memory',
       bindings: {
@@ -211,6 +263,7 @@ async function startServer() {
         linksKv: true,
         linksDb: false,
         linksMediaR2: false,
+        imagesBinding: false,
         sendEmail: false,
         cpanelRelay: hasCpanel,
         resendApi: hasResend,
@@ -359,9 +412,92 @@ async function startServer() {
     });
   });
 
+  // 3.5 Ephemeral Email Attachment Upload & WhatsApp-Style One-Time Download (max 10 MB, 7-day TTL)
+  const attachmentRawParser = express.raw({
+    type: () => true,
+    limit: '10mb',
+  });
+
+  app.post('/api/mail/attachments/upload', attachmentRawParser, (req, res) => {
+    pruneExpiredLocalAttachments();
+    const ownerUser = sanitizeHandle(String(req.query.ownerUser || 'fadhil'));
+    const filename = sanitizeLocalFilename(String(req.query.filename || 'attachment.bin'));
+    const mimeType = stripHeaderInjection(
+      String(req.headers['content-type'] || 'application/octet-stream'),
+      120
+    )
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+    const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+
+    if (buf.byteLength === 0) {
+      res.status(400).json({ ok: false, error: 'File lampiran kosong.' });
+      return;
+    }
+    if (buf.byteLength > MAIL_ATTACHMENT_MAX_TOTAL_BYTES) {
+      res.status(413).json({
+        ok: false,
+        error: 'Ukuran lampiran melebihi batas maksimal 10 MB per email.',
+      });
+      return;
+    }
+
+    const attId = generateSecureId('att');
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + MAIL_ATTACHMENT_TTL_MS).toISOString();
+    localEphemeralAttachments.set(buildLocalAttachmentKey(ownerUser, attId), {
+      id: attId,
+      ownerUser,
+      filename,
+      mimeType: mimeType || 'application/octet-stream',
+      bytes: buf,
+      uploadedAt: now.toISOString(),
+      expiresAt,
+    });
+
+    res.json({
+      ok: true,
+      id: attId,
+      ephemeralId: attId,
+      ephemeralOwner: ownerUser,
+      filename,
+      mimeType: mimeType || 'application/octet-stream',
+      sizeBytes: buf.byteLength,
+      expiresAt,
+      storageEngine: 'local-dev-ephemeral',
+    });
+  });
+
+  app.get('/api/mail/attachments/:ownerUser/:attId', (req, res) => {
+    pruneExpiredLocalAttachments();
+    const ownerUser = sanitizeHandle(String(req.params.ownerUser || ''));
+    const attId = String(req.params.attId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    const key = buildLocalAttachmentKey(ownerUser, attId);
+    const stored = localEphemeralAttachments.get(key);
+    if (!stored) {
+      res.status(410).json({
+        ok: false,
+        code: 'EXPIRED_OR_PURGED',
+        error:
+          'Media ini sudah tidak ada di server (otomatis terhapus setelah diunduh atau melewati batas 7 hari). Minta pengirim untuk mengirim ulang.',
+      });
+      return;
+    }
+    // WhatsApp-style one-time download: purge immediately on serve
+    localEphemeralAttachments.delete(key);
+    res.setHeader('Content-Type', stored.mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${stored.filename}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-VZ-R2-Purged', 'true');
+    res.status(200).send(stored.bytes);
+  });
+
   // 4. POST /api/mail/send — Dispatch outbound email via Cloudflare Email Sending relay (dev simulation)
   app.post('/api/mail/send', (req, res) => {
     pruneExpiredAndBoundQueue();
+    pruneExpiredLocalAttachments();
 
     const senderUser = sanitizeHandle(String(req.body?.senderUser || 'fadhil'));
     const senderReserved = checkReservedUsername(senderUser);
@@ -425,6 +561,38 @@ async function startServer() {
       return;
     }
 
+    // Resolve & validate attached temporary files (max 5 files, 10 MB total)
+    const rawAttRefs = Array.isArray(req.body?.attachments)
+      ? (req.body.attachments as Array<{ id?: string; ephemeralId?: string; filename?: string }>).slice(
+          0,
+          MAIL_ATTACHMENT_MAX_COUNT
+        )
+      : [];
+    const loadedLocalAttachments: Array<{ key: string; item: StoredEphemeralAttachment }> = [];
+    let totalBytes = 0;
+    for (const ref of rawAttRefs) {
+      const attId = String(ref.ephemeralId || ref.id || '').replace(/[^a-zA-Z0-9_-]/g, '');
+      if (!attId) continue;
+      const key = buildLocalAttachmentKey(senderUser, attId);
+      const item = localEphemeralAttachments.get(key);
+      if (!item) {
+        res.status(410).json({
+          ok: false,
+          error: `Lampiran "${ref.filename || attId}" sudah kedaluwarsa. Unggah ulang file sebelum mengirim.`,
+        });
+        return;
+      }
+      totalBytes += item.bytes.byteLength;
+      if (totalBytes > MAIL_ATTACHMENT_MAX_TOTAL_BYTES) {
+        res.status(413).json({
+          ok: false,
+          error: 'Total ukuran seluruh lampiran melebihi batas maksimal 10 MB per email.',
+        });
+        return;
+      }
+      loadedLocalAttachments.push({ key, item });
+    }
+
     outboundQuotaCounter.set(senderUser, {
       date: today,
       count: currentCount + 1,
@@ -436,6 +604,31 @@ async function startServer() {
 
     if (resolvedRecipient.isValid && resolvedRecipient.isSupportedDomain) {
       const pktId = generateSecureId('cf-loop');
+      const now = new Date();
+      const recipientAttachments: EphemeralPacketAttachment[] = [];
+      const expiresAt = new Date(now.getTime() + MAIL_ATTACHMENT_TTL_MS).toISOString();
+
+      for (const { item } of loadedLocalAttachments) {
+        const recAttId = generateSecureId('att');
+        const recKey = buildLocalAttachmentKey(resolvedRecipient.canonicalUsername, recAttId);
+        localEphemeralAttachments.set(recKey, {
+          ...item,
+          id: recAttId,
+          ownerUser: resolvedRecipient.canonicalUsername,
+          uploadedAt: now.toISOString(),
+          expiresAt,
+        });
+        recipientAttachments.push({
+          id: recAttId,
+          filename: item.filename,
+          mimeType: item.mimeType,
+          sizeBytes: item.bytes.byteLength,
+          ephemeralId: recAttId,
+          ephemeralOwner: resolvedRecipient.canonicalUsername,
+          expiresAt,
+        });
+      }
+
       routedLoopbackPacket = {
         id: pktId,
         rfcMessageId,
@@ -447,20 +640,28 @@ async function startServer() {
         dotNormalized: resolvedRecipient.dotCount > 0,
         subject,
         bodyText,
-        receivedAt: new Date().toISOString(),
+        receivedAt: now.toISOString(),
         expiresAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+        attachments: recipientAttachments,
       };
       ephemeralQueue.set(pktId, routedLoopbackPacket);
+    }
+
+    // Purge sender's temporary uploads immediately after dispatch
+    for (const { key } of loadedLocalAttachments) {
+      localEphemeralAttachments.delete(key);
     }
 
     res.json({
       ok: true,
       kvBound: true,
       liveEmailDispatched: false,
-      dispatchedVia: 'Local Dev Relay (Cloudflare Email Sending send_email simulation)',
+      providerUsed: 'none',
+      dispatchedVia: 'Local Dev Relay (simulasi pengiriman email & lampiran sementara)',
       rfcMessageId,
       sentAt: new Date().toISOString(),
       serverStoredCopy: false,
+      r2AttachmentsPurged: loadedLocalAttachments.length,
       quota: {
         usedToday: currentCount + 1,
         dailyLimit: DAILY_OUTBOUND_LIMIT,
@@ -960,10 +1161,10 @@ async function startServer() {
     res.json({ ok: true, clicks });
   });
 
-  // 7. Dedicated Bio Link AVIF/WebP Avatar Endpoints (parity with Cloudflare Worker R2/D1/KV)
+  // 7. Dedicated Bio Link Image-to-AVIF Avatar Endpoints (parity with Cloudflare Worker Images + R2)
   const avatarRawParser = express.raw({
-    type: ['image/avif', 'image/webp', 'application/octet-stream'],
-    limit: '160kb',
+    type: () => true,
+    limit: '10mb',
   });
 
   const resolveAvatarKey = (rawUser: string, rawPage?: string) => {
@@ -1019,24 +1220,34 @@ async function startServer() {
       return;
     }
     const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-    if (buf.byteLength === 0 || buf.byteLength > AVATAR_MAX_BYTES) {
+    if (buf.byteLength === 0 || buf.byteLength > AVATAR_RAW_UPLOAD_MAX_BYTES) {
       res.status(413).json({
         ok: false,
-        error: `Ukuran foto harus di bawah ${Math.round(AVATAR_MAX_BYTES / 1024)} KB.`,
+        error: 'Ukuran gambar sumber maksimal 10 MB.',
       });
       return;
     }
-    const validatedMime = detectValidatedAvatarMime(new Uint8Array(buf));
-    if (!validatedMime) {
+    const u8 = new Uint8Array(buf);
+    const sourceMime = detectRawImageMime(u8);
+    if (!sourceMime) {
       res.status(400).json({
         ok: false,
-        error: 'Format berkas ditolak. Hanya AVIF atau WebP terkompresi yang diizinkan.',
+        error: 'Format berkas tidak dikenali sebagai gambar yang aman.',
       });
       return;
     }
+    const compactMime = detectValidatedAvatarMime(u8);
+    const finalMime = compactMime || sourceMime;
+    const convertedBy =
+      compactMime === 'image/avif'
+        ? 'client-avif'
+        : compactMime === 'image/webp'
+          ? 'client-webp-fallback'
+          : 'local-dev-raw';
+
     localBioAvatars.set(resolved.key, {
       bytes: buf,
-      contentType: validatedMime,
+      contentType: finalMime,
       updatedAt: new Date().toISOString(),
     });
     const version = Date.now().toString(36);
@@ -1047,8 +1258,11 @@ async function startServer() {
     res.json({
       ok: true,
       avatarUrl,
-      contentType: validatedMime,
+      contentType: finalMime,
+      sourceMime,
+      sourceBytes: buf.byteLength,
       byteSize: buf.byteLength,
+      convertedBy,
       mediaStorageEngine: 'local-dev-memory',
     });
   };
