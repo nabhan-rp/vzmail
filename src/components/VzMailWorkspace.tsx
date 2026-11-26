@@ -13,6 +13,7 @@ import {
   Lock,
   MailPlus,
   MessageSquare,
+  QrCode,
   RefreshCw,
   Search,
   Send,
@@ -52,6 +53,7 @@ import { checkReservedUsername } from '../utils/reservedUsernames';
 import { ConfirmActionModal } from './ConfirmActionModal';
 import type { ActiveHostView } from './MailLinksTopBar';
 import { MailSearchGroundingDrawer } from './MailSearchGroundingDrawer';
+import { MailQrModal } from './QrCodeModal';
 
 interface VzMailWorkspaceProps {
   lang: Language;
@@ -177,6 +179,10 @@ export function VzMailWorkspace({
     },
     []
   );
+  const [mailQrState, setMailQrState] = useState<{
+    open: boolean;
+    initialEmail?: string;
+  }>({ open: false });
   const reservedMailCheck = useMemo(
     () => checkReservedUsername(user),
     [user]
@@ -1185,6 +1191,28 @@ export function VzMailWorkspace({
               {quotaUsed} / {quotaLimit} hari ini
             </span>
           </div>
+          <div className="pt-1.5 border-t border-slate-200 dark:border-[#232732]">
+            <button
+              type="button"
+              onClick={() => {
+                onCloseDrawer?.();
+                setMailQrState({
+                  open: true,
+                  initialEmail: selectedPlusTag
+                    ? `${user}+${selectedPlusTag}@${domain}`
+                    : primaryEmail,
+                });
+              }}
+              className="w-full min-h-[34px] px-2.5 py-1.5 text-[11px] font-sans font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 rounded-md inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <QrCode className="w-3.5 h-3.5" />
+              <span>
+                {lang === 'id'
+                  ? 'QR Email & vCard (@imy.li / Alias)'
+                  : 'Email & vCard QR (@imy.li / Alias)'}
+              </span>
+            </button>
+          </div>
         </div>
 
         {/* Locked Additional Mailbox / Custom Alias Without + or . (Coming Soon Paid Package) */}
@@ -1432,6 +1460,22 @@ export function VzMailWorkspace({
                 ? 'Verifikasi & VZ Search'
                 : 'Verify & VZ Search'}
             </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              setMailQrState({
+                open: true,
+                initialEmail: selectedPlusTag
+                  ? `${user}+${selectedPlusTag}@${domain}`
+                  : primaryEmail,
+              })
+            }
+            className="min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232A38] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <QrCode className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+            <span>{lang === 'id' ? 'QR Email' : 'Email QR'}</span>
           </button>
 
           <button
@@ -2565,6 +2609,18 @@ export function VzMailWorkspace({
           }
           setMobileShowDetail(true);
         }}
+      />
+
+      <MailQrModal
+        isOpen={mailQrState.open}
+        lang={lang}
+        primaryEmail={primaryEmail}
+        username={user}
+        displayName={session.name || user}
+        domain={domain}
+        discoveredPlusTags={discoveredPlusTags}
+        initialEmail={mailQrState.initialEmail}
+        onClose={() => setMailQrState({ open: false })}
       />
     </div>
   );

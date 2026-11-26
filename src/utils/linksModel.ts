@@ -182,6 +182,228 @@ export const BIO_THEMES: Record<BioThemeId, BioThemeDefinition> = {
   },
 };
 
+export type QrDotStyle = 'square' | 'rounded' | 'dots' | 'classy';
+export type QrCornerStyle = 'square' | 'rounded' | 'dot';
+export type QrFrameStyle = 'none' | 'bottom_bar' | 'card';
+export type QrCenterLogoMode = 'none' | 'bio_avatar' | 'monogram';
+
+export interface BioQrDesignConfig {
+  fgColor: string;
+  bgColor: string;
+  dotStyle: QrDotStyle;
+  cornerStyle: QrCornerStyle;
+  frameStyle: QrFrameStyle;
+  frameText: string;
+  frameColor: string;
+  frameTextColor: string;
+  centerLogoMode: QrCenterLogoMode;
+}
+
+export interface BioQrPreset {
+  id: string;
+  name: string;
+  design: Omit<BioQrDesignConfig, 'frameText' | 'centerLogoMode'>;
+}
+
+export const DEFAULT_BIO_QR_DESIGN: BioQrDesignConfig = {
+  fgColor: '#0F172A',
+  bgColor: '#FFFFFF',
+  dotStyle: 'rounded',
+  cornerStyle: 'rounded',
+  frameStyle: 'bottom_bar',
+  frameText: 'SCAN TO OPEN',
+  frameColor: '#0F172A',
+  frameTextColor: '#FFFFFF',
+  centerLogoMode: 'bio_avatar',
+};
+
+export const BIO_QR_PRESETS: readonly BioQrPreset[] = [
+  {
+    id: 'classic_ink',
+    name: 'Classic Ink',
+    design: {
+      fgColor: '#0F172A',
+      bgColor: '#FFFFFF',
+      dotStyle: 'rounded',
+      cornerStyle: 'rounded',
+      frameStyle: 'bottom_bar',
+      frameColor: '#0F172A',
+      frameTextColor: '#FFFFFF',
+    },
+  },
+  {
+    id: 'cobalt_pulse',
+    name: 'Cobalt Pulse',
+    design: {
+      fgColor: '#1D4ED8',
+      bgColor: '#FFFFFF',
+      dotStyle: 'dots',
+      cornerStyle: 'rounded',
+      frameStyle: 'bottom_bar',
+      frameColor: '#1D4ED8',
+      frameTextColor: '#FFFFFF',
+    },
+  },
+  {
+    id: 'violet_studio',
+    name: 'Violet Studio',
+    design: {
+      fgColor: '#5B21B6',
+      bgColor: '#FAF5FF',
+      dotStyle: 'classy',
+      cornerStyle: 'dot',
+      frameStyle: 'card',
+      frameColor: '#5B21B6',
+      frameTextColor: '#FFFFFF',
+    },
+  },
+  {
+    id: 'emerald_mint',
+    name: 'Emerald Mint',
+    design: {
+      fgColor: '#065F46',
+      bgColor: '#FFFFFF',
+      dotStyle: 'rounded',
+      cornerStyle: 'dot',
+      frameStyle: 'bottom_bar',
+      frameColor: '#065F46',
+      frameTextColor: '#FFFFFF',
+    },
+  },
+  {
+    id: 'warm_espresso',
+    name: 'Warm Espresso',
+    design: {
+      fgColor: '#451A03',
+      bgColor: '#FFFBEB',
+      dotStyle: 'classy',
+      cornerStyle: 'rounded',
+      frameStyle: 'card',
+      frameColor: '#78350F',
+      frameTextColor: '#FEF3C7',
+    },
+  },
+  {
+    id: 'obsidian_dark',
+    name: 'Obsidian Dark',
+    design: {
+      fgColor: '#F8FAFC',
+      bgColor: '#0F172A',
+      dotStyle: 'square',
+      cornerStyle: 'square',
+      frameStyle: 'bottom_bar',
+      frameColor: '#1E293B',
+      frameTextColor: '#F8FAFC',
+    },
+  },
+] as const;
+
+export function getDefaultQrDesignForTheme(
+  themeId: BioThemeId,
+  defaultLabel = 'SCAN TO OPEN'
+): BioQrDesignConfig {
+  const safeLabel = defaultLabel.trim().slice(0, 42) || 'SCAN TO OPEN';
+  switch (themeId) {
+    case 'cobalt_ocean':
+      return {
+        ...DEFAULT_BIO_QR_DESIGN,
+        ...BIO_QR_PRESETS[1].design,
+        frameText: safeLabel,
+      };
+    case 'violet_studio':
+      return {
+        ...DEFAULT_BIO_QR_DESIGN,
+        ...BIO_QR_PRESETS[2].design,
+        frameText: safeLabel,
+      };
+    case 'emerald_forest':
+      return {
+        ...DEFAULT_BIO_QR_DESIGN,
+        ...BIO_QR_PRESETS[3].design,
+        frameText: safeLabel,
+      };
+    case 'warm_sand':
+      return {
+        ...DEFAULT_BIO_QR_DESIGN,
+        ...BIO_QR_PRESETS[4].design,
+        frameText: safeLabel,
+      };
+    case 'clean_light':
+    case 'midnight_slate':
+    default:
+      return {
+        ...DEFAULT_BIO_QR_DESIGN,
+        frameText: safeLabel,
+      };
+  }
+}
+
+export function sanitizeHexColor(raw: unknown, fallback: string): string {
+  if (typeof raw !== 'string') return fallback;
+  const trimmed = raw.trim().toUpperCase();
+  if (/^#[0-9A-F]{6}$/.test(trimmed)) return trimmed;
+  if (/^#[0-9A-F]{3}$/.test(trimmed)) {
+    const [, r, g, b] = trimmed;
+    return `#${r}${r}${g}${g}${b}${b}`;
+  }
+  return fallback;
+}
+
+export function sanitizeBioQrDesign(
+  raw: unknown,
+  fallback: BioQrDesignConfig = DEFAULT_BIO_QR_DESIGN
+): BioQrDesignConfig {
+  if (!raw || typeof raw !== 'object') {
+    return { ...fallback };
+  }
+  const obj = raw as Record<string, unknown>;
+  const dotStyle: QrDotStyle =
+    obj.dotStyle === 'square' ||
+    obj.dotStyle === 'rounded' ||
+    obj.dotStyle === 'dots' ||
+    obj.dotStyle === 'classy'
+      ? obj.dotStyle
+      : fallback.dotStyle;
+
+  const cornerStyle: QrCornerStyle =
+    obj.cornerStyle === 'square' ||
+    obj.cornerStyle === 'rounded' ||
+    obj.cornerStyle === 'dot'
+      ? obj.cornerStyle
+      : fallback.cornerStyle;
+
+  const frameStyle: QrFrameStyle =
+    obj.frameStyle === 'none' ||
+    obj.frameStyle === 'bottom_bar' ||
+    obj.frameStyle === 'card'
+      ? obj.frameStyle
+      : fallback.frameStyle;
+
+  const centerLogoMode: QrCenterLogoMode =
+    obj.centerLogoMode === 'none' ||
+    obj.centerLogoMode === 'bio_avatar' ||
+    obj.centerLogoMode === 'monogram'
+      ? obj.centerLogoMode
+      : fallback.centerLogoMode;
+
+  const rawText =
+    typeof obj.frameText === 'string'
+      ? obj.frameText.replace(/[\r\n\t]+/g, ' ').trim().slice(0, 42)
+      : fallback.frameText;
+
+  return {
+    fgColor: sanitizeHexColor(obj.fgColor, fallback.fgColor),
+    bgColor: sanitizeHexColor(obj.bgColor, fallback.bgColor),
+    dotStyle,
+    cornerStyle,
+    frameStyle,
+    frameText: rawText,
+    frameColor: sanitizeHexColor(obj.frameColor, fallback.frameColor),
+    frameTextColor: sanitizeHexColor(obj.frameTextColor, fallback.frameTextColor),
+    centerLogoMode,
+  };
+}
+
 export interface BioLinkItem {
   id: string;
   title: string;
@@ -202,6 +424,7 @@ export interface BioPageRecord {
   buttonStyle: BioButtonStyle;
   showSocials: boolean;
   isPublished: boolean;
+  qrDesign?: BioQrDesignConfig;
   links: BioLinkItem[];
   updatedAt: string;
 }
@@ -533,6 +756,18 @@ export function sanitizeBioWorkspaceInput(
       });
     }
 
+    const themeId: BioThemeId = isValidBioThemeId(p.themeId) ? p.themeId : 'midnight_slate';
+    const rawQrDesign = p.qrDesign && typeof p.qrDesign === 'object' ? p.qrDesign : null;
+    const sanitizedQrDesign = rawQrDesign
+      ? sanitizeBioQrDesign(
+          rawQrDesign,
+          getDefaultQrDesignForTheme(
+            themeId,
+            normalizedSlug ? `${username}.imy.li/${normalizedSlug}` : `${username}.imy.li`
+          )
+        )
+      : undefined;
+
     cleanPages.push({
       id: pageId,
       pageSlug: normalizedSlug,
@@ -541,10 +776,11 @@ export function sanitizeBioWorkspaceInput(
         .slice(0, 80),
       description: String(p.description || '').trim().slice(0, 260),
       avatarUrl: normalizedSlug === '' ? '' : sanitizeBioAvatarUrl(p.avatarUrl),
-      themeId: isValidBioThemeId(p.themeId) ? p.themeId : 'midnight_slate',
+      themeId,
       buttonStyle: isValidButtonStyle(p.buttonStyle) ? p.buttonStyle : 'rounded',
       showSocials: p.showSocials !== false,
       isPublished: p.isPublished !== false,
+      ...(sanitizedQrDesign ? { qrDesign: sanitizedQrDesign } : {}),
       links: cleanLinks,
       updatedAt: now,
     });

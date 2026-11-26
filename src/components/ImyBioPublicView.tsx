@@ -1,16 +1,18 @@
-import { ArrowLeft, Edit3, ExternalLink, Globe, Link2, LogIn, Sparkles } from 'lucide-react';
+import { ArrowLeft, Edit3, ExternalLink, Globe, Link2, LogIn, QrCode, Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import {
   BIO_THEMES,
   SOCIAL_PLATFORMS,
+  getDefaultQrDesignForTheme,
   type BioLinkItem,
   type BioPageRecord,
   type BioWorkspaceData,
 } from '../utils/linksModel';
 import { sanitizeHandle } from '../utils/mailIdentity';
 import type { ActiveHostView } from './MailLinksTopBar';
+import { QrCodeModal } from './QrCodeModal';
 import { SocialIconGlyph } from './SocialIconGlyph';
 
 interface ImyBioPublicViewProps {
@@ -55,6 +57,7 @@ export function ImyBioPublicView({
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState(false);
   const [avatarError, setAvatarError] = useState(false);
+  const [qrModalOpen, setQrModalOpen] = useState(false);
 
   const loadPublicBio = useCallback(async () => {
     if (!user) {
@@ -371,27 +374,43 @@ export function ImyBioPublicView({
   const buttonRadiusClass =
     activePage.buttonStyle === 'sharp' ? 'rounded-md' : 'rounded-xl';
   const visibleLinks = activePage.links.filter((l) => l.enabled);
+  const publicPath = activePage.pageSlug
+    ? `${user}.${domain}/${activePage.pageSlug}`
+    : `${user}.${domain}`;
+  const publicFullUrl = `https://${publicPath}`;
+  const resolvedQrDesign =
+    activePage.qrDesign ||
+    getDefaultQrDesignForTheme(activePage.themeId, publicPath);
 
   return (
     <div
       className={`min-h-[calc(100vh-112px)] px-4 py-10 sm:py-14 flex flex-col items-center justify-between transition-colors ${theme.pageBgClass}`}
     >
       <div className="w-full max-w-[540px] space-y-6">
-        {/* Owner-only subtle edit link (zero technical telemetry for public visitors) */}
-        {(isOwner || activePage.pageSlug !== '') && (
-          <div className="flex items-center justify-between gap-2 text-xs">
-            {activePage.pageSlug !== '' ? (
-              <button
-                type="button"
-                onClick={() => onChangePageSlug?.('')}
-                className={`inline-flex items-center gap-1.5 font-medium hover:underline cursor-pointer ${theme.mutedClass}`}
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>{user}.{domain}</span>
-              </button>
-            ) : (
-              <span />
-            )}
+        {/* Top Utility Row: Back to Root (if sub-page) + Public QR Code Button + Owner Edit */}
+        <div className="flex items-center justify-between gap-2 text-xs">
+          {activePage.pageSlug !== '' ? (
+            <button
+              type="button"
+              onClick={() => onChangePageSlug?.('')}
+              className={`inline-flex items-center gap-1.5 font-medium hover:underline cursor-pointer ${theme.mutedClass}`}
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>{user}.{domain}</span>
+            </button>
+          ) : (
+            <span />
+          )}
+
+          <div className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setQrModalOpen(true)}
+              className={`min-h-[36px] px-3 py-1.5 rounded-lg border inline-flex items-center gap-1.5 text-xs font-semibold transition-colors cursor-pointer ${theme.socialBtnClass}`}
+            >
+              <QrCode className="w-3.5 h-3.5" />
+              <span>{lang === 'id' ? 'QR Code' : 'QR Code'}</span>
+            </button>
 
             {isOwner && (
               <button
@@ -404,7 +423,7 @@ export function ImyBioPublicView({
               </button>
             )}
           </div>
-        )}
+        </div>
 
         {/* Main Public Bio Card */}
         <article
@@ -552,12 +571,26 @@ export function ImyBioPublicView({
       {/* Minimal Footer */}
       <div className={`pt-8 text-xs font-mono flex items-center gap-1.5 ${theme.mutedClass}`}>
         <Link2 className="w-3.5 h-3.5" />
-        <span>
-          {activePage.pageSlug
-            ? `${user}.${domain}/${activePage.pageSlug}`
-            : `${user}.${domain}`}
-        </span>
+        <span>{publicPath}</span>
       </div>
+
+      {/* Public Bio Custom QR Code Modal */}
+      <QrCodeModal
+        isOpen={qrModalOpen}
+        lang={lang}
+        title={
+          activePage.pageSlug === ''
+            ? workspace.displayName || user
+            : activePage.title || `/${activePage.pageSlug}`
+        }
+        subtitle={publicPath}
+        url={publicFullUrl}
+        filenameBase={`bio-qr-${publicPath}`}
+        design={resolvedQrDesign}
+        centerImageUrl={!avatarError ? effectiveAvatarUrl : ''}
+        monogramText={workspace.displayName || user}
+        onClose={() => setQrModalOpen(false)}
+      />
     </div>
   );
 }

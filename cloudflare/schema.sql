@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS bio_pages (
   button_style TEXT NOT NULL DEFAULT 'rounded',
   show_socials INTEGER NOT NULL DEFAULT 1,
   is_published INTEGER NOT NULL DEFAULT 1,
+  qr_design_json TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(username, page_slug),

@@ -47,9 +47,11 @@ import {
   RECYCLE_BIN_TTL_SECONDS,
   detectValidatedAvatarMime,
   generateShortlinkCode,
+  getDefaultQrDesignForTheme,
   isValidBioThemeId,
   isValidButtonStyle,
   sanitizeBioAvatarUrl,
+  sanitizeBioQrDesign,
   sanitizeBioWorkspaceInput,
   sanitizePageSlug,
   sanitizeShortlinkSlugInput,
@@ -57,6 +59,7 @@ import {
   type BioDeleteCooldownInfo,
   type BioLinkItem,
   type BioPageRecord,
+  type BioQrDesignConfig,
   type BioWorkspaceData,
   type RecycleBinItemType,
   type RecycleBinRecord,
@@ -334,7 +337,7 @@ function buildAppCsp(auth0Domain?: string): string {
     "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com data:",
-    "img-src 'self' data: https:",
+    "img-src 'self' data: blob: https:",
     `connect-src 'self' ${authList}`,
     `frame-src 'self' ${authList}`,
     "worker-src 'self'",
@@ -351,7 +354,7 @@ const BIO_STRICT_CSP = [
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com data:",
-  "img-src 'self' data: https:",
+  "img-src 'self' data: blob: https:",
   "connect-src 'self'",
   "object-src 'none'",
   "base-uri 'self'",
@@ -688,6 +691,7 @@ const D1_BOOTSTRAP_STATEMENTS: readonly string[] = [
     button_style TEXT NOT NULL DEFAULT 'rounded',
     show_socials INTEGER NOT NULL DEFAULT 1,
     is_published INTEGER NOT NULL DEFAULT 1,
+    qr_design_json TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(username, page_slug),
@@ -785,6 +789,11 @@ async function ensureLinksD1Schema(env: WorkerEnv): Promise<boolean> {
         if (!pageCols.has('avatar_url')) {
           alterStmts.push(
             db.prepare("ALTER TABLE bio_pages ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''")
+          );
+        }
+        if (!pageCols.has('qr_design_json')) {
+          alterStmts.push(
+            db.prepare("ALTER TABLE bio_pages ADD COLUMN qr_design_json TEXT NOT NULL DEFAULT ''")
           );
         }
         if (alterStmts.length > 0) {
@@ -1079,7 +1088,7 @@ async function getBioWorkspaceFromStorage(
 
       if (profile) {
         const pagesRes = await env.LINKS_DB.prepare(
-          'SELECT id, page_slug, title, description, avatar_url, theme_id, button_style, show_socials, is_published, updated_at FROM bio_pages WHERE username = ? ORDER BY CASE WHEN page_slug = "" THEN 0 ELSE 1 END, page_slug ASC'
+          'SELECT id, page_slug, title, description, avatar_url, theme_id, button_style, show_socials, is_published, qr_design_json, updated_at FROM bio_pages WHERE username = ? ORDER BY CASE WHEN page_slug = "" THEN 0 ELSE 1 END, page_slug ASC'
         )
           .bind(username)
           .all<{
@@ -1092,6 +1101,7 @@ async function getBioWorkspaceFromStorage(
             button_style: string;
             show_socials: number;
             is_published: number;
+            qr_design_json?: string;
             updated_at: string;
           }>();
 
@@ -1132,19 +1142,38 @@ async function getBioWorkspaceFromStorage(
           parsedSocials = {};
         }
 
-        const pages: BioPageRecord[] = (pagesRes.results || []).map((p) => ({
-          id: p.id,
-          pageSlug: p.page_slug || '',
-          title: p.title || profile.display_name || username,
-          description: p.description || '',
-          avatarUrl: sanitizeBioAvatarUrl(p.avatar_url || ''),
-          themeId: isValidBioThemeId(p.theme_id) ? p.theme_id : 'midnight_slate',
-          buttonStyle: isValidButtonStyle(p.button_style) ? p.button_style : 'rounded',
-          showSocials: Boolean(p.show_socials),
-          isPublished: Boolean(p.is_published),
-          links: linksByPage.get(p.id) || [],
-          updatedAt: p.updated_at || profile.updated_at,
-        }));
+        const pages: BioPageRecord[] = (pagesRes.results || []).map((p) => {
+          const themeId = isValidBioThemeId(p.theme_id) ? p.theme_id : 'midnight_slate';
+          let qrDesign: BioQrDesignConfig | undefined;
+          if (typeof p.qr_design_json === 'string' && p.qr_design_json.trim().startsWith('{')) {
+            try {
+              const parsedQr = JSON.parse(p.qr_design_json);
+              qrDesign = sanitizeBioQrDesign(
+                parsedQr,
+                getDefaultQrDesignForTheme(
+                  themeId,
+                  p.page_slug ? `${username}.imy.li/${p.page_slug}` : `${username}.imy.li`
+                )
+              );
+            } catch {
+              qrDesign = undefined;
+            }
+          }
+          return {
+            id: p.id,
+            pageSlug: p.page_slug || '',
+            title: p.title || profile.display_name || username,
+            description: p.description || '',
+            avatarUrl: sanitizeBioAvatarUrl(p.avatar_url || ''),
+            themeId,
+            buttonStyle: isValidButtonStyle(p.button_style) ? p.button_style : 'rounded',
+            showSocials: Boolean(p.show_socials),
+            isPublished: Boolean(p.is_published),
+            ...(qrDesign ? { qrDesign } : {}),
+            links: linksByPage.get(p.id) || [],
+            updatedAt: p.updated_at || profile.updated_at,
+          };
+        });
 
         return {
           username: profile.username,
@@ -1221,7 +1250,7 @@ async function saveBioWorkspaceToStorage(
       for (const page of sanitized.pages) {
         stmts.push(
           env.LINKS_DB.prepare(
-            'INSERT INTO bio_pages (id, username, page_slug, title, description, avatar_url, theme_id, button_style, show_socials, is_published, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO bio_pages (id, username, page_slug, title, description, avatar_url, theme_id, button_style, show_socials, is_published, qr_design_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(
             page.id,
             sanitized.username,
@@ -1233,6 +1262,7 @@ async function saveBioWorkspaceToStorage(
             page.buttonStyle,
             page.showSocials ? 1 : 0,
             page.isPublished ? 1 : 0,
+            page.qrDesign ? JSON.stringify(page.qrDesign) : '',
             page.updatedAt,
             page.updatedAt
           )
