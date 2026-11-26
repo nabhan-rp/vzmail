@@ -662,9 +662,153 @@ export function canonicalizeImyRecipient(rawAddress: string): {
 
 type LinksStorageEngine = 'cloudflare-d1' | 'cloudflare-kv' | 'none';
 
+let d1SchemaReady = false;
+let d1SchemaInitPromise: Promise<boolean> | null = null;
+
+const D1_BOOTSTRAP_STATEMENTS: readonly string[] = [
+  `CREATE TABLE IF NOT EXISTS bio_profiles (
+    username TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    headline TEXT NOT NULL DEFAULT '',
+    bio TEXT NOT NULL DEFAULT '',
+    avatar_url TEXT NOT NULL DEFAULT '',
+    socials_json TEXT NOT NULL DEFAULT '{}',
+    is_deactivated INTEGER NOT NULL DEFAULT 0,
+    deactivated_at TEXT,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS bio_pages (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    page_slug TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    avatar_url TEXT NOT NULL DEFAULT '',
+    theme_id TEXT NOT NULL DEFAULT 'midnight_slate',
+    button_style TEXT NOT NULL DEFAULT 'rounded',
+    show_socials INTEGER NOT NULL DEFAULT 1,
+    is_published INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(username, page_slug),
+    FOREIGN KEY (username) REFERENCES bio_profiles(username) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS bio_links (
+    id TEXT PRIMARY KEY,
+    page_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    title TEXT NOT NULL,
+    subtitle TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    clicks INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (page_id) REFERENCES bio_pages(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS bio_avatars (
+    avatar_key TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    page_slug TEXT NOT NULL DEFAULT '',
+    content_type TEXT NOT NULL,
+    data_base64 TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS shortlinks (
+    slug TEXT PRIMARY KEY,
+    owner_user TEXT,
+    title TEXT NOT NULL DEFAULT '',
+    target_url TEXT NOT NULL,
+    is_custom_slug INTEGER NOT NULL DEFAULT 0,
+    clicks INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    last_clicked_at TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS links_recycle_bin (
+    id TEXT PRIMARY KEY,
+    owner_user TEXT NOT NULL,
+    item_type TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS bio_delete_cooldowns (
+    username TEXT PRIMARY KEY,
+    deleted_at TEXT NOT NULL,
+    unlock_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_bio_pages_user ON bio_pages(username, page_slug)`,
+  `CREATE INDEX IF NOT EXISTS idx_bio_links_page ON bio_links(page_id, sort_order)`,
+  `CREATE INDEX IF NOT EXISTS idx_bio_avatars_user ON bio_avatars(username, page_slug)`,
+  `CREATE INDEX IF NOT EXISTS idx_shortlinks_owner_created ON shortlinks(owner_user, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_recycle_bin_owner ON links_recycle_bin(owner_user, deleted_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_recycle_bin_expires ON links_recycle_bin(expires_at)`,
+];
+
+/**
+ * Ensures all 7 VZ Links tables and indexes exist in Cloudflare D1 (`LINKS_DB`).
+ * Cached once per Worker isolate so subsequent requests incur zero DDL latency.
+ * If D1 fails transiently, resets the cache and returns false so callers fall back to `LINKS_KV`.
+ */
+async function ensureLinksD1Schema(env: WorkerEnv): Promise<boolean> {
+  const db = env.LINKS_DB;
+  if (!db) return false;
+  if (d1SchemaReady) return true;
+
+  if (!d1SchemaInitPromise) {
+    d1SchemaInitPromise = (async () => {
+      try {
+        await db.batch(D1_BOOTSTRAP_STATEMENTS.map((sql) => db.prepare(sql)));
+
+        // Safe incremental column checks for pre-existing D1 databases created before newer columns
+        const [profileColsRes, pageColsRes] = await Promise.all([
+          db.prepare('PRAGMA table_info(bio_profiles)').all<{ name: string }>(),
+          db.prepare('PRAGMA table_info(bio_pages)').all<{ name: string }>(),
+        ]);
+        const profileCols = new Set((profileColsRes.results || []).map((c) => c.name));
+        const pageCols = new Set((pageColsRes.results || []).map((c) => c.name));
+
+        const alterStmts: D1PreparedStatement[] = [];
+        if (!profileCols.has('is_deactivated')) {
+          alterStmts.push(
+            db.prepare('ALTER TABLE bio_profiles ADD COLUMN is_deactivated INTEGER NOT NULL DEFAULT 0')
+          );
+        }
+        if (!profileCols.has('deactivated_at')) {
+          alterStmts.push(
+            db.prepare('ALTER TABLE bio_profiles ADD COLUMN deactivated_at TEXT')
+          );
+        }
+        if (!pageCols.has('avatar_url')) {
+          alterStmts.push(
+            db.prepare("ALTER TABLE bio_pages ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''")
+          );
+        }
+        if (alterStmts.length > 0) {
+          await db.batch(alterStmts);
+        }
+
+        d1SchemaReady = true;
+        logInfo('d1_schema_bootstrapped', { tables: 7, migratedCols: alterStmts.length });
+        return true;
+      } catch (err) {
+        logError('d1_schema_bootstrap_failed', err);
+        d1SchemaInitPromise = null;
+        return false;
+      }
+    })();
+  }
+
+  return d1SchemaInitPromise;
+}
+
 function getLinksStorageEngine(env: WorkerEnv): LinksStorageEngine {
-  if (env.LINKS_DB) return 'cloudflare-d1';
+  if (env.LINKS_DB && d1SchemaReady) return 'cloudflare-d1';
   if (env.LINKS_KV) return 'cloudflare-kv';
+  if (env.LINKS_DB) return 'cloudflare-d1';
   return 'none';
 }
 
@@ -713,32 +857,36 @@ function parseKvShortlinkRecord(slug: string, raw: string | null): ShortlinkReco
 }
 
 async function getShortlinkRecord(env: WorkerEnv, slug: string): Promise<ShortlinkRecord | null> {
-  if (env.LINKS_DB) {
-    const row = await env.LINKS_DB.prepare(
-      'SELECT slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at FROM shortlinks WHERE slug = ? LIMIT 1'
-    )
-      .bind(slug)
-      .first<{
-        slug: string;
-        owner_user: string | null;
-        title: string | null;
-        target_url: string;
-        is_custom_slug: number;
-        clicks: number;
-        created_at: string;
-        last_clicked_at: string | null;
-      }>();
-    if (row) {
-      return {
-        slug: row.slug,
-        ownerUser: row.owner_user || null,
-        title: row.title || '',
-        targetUrl: row.target_url,
-        isCustomSlug: Boolean(row.is_custom_slug),
-        clicks: Math.max(0, Number(row.clicks) || 0),
-        createdAt: row.created_at,
-        lastClickedAt: row.last_clicked_at || null,
-      };
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      const row = await env.LINKS_DB.prepare(
+        'SELECT slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at FROM shortlinks WHERE slug = ? LIMIT 1'
+      )
+        .bind(slug)
+        .first<{
+          slug: string;
+          owner_user: string | null;
+          title: string | null;
+          target_url: string;
+          is_custom_slug: number;
+          clicks: number;
+          created_at: string;
+          last_clicked_at: string | null;
+        }>();
+      if (row) {
+        return {
+          slug: row.slug,
+          ownerUser: row.owner_user || null,
+          title: row.title || '',
+          targetUrl: row.target_url,
+          isCustomSlug: Boolean(row.is_custom_slug),
+          clicks: Math.max(0, Number(row.clicks) || 0),
+          createdAt: row.created_at,
+          lastClickedAt: row.last_clicked_at || null,
+        };
+      }
+    } catch (err) {
+      logError('d1_get_shortlink_failed', err, { slug });
     }
   }
   if (env.LINKS_KV) {
@@ -749,60 +897,88 @@ async function getShortlinkRecord(env: WorkerEnv, slug: string): Promise<Shortli
 }
 
 async function listShortlinksByOwner(env: WorkerEnv, ownerUser: string): Promise<ShortlinkRecord[]> {
-  if (env.LINKS_DB) {
-    const res = await env.LINKS_DB.prepare(
-      'SELECT slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at FROM shortlinks WHERE owner_user = ? ORDER BY created_at DESC LIMIT 200'
-    )
-      .bind(ownerUser)
-      .all<{
-        slug: string;
-        owner_user: string | null;
-        title: string | null;
-        target_url: string;
-        is_custom_slug: number;
-        clicks: number;
-        created_at: string;
-        last_clicked_at: string | null;
-      }>();
-    return (res.results || []).map((row) => ({
-      slug: row.slug,
-      ownerUser: row.owner_user || null,
-      title: row.title || '',
-      targetUrl: row.target_url,
-      isCustomSlug: Boolean(row.is_custom_slug),
-      clicks: Math.max(0, Number(row.clicks) || 0),
-      createdAt: row.created_at,
-      lastClickedAt: row.last_clicked_at || null,
-    }));
+  const merged = new Map<string, ShortlinkRecord>();
+
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      const res = await env.LINKS_DB.prepare(
+        'SELECT slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at FROM shortlinks WHERE owner_user = ? ORDER BY created_at DESC LIMIT 200'
+      )
+        .bind(ownerUser)
+        .all<{
+          slug: string;
+          owner_user: string | null;
+          title: string | null;
+          target_url: string;
+          is_custom_slug: number;
+          clicks: number;
+          created_at: string;
+          last_clicked_at: string | null;
+        }>();
+      for (const row of res.results || []) {
+        merged.set(row.slug, {
+          slug: row.slug,
+          ownerUser: row.owner_user || null,
+          title: row.title || '',
+          targetUrl: row.target_url,
+          isCustomSlug: Boolean(row.is_custom_slug),
+          clicks: Math.max(0, Number(row.clicks) || 0),
+          createdAt: row.created_at,
+          lastClickedAt: row.last_clicked_at || null,
+        });
+      }
+    } catch (err) {
+      logError('d1_list_shortlinks_failed', err, { ownerUser });
+    }
   }
+
+  // Always merge legacy LINKS_KV shortlinks not yet in D1 (deduplicated by slug)
   if (env.LINKS_KV) {
-    const idx = await env.LINKS_KV.get<string[]>(`short_idx:${ownerUser}`, 'json');
-    const slugs = Array.isArray(idx) ? idx.slice(0, 200) : [];
-    const records = await Promise.all(slugs.map((s) => getShortlinkRecord(env, s)));
-    return records
-      .filter((r): r is ShortlinkRecord => Boolean(r))
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    try {
+      const idx = await env.LINKS_KV.get<string[]>(`short_idx:${ownerUser}`, 'json');
+      const slugs = Array.isArray(idx) ? idx.filter((s) => !merged.has(s)).slice(0, 200) : [];
+      if (slugs.length > 0) {
+        const kvRows = await Promise.all(
+          slugs.map(async (s) => parseKvShortlinkRecord(s, await env.LINKS_KV!.get(`short:${s}`, 'text')))
+        );
+        for (const rec of kvRows) {
+          if (rec && !merged.has(rec.slug)) {
+            merged.set(rec.slug, rec);
+          }
+        }
+      }
+    } catch (err) {
+      logError('kv_list_shortlinks_failed', err, { ownerUser });
+    }
   }
-  return [];
+
+  return Array.from(merged.values())
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, 200);
 }
 
 async function saveShortlinkRecord(env: WorkerEnv, record: ShortlinkRecord): Promise<void> {
-  if (env.LINKS_DB) {
-    await env.LINKS_DB.prepare(
-      'INSERT INTO shortlinks (slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    )
-      .bind(
-        record.slug,
-        record.ownerUser,
-        record.title,
-        record.targetUrl,
-        record.isCustomSlug ? 1 : 0,
-        record.clicks,
-        record.createdAt,
-        record.lastClickedAt
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      await env.LINKS_DB.prepare(
+        'INSERT INTO shortlinks (slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       )
-      .run();
-    return;
+        .bind(
+          record.slug,
+          record.ownerUser,
+          record.title,
+          record.targetUrl,
+          record.isCustomSlug ? 1 : 0,
+          record.clicks,
+          record.createdAt,
+          record.lastClickedAt
+        )
+        .run();
+      return;
+    } catch (err) {
+      logError('d1_save_shortlink_failed', err, { slug: record.slug });
+      if (!env.LINKS_KV) throw err;
+    }
   }
   if (env.LINKS_KV) {
     await env.LINKS_KV.put(`short:${record.slug}`, JSON.stringify(record));
@@ -829,8 +1005,12 @@ async function deleteShortlinkRecord(
   if (existing.ownerUser && ownerUser && existing.ownerUser !== ownerUser) {
     return { deleted: false, forbidden: true };
   }
-  if (env.LINKS_DB) {
-    await env.LINKS_DB.prepare('DELETE FROM shortlinks WHERE slug = ?').bind(slug).run();
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      await env.LINKS_DB.prepare('DELETE FROM shortlinks WHERE slug = ?').bind(slug).run();
+    } catch (err) {
+      logError('d1_delete_shortlink_failed', err, { slug });
+    }
   }
   if (env.LINKS_KV) {
     await env.LINKS_KV.delete(`short:${slug}`);
@@ -850,16 +1030,19 @@ async function deleteShortlinkRecord(
 async function incrementShortlinkClick(env: WorkerEnv, slug: string): Promise<void> {
   const now = new Date().toISOString();
   try {
-    if (env.LINKS_DB) {
-      await env.LINKS_DB.prepare(
+    if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+      const res = await env.LINKS_DB.prepare(
         'UPDATE shortlinks SET clicks = clicks + 1, last_clicked_at = ? WHERE slug = ?'
       )
         .bind(now, slug)
         .run();
-      return;
+      if ((res.meta?.changes ?? 0) > 0) {
+        return;
+      }
     }
     if (env.LINKS_KV) {
-      const rec = await getShortlinkRecord(env, slug);
+      const raw = await env.LINKS_KV.get(`short:${slug}`, 'text');
+      const rec = parseKvShortlinkRecord(slug, raw);
       if (rec) {
         await env.LINKS_KV.put(
           `short:${slug}`,
@@ -876,105 +1059,109 @@ async function getBioWorkspaceFromStorage(
   env: WorkerEnv,
   username: string
 ): Promise<BioWorkspaceData | null> {
-  if (env.LINKS_DB) {
-    const profile = await env.LINKS_DB.prepare(
-      'SELECT username, display_name, headline, bio, avatar_url, socials_json, is_deactivated, deactivated_at, updated_at FROM bio_profiles WHERE username = ? LIMIT 1'
-    )
-      .bind(username)
-      .first<{
-        username: string;
-        display_name: string;
-        headline: string;
-        bio: string;
-        avatar_url: string;
-        socials_json: string;
-        is_deactivated?: number;
-        deactivated_at?: string | null;
-        updated_at: string;
-      }>();
-
-    if (profile) {
-      const pagesRes = await env.LINKS_DB.prepare(
-        'SELECT id, page_slug, title, description, avatar_url, theme_id, button_style, show_socials, is_published, updated_at FROM bio_pages WHERE username = ? ORDER BY CASE WHEN page_slug = "" THEN 0 ELSE 1 END, page_slug ASC'
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      const profile = await env.LINKS_DB.prepare(
+        'SELECT username, display_name, headline, bio, avatar_url, socials_json, is_deactivated, deactivated_at, updated_at FROM bio_profiles WHERE username = ? LIMIT 1'
       )
         .bind(username)
-        .all<{
-          id: string;
-          page_slug: string;
-          title: string;
-          description: string;
-          avatar_url?: string;
-          theme_id: string;
-          button_style: string;
-          show_socials: number;
-          is_published: number;
+        .first<{
+          username: string;
+          display_name: string;
+          headline: string;
+          bio: string;
+          avatar_url: string;
+          socials_json: string;
+          is_deactivated?: number;
+          deactivated_at?: string | null;
           updated_at: string;
         }>();
 
-      const linksRes = await env.LINKS_DB.prepare(
-        'SELECT id, page_id, title, subtitle, url, sort_order, enabled, clicks FROM bio_links WHERE username = ? ORDER BY sort_order ASC'
-      )
-        .bind(username)
-        .all<{
-          id: string;
-          page_id: string;
-          title: string;
-          subtitle: string;
-          url: string;
-          sort_order: number;
-          enabled: number;
-          clicks: number;
-        }>();
+      if (profile) {
+        const pagesRes = await env.LINKS_DB.prepare(
+          'SELECT id, page_slug, title, description, avatar_url, theme_id, button_style, show_socials, is_published, updated_at FROM bio_pages WHERE username = ? ORDER BY CASE WHEN page_slug = "" THEN 0 ELSE 1 END, page_slug ASC'
+        )
+          .bind(username)
+          .all<{
+            id: string;
+            page_slug: string;
+            title: string;
+            description: string;
+            avatar_url?: string;
+            theme_id: string;
+            button_style: string;
+            show_socials: number;
+            is_published: number;
+            updated_at: string;
+          }>();
 
-      const linksByPage = new Map<string, BioLinkItem[]>();
-      for (const l of linksRes.results || []) {
-        const list = linksByPage.get(l.page_id) || [];
-        list.push({
-          id: l.id,
-          title: l.title,
-          subtitle: l.subtitle || '',
-          url: l.url,
-          sortOrder: Number(l.sort_order) || 0,
-          enabled: Boolean(l.enabled),
-          clicks: Math.max(0, Number(l.clicks) || 0),
-        });
-        linksByPage.set(l.page_id, list);
+        const linksRes = await env.LINKS_DB.prepare(
+          'SELECT id, page_id, title, subtitle, url, sort_order, enabled, clicks FROM bio_links WHERE username = ? ORDER BY sort_order ASC'
+        )
+          .bind(username)
+          .all<{
+            id: string;
+            page_id: string;
+            title: string;
+            subtitle: string;
+            url: string;
+            sort_order: number;
+            enabled: number;
+            clicks: number;
+          }>();
+
+        const linksByPage = new Map<string, BioLinkItem[]>();
+        for (const l of linksRes.results || []) {
+          const list = linksByPage.get(l.page_id) || [];
+          list.push({
+            id: l.id,
+            title: l.title,
+            subtitle: l.subtitle || '',
+            url: l.url,
+            sortOrder: Number(l.sort_order) || 0,
+            enabled: Boolean(l.enabled),
+            clicks: Math.max(0, Number(l.clicks) || 0),
+          });
+          linksByPage.set(l.page_id, list);
+        }
+
+        let parsedSocials: unknown = {};
+        try {
+          parsedSocials = JSON.parse(profile.socials_json || '{}');
+        } catch {
+          parsedSocials = {};
+        }
+
+        const pages: BioPageRecord[] = (pagesRes.results || []).map((p) => ({
+          id: p.id,
+          pageSlug: p.page_slug || '',
+          title: p.title || profile.display_name || username,
+          description: p.description || '',
+          avatarUrl: sanitizeBioAvatarUrl(p.avatar_url || ''),
+          themeId: isValidBioThemeId(p.theme_id) ? p.theme_id : 'midnight_slate',
+          buttonStyle: isValidButtonStyle(p.button_style) ? p.button_style : 'rounded',
+          showSocials: Boolean(p.show_socials),
+          isPublished: Boolean(p.is_published),
+          links: linksByPage.get(p.id) || [],
+          updatedAt: p.updated_at || profile.updated_at,
+        }));
+
+        return {
+          username: profile.username,
+          displayName: profile.display_name || username,
+          headline: profile.headline || '',
+          bio: profile.bio || '',
+          avatarUrl: sanitizeBioAvatarUrl(profile.avatar_url || ''),
+          socials: sanitizeSocialsMap(parsedSocials),
+          pages,
+          isDeactivated: Boolean(profile.is_deactivated),
+          deactivatedAt: profile.deactivated_at || null,
+          updatedAt: profile.updated_at,
+          configured: true,
+        };
       }
-
-      let parsedSocials: unknown = {};
-      try {
-        parsedSocials = JSON.parse(profile.socials_json || '{}');
-      } catch {
-        parsedSocials = {};
-      }
-
-      const pages: BioPageRecord[] = (pagesRes.results || []).map((p) => ({
-        id: p.id,
-        pageSlug: p.page_slug || '',
-        title: p.title || profile.display_name || username,
-        description: p.description || '',
-        avatarUrl: sanitizeBioAvatarUrl(p.avatar_url || ''),
-        themeId: isValidBioThemeId(p.theme_id) ? p.theme_id : 'midnight_slate',
-        buttonStyle: isValidButtonStyle(p.button_style) ? p.button_style : 'rounded',
-        showSocials: Boolean(p.show_socials),
-        isPublished: Boolean(p.is_published),
-        links: linksByPage.get(p.id) || [],
-        updatedAt: p.updated_at || profile.updated_at,
-      }));
-
-      return {
-        username: profile.username,
-        displayName: profile.display_name || username,
-        headline: profile.headline || '',
-        bio: profile.bio || '',
-        avatarUrl: sanitizeBioAvatarUrl(profile.avatar_url || ''),
-        socials: sanitizeSocialsMap(parsedSocials),
-        pages,
-        isDeactivated: Boolean(profile.is_deactivated),
-        deactivatedAt: profile.deactivated_at || null,
-        updatedAt: profile.updated_at,
-        configured: true,
-      };
+    } catch (err) {
+      logError('d1_get_bio_failed', err, { username });
     }
   }
 
@@ -1011,67 +1198,72 @@ async function saveBioWorkspaceToStorage(
 
   const sanitized = sanitizeBioWorkspaceInput(username, rawInput, existingClicks);
 
-  if (env.LINKS_DB) {
-    const stmts: D1PreparedStatement[] = [
-      env.LINKS_DB.prepare(
-        'INSERT INTO bio_profiles (username, display_name, headline, bio, avatar_url, socials_json, is_deactivated, deactivated_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(username) DO UPDATE SET display_name = excluded.display_name, headline = excluded.headline, bio = excluded.bio, avatar_url = excluded.avatar_url, socials_json = excluded.socials_json, is_deactivated = excluded.is_deactivated, deactivated_at = excluded.deactivated_at, updated_at = excluded.updated_at'
-      ).bind(
-        sanitized.username,
-        sanitized.displayName,
-        sanitized.headline,
-        sanitized.bio,
-        sanitized.avatarUrl,
-        JSON.stringify(sanitized.socials),
-        sanitized.isDeactivated ? 1 : 0,
-        sanitized.deactivatedAt || null,
-        sanitized.updatedAt
-      ),
-      env.LINKS_DB.prepare('DELETE FROM bio_links WHERE username = ?').bind(sanitized.username),
-      env.LINKS_DB.prepare('DELETE FROM bio_pages WHERE username = ?').bind(sanitized.username),
-    ];
-
-    for (const page of sanitized.pages) {
-      stmts.push(
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      const stmts: D1PreparedStatement[] = [
         env.LINKS_DB.prepare(
-          'INSERT INTO bio_pages (id, username, page_slug, title, description, avatar_url, theme_id, button_style, show_socials, is_published, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          'INSERT INTO bio_profiles (username, display_name, headline, bio, avatar_url, socials_json, is_deactivated, deactivated_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(username) DO UPDATE SET display_name = excluded.display_name, headline = excluded.headline, bio = excluded.bio, avatar_url = excluded.avatar_url, socials_json = excluded.socials_json, is_deactivated = excluded.is_deactivated, deactivated_at = excluded.deactivated_at, updated_at = excluded.updated_at'
         ).bind(
-          page.id,
           sanitized.username,
-          page.pageSlug,
-          page.title,
-          page.description,
-          page.avatarUrl || '',
-          page.themeId,
-          page.buttonStyle,
-          page.showSocials ? 1 : 0,
-          page.isPublished ? 1 : 0,
-          page.updatedAt,
-          page.updatedAt
-        )
-      );
+          sanitized.displayName,
+          sanitized.headline,
+          sanitized.bio,
+          sanitized.avatarUrl,
+          JSON.stringify(sanitized.socials),
+          sanitized.isDeactivated ? 1 : 0,
+          sanitized.deactivatedAt || null,
+          sanitized.updatedAt
+        ),
+        env.LINKS_DB.prepare('DELETE FROM bio_links WHERE username = ?').bind(sanitized.username),
+        env.LINKS_DB.prepare('DELETE FROM bio_pages WHERE username = ?').bind(sanitized.username),
+      ];
 
-      for (const link of page.links) {
+      for (const page of sanitized.pages) {
         stmts.push(
           env.LINKS_DB.prepare(
-            'INSERT INTO bio_links (id, page_id, username, title, subtitle, url, sort_order, enabled, clicks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO bio_pages (id, username, page_slug, title, description, avatar_url, theme_id, button_style, show_socials, is_published, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(
-            link.id,
             page.id,
             sanitized.username,
-            link.title,
-            link.subtitle,
-            link.url,
-            link.sortOrder,
-            link.enabled ? 1 : 0,
-            link.clicks,
-            sanitized.updatedAt
+            page.pageSlug,
+            page.title,
+            page.description,
+            page.avatarUrl || '',
+            page.themeId,
+            page.buttonStyle,
+            page.showSocials ? 1 : 0,
+            page.isPublished ? 1 : 0,
+            page.updatedAt,
+            page.updatedAt
           )
         );
-      }
-    }
 
-    await env.LINKS_DB.batch(stmts);
-    return sanitized;
+        for (const link of page.links) {
+          stmts.push(
+            env.LINKS_DB.prepare(
+              'INSERT INTO bio_links (id, page_id, username, title, subtitle, url, sort_order, enabled, clicks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            ).bind(
+              link.id,
+              page.id,
+              sanitized.username,
+              link.title,
+              link.subtitle,
+              link.url,
+              link.sortOrder,
+              link.enabled ? 1 : 0,
+              link.clicks,
+              sanitized.updatedAt
+            )
+          );
+        }
+      }
+
+      await env.LINKS_DB.batch(stmts);
+      return sanitized;
+    } catch (err) {
+      logError('d1_save_bio_failed', err, { username: sanitized.username });
+      if (!env.LINKS_KV) throw err;
+    }
   }
 
   if (env.LINKS_KV) {
@@ -1087,25 +1279,31 @@ async function incrementBioLinkClickInStorage(
   pageSlug: string,
   linkId: string
 ): Promise<number | null> {
-  if (env.LINKS_DB) {
-    await env.LINKS_DB.prepare(
-      'UPDATE bio_links SET clicks = clicks + 1 WHERE id = ? AND username = ?'
-    )
-      .bind(linkId, username)
-      .run();
-    const row = await env.LINKS_DB.prepare(
-      'SELECT clicks FROM bio_links WHERE id = ? AND username = ? LIMIT 1'
-    )
-      .bind(linkId, username)
-      .first<{ clicks: number }>();
-    return row ? Number(row.clicks) || 0 : null;
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      const upd = await env.LINKS_DB.prepare(
+        'UPDATE bio_links SET clicks = clicks + 1 WHERE id = ? AND username = ?'
+      )
+        .bind(linkId, username)
+        .run();
+      if ((upd.meta?.changes ?? 0) > 0) {
+        const row = await env.LINKS_DB.prepare(
+          'SELECT clicks FROM bio_links WHERE id = ? AND username = ? LIMIT 1'
+        )
+          .bind(linkId, username)
+          .first<{ clicks: number }>();
+        return row ? Number(row.clicks) || 0 : null;
+      }
+    } catch (err) {
+      logError('d1_bio_click_failed', err, { username, linkId });
+    }
   }
 
   if (env.LINKS_KV) {
-    const workspace = await getBioWorkspaceFromStorage(env, username);
-    if (!workspace) return null;
+    const raw = await env.LINKS_KV.get<BioWorkspaceData>(`bio:${username}`, 'json');
+    if (!raw || !Array.isArray(raw.pages)) return null;
     let updatedClicks: number | null = null;
-    const nextPages = workspace.pages.map((p) => {
+    const nextPages = raw.pages.map((p) => {
       if (p.pageSlug !== pageSlug) return p;
       return {
         ...p,
@@ -1119,7 +1317,7 @@ async function incrementBioLinkClickInStorage(
     if (updatedClicks !== null) {
       await env.LINKS_KV.put(
         `bio:${username}`,
-        JSON.stringify({ ...workspace, pages: nextPages })
+        JSON.stringify({ ...raw, pages: nextPages })
       );
     }
     return updatedClicks;
@@ -1236,13 +1434,17 @@ async function putAvatarToStorage(
 
   const dataBase64 = uint8ToBase64(bytes);
 
-  if (env.LINKS_DB) {
-    await env.LINKS_DB.prepare(
-      'INSERT INTO bio_avatars (avatar_key, username, page_slug, content_type, data_base64, byte_size, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(avatar_key) DO UPDATE SET content_type = excluded.content_type, data_base64 = excluded.data_base64, byte_size = excluded.byte_size, updated_at = excluded.updated_at'
-    )
-      .bind(key, username, pageSlug, contentType, dataBase64, bytes.byteLength, now)
-      .run();
-    return 'cloudflare-d1';
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      await env.LINKS_DB.prepare(
+        'INSERT INTO bio_avatars (avatar_key, username, page_slug, content_type, data_base64, byte_size, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(avatar_key) DO UPDATE SET content_type = excluded.content_type, data_base64 = excluded.data_base64, byte_size = excluded.byte_size, updated_at = excluded.updated_at'
+      )
+        .bind(key, username, pageSlug, contentType, dataBase64, bytes.byteLength, now)
+        .run();
+      return 'cloudflare-d1';
+    } catch (err) {
+      logError('d1_put_avatar_failed', err, { key });
+    }
   }
 
   if (env.LINKS_KV) {
@@ -1277,16 +1479,20 @@ async function getAvatarFromStorage(
     }
   }
 
-  if (env.LINKS_DB) {
-    const row = await env.LINKS_DB.prepare(
-      'SELECT content_type, data_base64 FROM bio_avatars WHERE avatar_key = ? LIMIT 1'
-    )
-      .bind(key)
-      .first<{ content_type: string; data_base64: string }>();
-    if (row && row.data_base64) {
-      const ct = row.content_type === 'image/webp' ? 'image/webp' : 'image/avif';
-      const bytes = base64ToUint8(row.data_base64);
-      return { body: bytes.buffer as ArrayBuffer, contentType: ct };
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      const row = await env.LINKS_DB.prepare(
+        'SELECT content_type, data_base64 FROM bio_avatars WHERE avatar_key = ? LIMIT 1'
+      )
+        .bind(key)
+        .first<{ content_type: string; data_base64: string }>();
+      if (row && row.data_base64) {
+        const ct = row.content_type === 'image/webp' ? 'image/webp' : 'image/avif';
+        const bytes = base64ToUint8(row.data_base64);
+        return { body: bytes.buffer as ArrayBuffer, contentType: ct };
+      }
+    } catch (err) {
+      logError('d1_get_avatar_failed', err, { key });
     }
   }
 
@@ -1315,7 +1521,7 @@ async function deleteAvatarFromStorage(
   if (env.LINKS_MEDIA_R2) {
     tasks.push(env.LINKS_MEDIA_R2.delete(key));
   }
-  if (env.LINKS_DB) {
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
     tasks.push(
       env.LINKS_DB.prepare('DELETE FROM bio_avatars WHERE avatar_key = ?').bind(key).run()
     );
@@ -1338,25 +1544,29 @@ async function getBioDeleteCooldown(
     remainingMs: 0,
   };
 
-  if (env.LINKS_DB) {
-    const row = await env.LINKS_DB.prepare(
-      'SELECT deleted_at, unlock_at FROM bio_delete_cooldowns WHERE username = ? LIMIT 1'
-    )
-      .bind(username)
-      .first<{ deleted_at: string; unlock_at: string }>();
-    if (row) {
-      const unlockMs = new Date(row.unlock_at).getTime();
-      if (Number.isFinite(unlockMs) && unlockMs > nowMs) {
-        return {
-          active: true,
-          deletedAt: row.deleted_at,
-          unlockAt: row.unlock_at,
-          remainingMs: unlockMs - nowMs,
-        };
-      }
-      await env.LINKS_DB.prepare('DELETE FROM bio_delete_cooldowns WHERE username = ?')
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      const row = await env.LINKS_DB.prepare(
+        'SELECT deleted_at, unlock_at FROM bio_delete_cooldowns WHERE username = ? LIMIT 1'
+      )
         .bind(username)
-        .run();
+        .first<{ deleted_at: string; unlock_at: string }>();
+      if (row) {
+        const unlockMs = new Date(row.unlock_at).getTime();
+        if (Number.isFinite(unlockMs) && unlockMs > nowMs) {
+          return {
+            active: true,
+            deletedAt: row.deleted_at,
+            unlockAt: row.unlock_at,
+            remainingMs: unlockMs - nowMs,
+          };
+        }
+        await env.LINKS_DB.prepare('DELETE FROM bio_delete_cooldowns WHERE username = ?')
+          .bind(username)
+          .run();
+      }
+    } catch (err) {
+      logError('d1_get_cooldown_failed', err, { username });
     }
   }
 
@@ -1402,16 +1612,20 @@ async function hardDeleteBioProfileAndSetCooldown(
     }
   }
 
-  if (env.LINKS_DB) {
-    await env.LINKS_DB.batch([
-      env.LINKS_DB.prepare('DELETE FROM bio_links WHERE username = ?').bind(username),
-      env.LINKS_DB.prepare('DELETE FROM bio_pages WHERE username = ?').bind(username),
-      env.LINKS_DB.prepare('DELETE FROM bio_profiles WHERE username = ?').bind(username),
-      env.LINKS_DB.prepare('DELETE FROM bio_avatars WHERE username = ?').bind(username),
-      env.LINKS_DB.prepare(
-        'INSERT INTO bio_delete_cooldowns (username, deleted_at, unlock_at) VALUES (?, ?, ?) ON CONFLICT(username) DO UPDATE SET deleted_at = excluded.deleted_at, unlock_at = excluded.unlock_at'
-      ).bind(username, deletedAt, unlockAt),
-    ]);
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      await env.LINKS_DB.batch([
+        env.LINKS_DB.prepare('DELETE FROM bio_links WHERE username = ?').bind(username),
+        env.LINKS_DB.prepare('DELETE FROM bio_pages WHERE username = ?').bind(username),
+        env.LINKS_DB.prepare('DELETE FROM bio_profiles WHERE username = ?').bind(username),
+        env.LINKS_DB.prepare('DELETE FROM bio_avatars WHERE username = ?').bind(username),
+        env.LINKS_DB.prepare(
+          'INSERT INTO bio_delete_cooldowns (username, deleted_at, unlock_at) VALUES (?, ?, ?) ON CONFLICT(username) DO UPDATE SET deleted_at = excluded.deleted_at, unlock_at = excluded.unlock_at'
+        ).bind(username, deletedAt, unlockAt),
+      ]);
+    } catch (err) {
+      logError('d1_hard_delete_bio_failed', err, { username });
+    }
   }
 
   if (env.LINKS_KV) {
@@ -1438,11 +1652,15 @@ async function hardDeleteBioProfileAndSetCooldown(
 }
 
 async function purgeExpiredRecycleBinD1(env: WorkerEnv): Promise<void> {
-  if (!env.LINKS_DB) return;
-  const nowIso = new Date().toISOString();
-  await env.LINKS_DB.prepare('DELETE FROM links_recycle_bin WHERE expires_at <= ?')
-    .bind(nowIso)
-    .run();
+  if (!env.LINKS_DB || !(await ensureLinksD1Schema(env))) return;
+  try {
+    const nowIso = new Date().toISOString();
+    await env.LINKS_DB.prepare('DELETE FROM links_recycle_bin WHERE expires_at <= ?')
+      .bind(nowIso)
+      .run();
+  } catch (err) {
+    logError('d1_purge_recycle_bin_failed', err);
+  }
 }
 
 async function addItemToRecycleBin(
@@ -1465,23 +1683,28 @@ async function addItemToRecycleBin(
     expiresAt: new Date(now.getTime() + RECYCLE_BIN_RETENTION_MS).toISOString(),
   };
 
-  if (env.LINKS_DB) {
-    await purgeExpiredRecycleBinD1(env);
-    await env.LINKS_DB.prepare(
-      'INSERT INTO links_recycle_bin (id, owner_user, item_type, label, summary, payload_json, deleted_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    )
-      .bind(
-        record.id,
-        record.ownerUser,
-        record.itemType,
-        record.label,
-        record.summary,
-        JSON.stringify(record.payload),
-        record.deletedAt,
-        record.expiresAt
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      await purgeExpiredRecycleBinD1(env);
+      await env.LINKS_DB.prepare(
+        'INSERT INTO links_recycle_bin (id, owner_user, item_type, label, summary, payload_json, deleted_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       )
-      .run();
-    return record;
+        .bind(
+          record.id,
+          record.ownerUser,
+          record.itemType,
+          record.label,
+          record.summary,
+          JSON.stringify(record.payload),
+          record.deletedAt,
+          record.expiresAt
+        )
+        .run();
+      return record;
+    } catch (err) {
+      logError('d1_add_recycle_bin_failed', err, { ownerUser, itemType });
+      if (!env.LINKS_KV) throw err;
+    }
   }
 
   if (env.LINKS_KV) {
@@ -1500,61 +1723,71 @@ async function listRecycleBinItems(
   ownerUser: string
 ): Promise<RecycleBinRecord[]> {
   const nowMs = Date.now();
+  const merged = new Map<string, RecycleBinRecord>();
 
-  if (env.LINKS_DB) {
-    await purgeExpiredRecycleBinD1(env);
-    const res = await env.LINKS_DB.prepare(
-      'SELECT id, owner_user, item_type, label, summary, payload_json, deleted_at, expires_at FROM links_recycle_bin WHERE owner_user = ? ORDER BY deleted_at DESC LIMIT 100'
-    )
-      .bind(ownerUser)
-      .all<{
-        id: string;
-        owner_user: string;
-        item_type: string;
-        label: string;
-        summary: string;
-        payload_json: string;
-        deleted_at: string;
-        expires_at: string;
-      }>();
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      await purgeExpiredRecycleBinD1(env);
+      const res = await env.LINKS_DB.prepare(
+        'SELECT id, owner_user, item_type, label, summary, payload_json, deleted_at, expires_at FROM links_recycle_bin WHERE owner_user = ? ORDER BY deleted_at DESC LIMIT 100'
+      )
+        .bind(ownerUser)
+        .all<{
+          id: string;
+          owner_user: string;
+          item_type: string;
+          label: string;
+          summary: string;
+          payload_json: string;
+          deleted_at: string;
+          expires_at: string;
+        }>();
 
-    return (res.results || []).map((row) => {
-      let parsedPayload: Record<string, unknown> = {};
-      try {
-        parsedPayload = JSON.parse(row.payload_json || '{}');
-      } catch {
-        parsedPayload = {};
+      for (const row of res.results || []) {
+        let parsedPayload: Record<string, unknown> = {};
+        try {
+          parsedPayload = JSON.parse(row.payload_json || '{}');
+        } catch {
+          parsedPayload = {};
+        }
+        merged.set(row.id, {
+          id: row.id,
+          ownerUser: row.owner_user,
+          itemType:
+            row.item_type === 'bio_page' || row.item_type === 'shortlink'
+              ? row.item_type
+              : 'bio_link',
+          label: row.label,
+          summary: row.summary,
+          payload: parsedPayload,
+          deletedAt: row.deleted_at,
+          expiresAt: row.expires_at,
+        });
       }
-      return {
-        id: row.id,
-        ownerUser: row.owner_user,
-        itemType:
-          row.item_type === 'bio_page' || row.item_type === 'shortlink'
-            ? row.item_type
-            : 'bio_link',
-        label: row.label,
-        summary: row.summary,
-        payload: parsedPayload,
-        deletedAt: row.deleted_at,
-        expiresAt: row.expires_at,
-      };
-    });
+    } catch (err) {
+      logError('d1_list_recycle_bin_failed', err, { ownerUser });
+    }
   }
 
   if (env.LINKS_KV) {
-    const listed = await env.LINKS_KV.list({ prefix: `recycle:${ownerUser}:`, limit: 100 });
-    const rows = await Promise.all(
-      listed.keys.map((k) => env.LINKS_KV!.get<RecycleBinRecord>(k.name, 'json'))
-    );
-    return rows
-      .filter(
-        (r): r is RecycleBinRecord =>
-          Boolean(r && r.id && new Date(r.expiresAt).getTime() > nowMs)
-      )
-      .sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
+    try {
+      const listed = await env.LINKS_KV.list({ prefix: `recycle:${ownerUser}:`, limit: 100 });
+      const rows = await Promise.all(
+        listed.keys.map((k) => env.LINKS_KV!.get<RecycleBinRecord>(k.name, 'json'))
+      );
+      for (const r of rows) {
+        if (r && r.id && new Date(r.expiresAt).getTime() > nowMs && !merged.has(r.id)) {
+          merged.set(r.id, r);
+        }
+      }
+    } catch (err) {
+      logError('kv_list_recycle_bin_failed', err, { ownerUser });
+    }
   }
 
-  return [];
+  return Array.from(merged.values())
+    .sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime())
+    .slice(0, 100);
 }
 
 async function getRecycleBinItem(
@@ -1562,42 +1795,47 @@ async function getRecycleBinItem(
   ownerUser: string,
   id: string
 ): Promise<RecycleBinRecord | null> {
-  if (env.LINKS_DB) {
-    await purgeExpiredRecycleBinD1(env);
-    const row = await env.LINKS_DB.prepare(
-      'SELECT id, owner_user, item_type, label, summary, payload_json, deleted_at, expires_at FROM links_recycle_bin WHERE id = ? AND owner_user = ? LIMIT 1'
-    )
-      .bind(id, ownerUser)
-      .first<{
-        id: string;
-        owner_user: string;
-        item_type: string;
-        label: string;
-        summary: string;
-        payload_json: string;
-        deleted_at: string;
-        expires_at: string;
-      }>();
-    if (!row) return null;
-    let parsedPayload: Record<string, unknown> = {};
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
     try {
-      parsedPayload = JSON.parse(row.payload_json || '{}');
-    } catch {
-      parsedPayload = {};
+      await purgeExpiredRecycleBinD1(env);
+      const row = await env.LINKS_DB.prepare(
+        'SELECT id, owner_user, item_type, label, summary, payload_json, deleted_at, expires_at FROM links_recycle_bin WHERE id = ? AND owner_user = ? LIMIT 1'
+      )
+        .bind(id, ownerUser)
+        .first<{
+          id: string;
+          owner_user: string;
+          item_type: string;
+          label: string;
+          summary: string;
+          payload_json: string;
+          deleted_at: string;
+          expires_at: string;
+        }>();
+      if (row) {
+        let parsedPayload: Record<string, unknown> = {};
+        try {
+          parsedPayload = JSON.parse(row.payload_json || '{}');
+        } catch {
+          parsedPayload = {};
+        }
+        return {
+          id: row.id,
+          ownerUser: row.owner_user,
+          itemType:
+            row.item_type === 'bio_page' || row.item_type === 'shortlink'
+              ? row.item_type
+              : 'bio_link',
+          label: row.label,
+          summary: row.summary,
+          payload: parsedPayload,
+          deletedAt: row.deleted_at,
+          expiresAt: row.expires_at,
+        };
+      }
+    } catch (err) {
+      logError('d1_get_recycle_bin_failed', err, { ownerUser, id });
     }
-    return {
-      id: row.id,
-      ownerUser: row.owner_user,
-      itemType:
-        row.item_type === 'bio_page' || row.item_type === 'shortlink'
-          ? row.item_type
-          : 'bio_link',
-      label: row.label,
-      summary: row.summary,
-      payload: parsedPayload,
-      deletedAt: row.deleted_at,
-      expiresAt: row.expires_at,
-    };
   }
 
   if (env.LINKS_KV) {
@@ -1619,12 +1857,16 @@ async function hardDeleteRecycleBinItem(
   ownerUser: string,
   id: string
 ): Promise<void> {
-  if (env.LINKS_DB) {
-    await env.LINKS_DB.prepare(
-      'DELETE FROM links_recycle_bin WHERE id = ? AND owner_user = ?'
-    )
-      .bind(id, ownerUser)
-      .run();
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      await env.LINKS_DB.prepare(
+        'DELETE FROM links_recycle_bin WHERE id = ? AND owner_user = ?'
+      )
+        .bind(id, ownerUser)
+        .run();
+    } catch (err) {
+      logError('d1_delete_recycle_bin_failed', err, { ownerUser, id });
+    }
   }
   if (env.LINKS_KV) {
     await env.LINKS_KV.delete(`recycle:${ownerUser}:${id}`);
@@ -1636,16 +1878,20 @@ async function emptyRecycleBinForOwner(
   ownerUser: string
 ): Promise<number> {
   let purgedCount = 0;
-  if (env.LINKS_DB) {
-    const countRow = await env.LINKS_DB.prepare(
-      'SELECT COUNT(*) as total FROM links_recycle_bin WHERE owner_user = ?'
-    )
-      .bind(ownerUser)
-      .first<{ total: number }>();
-    purgedCount = Number(countRow?.total) || 0;
-    await env.LINKS_DB.prepare('DELETE FROM links_recycle_bin WHERE owner_user = ?')
-      .bind(ownerUser)
-      .run();
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      const countRow = await env.LINKS_DB.prepare(
+        'SELECT COUNT(*) as total FROM links_recycle_bin WHERE owner_user = ?'
+      )
+        .bind(ownerUser)
+        .first<{ total: number }>();
+      purgedCount = Number(countRow?.total) || 0;
+      await env.LINKS_DB.prepare('DELETE FROM links_recycle_bin WHERE owner_user = ?')
+        .bind(ownerUser)
+        .run();
+    } catch (err) {
+      logError('d1_empty_recycle_bin_failed', err, { ownerUser });
+    }
   }
   if (env.LINKS_KV) {
     const listed = await env.LINKS_KV.list({ prefix: `recycle:${ownerUser}:`, limit: 200 });
@@ -1666,6 +1912,7 @@ async function handleApiRequest(
   if (url.pathname === '/api/health' && request.method === 'GET') {
     const caps = getOutboundCapabilities(env);
     const activeOutboundProvider = resolveOutboundProvider(env);
+    const d1Ready = env.LINKS_DB ? await ensureLinksD1Schema(env) : false;
     return jsonResponse({
       ok: true,
       service: 'vzmail',
@@ -1673,7 +1920,12 @@ async function handleApiRequest(
       retentionPolicy: 'EPHEMERAL_POP_AND_PURGE',
       outboundProviderMode: (env.OUTBOUND_PROVIDER || 'auto').trim().toLowerCase(),
       activeOutboundProvider,
-      linksStorageEngine: getLinksStorageEngine(env),
+      linksStorageEngine: d1Ready
+        ? 'cloudflare-d1'
+        : env.LINKS_KV
+          ? 'cloudflare-kv'
+          : 'none',
+      d1SchemaReady: d1Ready,
       mediaStorageEngine: getMediaStorageEngine(env),
       bindings: {
         mailTransitKv: Boolean(env.MAIL_TRANSIT_KV),
