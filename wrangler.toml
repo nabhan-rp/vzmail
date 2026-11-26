@@ -4,6 +4,14 @@ main = "cloudflare/worker-mail-links.ts"
 compatibility_date = "2026-11-19"
 compatibility_flags = ["nodejs_compat"]
 
+# 2-in-1 Cloudflare Worker Custom Routes (active for vz.gay + imy.li):
+routes = [
+  { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
+  { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
+  { pattern = "imy.li/*", zone_name = "imy.li" },
+  { pattern = "*.imy.li/*", zone_name = "imy.li" }
+]
+
 # Static SPA assets built by `npm run build` (`vite build` -> `./dist`)
 # Note: `vite.config.ts` automatically renames `*.php.txt` -> `*.php` inside `./dist` at build time
 # while keeping source files as `*.php.txt` in GitHub & AI Studio.
@@ -36,14 +44,6 @@ head_sampling_rate = 1
 enabled = true
 head_sampling_rate = 0.1
 
-# 2-in-1 Cloudflare Worker Custom Routes (active for vz.gay + imy.li):
-routes = [
-  { pattern = "mail.vz.gay/*", zone_name = "vz.gay" },
-  { pattern = "links.vz.gay/*", zone_name = "vz.gay" },
-  { pattern = "imy.li/*", zone_name = "imy.li" },
-  { pattern = "*.imy.li/*", zone_name = "imy.li" }
-]
-
 [vars]
 APP_DOMAIN = "mail.vz.gay"
 LINKS_DOMAIN = "links.vz.gay"
@@ -73,19 +73,19 @@ id = "9fb255e46c7b4501922aa6881c806493"
 #      npx wrangler d1 create vzlinks-db
 #      npx wrangler d1 execute vzlinks-db --remote --file=cloudflare/schema.sql
 #    Then uncomment below and replace database_id:
-# [[d1_databases]]
-# binding = "LINKS_DB"
-# database_name = "vzlinks-db"
-# database_id = "<PASTE_D1_DATABASE_ID_HERE>"
+ [[d1_databases]]
+ binding = "LINKS_DB"
+ database_name = "vzlinks-db"
+ database_id = "9b82b9f1-e78c-4194-a038-435892efacfe"
 
 # 4. Recommended Upgrade — Cloudflare R2 Bucket for Bio Link AVIF Profile Photos (`LINKS_MEDIA_R2`):
 #    Free Tier: 10 GB storage, 10M reads/mo, $0 egress. Automatically falls back to D1/KV until enabled.
 #    Run:
 #      npx wrangler r2 bucket create vzlinks-media
 #    Then uncomment below:
-# [[r2_buckets]]
-# binding = "LINKS_MEDIA_R2"
-# bucket_name = "vzlinks-media"
+[[r2_buckets]]
+binding = "LINKS_MEDIA_R2"
+bucket_name = "vzlinks-media"
 
 # 5. Optional Cloudflare Email Sending (uncomment after onboarding imy.li in Compute > Email Service):
 #    Free plan: verified destination addresses only; Workers Paid: any recipient.

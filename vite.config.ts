@@ -10,8 +10,9 @@ import { defineConfig, type Plugin } from 'vite';
  * and serving `/<file>.php` cleanly from `public/<file>.php.txt` during local dev.
  */
 function renamePhpTxtOnBuildPlugin(): Plugin {
-  let outDirAbs = path.resolve(__dirname, 'dist');
-  const publicDirAbs = path.resolve(__dirname, 'public');
+  const rootDir = import.meta.dirname;
+  let outDirAbs = path.resolve(rootDir, 'dist');
+  const publicDirAbs = path.resolve(rootDir, 'public');
 
   const renamePhpTxtRecursive = (dirPath: string) => {
     if (!fs.existsSync(dirPath)) return;
@@ -65,7 +66,7 @@ export default defineConfig(() => {
     plugins: [react(), tailwindcss(), renamePhpTxtOnBuildPlugin()],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     build: {

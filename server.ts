@@ -1,7 +1,6 @@
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createServer as createViteServer } from 'vite';
 import {
   DEFAULT_SUPPORTED_DOMAINS,
   resolveCanonicalEmail,
@@ -1188,7 +1187,13 @@ async function startServer() {
     res.status(404).json({ ok: false, error: 'Endpoint API tidak ditemukan.' });
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.K_SERVICE) ||
+    process.env.npm_lifecycle_event === 'start';
+
+  if (!isProduction) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
