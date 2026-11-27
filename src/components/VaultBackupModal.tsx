@@ -7,7 +7,9 @@ import {
   Eye,
   EyeOff,
   FileArchive,
+  Fingerprint,
   KeyRound,
+  Loader2,
   Lock,
   RefreshCw,
   Settings2,
@@ -61,6 +63,27 @@ import {
   type VaultPinLockConfig,
   type VaultPinLockMode,
 } from '../utils/mailVaultCrypto';
+import {
+  clearBiometricPhraseLocker,
+  deriveBackupPassphraseViaPrf,
+  detectWebAuthnCapabilities,
+  getBiometricPhraseLockerMeta,
+  getVaultPasskeyConfig,
+  registerVaultPasskey,
+  removeVaultPasskey,
+  renameVaultPasskey,
+  sealPhraseWithBiometricPrf,
+  suggestDefaultPasskeyLabel,
+  unsealPhraseWithBiometricPrf,
+  updateVaultPasskeySettings,
+  verifyVaultPasskeyAssertion,
+  type PasskeyAuthenticatorType,
+  type VaultBiometricPhraseLockerMeta,
+  type VaultPasskeyConfig,
+  type VaultPasskeyCredential,
+  type WebAuthnCapabilityReport,
+} from '../utils/vaultPasskeyWebAuthn';
+import { VaultPasskeySettingsSection } from './VaultPasskeySettingsSection';
 
 interface VaultBackupModalProps {
   isOpen: boolean;
@@ -97,9 +120,24 @@ export function VaultBackupModal({
   const [pinCode, setPinCode] = useState('');
   const [hasSavedPinVault, setHasSavedPinVault] = useState(false);
 
-  // VZ Vault 3-Mode Opt-In PIN Lock state
+  // VZ Vault 3-Mode Opt-In PIN Lock & WebAuthn Passkeys state
   const [pinConfig, setPinConfig] = useState<VaultPinLockConfig>(() =>
     getVaultPinLockConfig(username)
+  );
+  const [passkeyConfig, setPasskeyConfig] = useState<VaultPasskeyConfig>(() =>
+    getVaultPasskeyConfig(username)
+  );
+  const [webAuthnCaps, setWebAuthnCaps] =
+    useState<WebAuthnCapabilityReport | null>(null);
+  const [biometricLockerMeta, setBiometricLockerMeta] =
+    useState<VaultBiometricPhraseLockerMeta | null>(() =>
+      getBiometricPhraseLockerMeta(username)
+    );
+  const [exportKeyMode, setExportKeyMode] = useState<'passphrase' | 'passkey_prf'>(
+    'passphrase'
+  );
+  const [importKeyMode, setImportKeyMode] = useState<'passphrase' | 'passkey_prf'>(
+    'passphrase'
   );
   const [vaultUnlocked, setVaultUnlocked] = useState(false);
   const [unlockPinInput, setUnlockPinInput] = useState('');
@@ -121,7 +159,7 @@ export function VaultBackupModal({
   const [nextPinForChange, setNextPinForChange] = useState('');
   const [confirmPinForChange, setConfirmPinForChange] = useState('');
 
-  // Mode 2 Sensitive Action PIN Gate state
+  // Mode 2 Sensitive Action Verification Gate state
   const [pendingSensitive, setPendingSensitive] =
     useState<PendingSensitiveAction | null>(null);
   const [sensitivePinInput, setSensitivePinInput] = useState('');
@@ -130,6 +168,7 @@ export function VaultBackupModal({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [biometricBusy, setBiometricBusy] = useState(false);
 
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const idleTimerRef = useRef<number | null>(null);
@@ -164,7 +203,7 @@ export function VaultBackupModal({
     [clearSensitiveSecretsInMemory]
   );
 
-  // Sync PIN configuration whenever modal opens/closes or user changes
+  // Sync PIN & Passkey configuration whenever modal opens/closes or user changes
   useEffect(() => {
     if (!isOpen) {
       setVaultUnlocked(false);
@@ -176,20 +215,45 @@ export function VaultBackupModal({
       return;
     }
 
-    const loaded = getVaultPinLockConfig(username);
-    setPinConfig(loaded);
+    const loadedPin = getVaultPinLockConfig(username);
+    const loadedPasskeys = getVaultPasskeyConfig(username);
+    const hasEnrolledPasskeys = loadedPasskeys.credentials.length > 0;
+    const anyLockActive = loadedPin.enabled || hasEnrolledPasskeys;
+    const activeLockMode: VaultPinLockMode = !anyLockActive
+      ? 'off'
+      : loadedPin.enabled
+        ? loadedPin.mode
+        : loadedPasskeys.lockMode;
+
+    setPinConfig(loadedPin);
+    setPasskeyConfig(loadedPasskeys);
+    setBiometricLockerMeta(getBiometricPhraseLockerMeta(username));
     setSetupMode(
-      loaded.mode === 'sensitive_actions'
+      activeLockMode === 'sensitive_actions'
         ? 'sensitive_actions'
         : 'full_vault_autolock'
     );
-    setSetupAutoLock(loaded.autoLockMinutes);
-    setSetupLockOnTabHidden(loaded.lockOnTabHidden);
-    setSetupRequireFirst(loaded.requireFirstSetup);
+    setSetupAutoLock(
+      loadedPin.enabled ? loadedPin.autoLockMinutes : loadedPasskeys.autoLockMinutes
+    );
+    setSetupLockOnTabHidden(
+      loadedPin.enabled ? loadedPin.lockOnTabHidden : loadedPasskeys.lockOnTabHidden
+    );
+    setSetupRequireFirst(loadedPin.requireFirstSetup);
     setFailedAttempts(getVaultPinLockFailedAttempts(username));
     setHasSavedPinVault(hasStoredMnemonicPinVault(username));
-    setVaultUnlocked(!(loaded.enabled && loaded.mode === 'full_vault_autolock'));
+    setVaultUnlocked(!(anyLockActive && activeLockMode === 'full_vault_autolock'));
     setUnlockError(null);
+
+    if (!loadedPasskeys.credentials.some((c) => c.prfSupported)) {
+      setExportKeyMode('passphrase');
+      setImportKeyMode('passphrase');
+    }
+
+    let cancelled = false;
+    void detectWebAuthnCapabilities().then((caps) => {
+      if (!cancelled) setWebAuthnCaps(caps);
+    });
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -203,15 +267,33 @@ export function VaultBackupModal({
       }
     };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('keydown', onKeyDown);
+    };
   }, [isOpen, onClose, username, clearSensitiveSecretsInMemory, pendingSensitive]);
 
-  // Mode 1: Idle Auto-Lock & Visibility Auto-Lock while Full Vault is unlocked
+  const hasPasskeys = passkeyConfig.credentials.length > 0;
+  const hasPrfPasskey = passkeyConfig.credentials.some((c) => c.prfSupported);
+  const anyLockEnabled = pinConfig.enabled || hasPasskeys;
+  const effectiveLockMode: VaultPinLockMode = !anyLockEnabled
+    ? 'off'
+    : pinConfig.enabled
+      ? pinConfig.mode
+      : passkeyConfig.lockMode;
+  const effectiveAutoLockMinutes: VaultAutoLockMinutes = pinConfig.enabled
+    ? pinConfig.autoLockMinutes
+    : passkeyConfig.autoLockMinutes;
+  const effectiveLockOnTabHidden = pinConfig.enabled
+    ? pinConfig.lockOnTabHidden
+    : passkeyConfig.lockOnTabHidden;
+
+  // Mode 1: Idle Auto-Lock & Visibility Auto-Lock while Full Vault is unlocked (Passkey or PIN)
   useEffect(() => {
     if (
       !isOpen ||
-      !pinConfig.enabled ||
-      pinConfig.mode !== 'full_vault_autolock' ||
+      !anyLockEnabled ||
+      effectiveLockMode !== 'full_vault_autolock' ||
       !vaultUnlocked
     ) {
       if (idleTimerRef.current !== null) {
@@ -221,7 +303,7 @@ export function VaultBackupModal({
       return;
     }
 
-    const timeoutMs = pinConfig.autoLockMinutes * 60 * 1000;
+    const timeoutMs = effectiveAutoLockMinutes * 60 * 1000;
     const armIdleTimer = () => {
       if (idleTimerRef.current !== null) {
         window.clearTimeout(idleTimerRef.current);
@@ -229,8 +311,8 @@ export function VaultBackupModal({
       idleTimerRef.current = window.setTimeout(() => {
         lockVaultNow(
           lang === 'id'
-            ? `VZ Vault dikunci otomatis setelah ${pinConfig.autoLockMinutes} menit tidak aktif.`
-            : `VZ Vault auto-locked after ${pinConfig.autoLockMinutes} minutes of inactivity.`
+            ? `VZ Vault dikunci otomatis setelah ${effectiveAutoLockMinutes} menit tidak aktif.`
+            : `VZ Vault auto-locked after ${effectiveAutoLockMinutes} minutes of inactivity.`
         );
       }, timeoutMs);
     };
@@ -247,7 +329,7 @@ export function VaultBackupModal({
     }
 
     const onVisibilityChange = () => {
-      if (pinConfig.lockOnTabHidden && document.visibilityState === 'hidden') {
+      if (effectiveLockOnTabHidden && document.visibilityState === 'hidden') {
         lockVaultNow(
           lang === 'id'
             ? 'VZ Vault dikunci otomatis saat tab browser disembunyikan.'
@@ -269,10 +351,10 @@ export function VaultBackupModal({
     };
   }, [
     isOpen,
-    pinConfig.enabled,
-    pinConfig.mode,
-    pinConfig.autoLockMinutes,
-    pinConfig.lockOnTabHidden,
+    anyLockEnabled,
+    effectiveLockMode,
+    effectiveAutoLockMinutes,
+    effectiveLockOnTabHidden,
     vaultUnlocked,
     lang,
     lockVaultNow,
@@ -286,17 +368,17 @@ export function VaultBackupModal({
   };
 
   const showFirstOpenSetup =
-    !pinConfig.enabled &&
+    !anyLockEnabled &&
     pinConfig.requireFirstSetup &&
     !pinConfig.firstSetupDismissed;
 
   const showFullLockScreen =
-    pinConfig.enabled &&
-    pinConfig.mode === 'full_vault_autolock' &&
+    anyLockEnabled &&
+    effectiveLockMode === 'full_vault_autolock' &&
     !vaultUnlocked;
 
   const requiresSensitivePinGate =
-    pinConfig.enabled && pinConfig.mode === 'sensitive_actions';
+    anyLockEnabled && effectiveLockMode === 'sensitive_actions';
 
   const runWithSensitivePinGate = (
     labelId: string,
@@ -422,6 +504,214 @@ export function VaultBackupModal({
     }
   };
 
+  const handleUnlockFullVaultWithPasskey = async () => {
+    setUnlockError(null);
+    setBiometricBusy(true);
+    try {
+      const res = await verifyVaultPasskeyAssertion(username, { lang });
+      if (res.ok) {
+        setPasskeyConfig(res.config);
+        setVaultUnlocked(true);
+        setUnlockPinInput('');
+        setStatusMessage(
+          lang === 'id'
+            ? `VZ Vault dibuka dengan ${res.credential.label}. Auto-lock aktif (${effectiveAutoLockMinutes} menit).`
+            : `VZ Vault unlocked via ${res.credential.label}. Auto-lock active (${effectiveAutoLockMinutes}m).`
+        );
+      } else {
+        setUnlockError(res.error);
+      }
+    } finally {
+      setBiometricBusy(false);
+    }
+  };
+
+  const handleConfirmSensitiveWithPasskey = async () => {
+    if (!pendingSensitive) return;
+    setSensitivePinError(null);
+    setBiometricBusy(true);
+    try {
+      const res = await verifyVaultPasskeyAssertion(username, { lang });
+      if (res.ok) {
+        setPasskeyConfig(res.config);
+        const action = pendingSensitive.execute;
+        setPendingSensitive(null);
+        setSensitivePinInput('');
+        await action();
+      } else {
+        setSensitivePinError(res.error);
+      }
+    } finally {
+      setBiometricBusy(false);
+    }
+  };
+
+  const handleRegisterPasskey = async (params: {
+    label: string;
+    authenticatorType: PasskeyAuthenticatorType;
+  }) => {
+    resetMessages();
+    setBiometricBusy(true);
+    try {
+      const targetLockMode: Exclude<VaultPinLockMode, 'off'> =
+        effectiveLockMode === 'sensitive_actions'
+          ? 'sensitive_actions'
+          : setupMode;
+      const result = await registerVaultPasskey(username, {
+        label: params.label,
+        authenticatorType: params.authenticatorType,
+        lockMode: targetLockMode,
+        autoLockMinutes: setupAutoLock,
+        lockOnTabHidden: setupLockOnTabHidden,
+        lang,
+      });
+      setPasskeyConfig(result.config);
+      const updatedPinPref = setVaultFirstSetupPreference(username, {
+        firstSetupDismissed: true,
+        requireFirstSetup: setupRequireFirst,
+      });
+      setPinConfig(updatedPinPref);
+      setVaultUnlocked(true);
+      setStatusMessage(
+        lang === 'id'
+          ? result.credential.prfSupported
+            ? `Passkey "${result.credential.label}" berhasil didaftarkan (WebAuthn PRF Aktif — mendukung buka biometrik, brankas frasa PRF & kunci backup langsung).`
+            : `Passkey "${result.credential.label}" berhasil didaftarkan untuk verifikasi & buka VZ Vault (mode perangkat Non-PRF).`
+          : result.credential.prfSupported
+            ? `Passkey "${result.credential.label}" enrolled (WebAuthn PRF Active — supports biometric unlock, PRF phrase locker & direct PRF backup keys).`
+            : `Passkey "${result.credential.label}" enrolled for biometric VZ Vault unlock (Non-PRF device verification mode).`
+      );
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBiometricBusy(false);
+    }
+  };
+
+  const handleTestPasskey = async (cred: VaultPasskeyCredential) => {
+    resetMessages();
+    setBiometricBusy(true);
+    try {
+      const res = await verifyVaultPasskeyAssertion(username, {
+        credentialId: cred.id,
+        lang,
+      });
+      if (res.ok) {
+        setPasskeyConfig(res.config);
+        setStatusMessage(
+          lang === 'id'
+            ? `Verifikasi biometrik "${res.credential.label}" berhasil${res.prfOutputBytes ? ' (output PRF 256-bit terverifikasi).' : ' (verifikasi perangkat valid).'}`
+            : `Biometric verification for "${res.credential.label}" succeeded${res.prfOutputBytes ? ' (256-bit PRF output verified).' : ' (device user verification valid).'}`
+        );
+      } else {
+        setErrorMessage(res.error);
+      }
+    } finally {
+      setBiometricBusy(false);
+    }
+  };
+
+  const handleRenamePasskey = (credentialId: string, nextLabel: string) => {
+    const updated = renameVaultPasskey(username, credentialId, nextLabel);
+    setPasskeyConfig(updated);
+    setStatusMessage(
+      lang === 'id'
+        ? 'Nama Passkey berhasil diperbarui.'
+        : 'Passkey label updated.'
+    );
+  };
+
+  const handleRemovePasskey = (cred: VaultPasskeyCredential) => {
+    runWithSensitivePinGate(
+      `Hapus Passkey "${cred.label}"`,
+      `Remove Passkey "${cred.label}"`,
+      () => {
+        resetMessages();
+        const updated = removeVaultPasskey(username, cred.id);
+        setPasskeyConfig(updated);
+        setBiometricLockerMeta(getBiometricPhraseLockerMeta(username));
+        if (!updated.credentials.some((c) => c.prfSupported)) {
+          setExportKeyMode('passphrase');
+          setImportKeyMode('passphrase');
+        }
+        setStatusMessage(
+          lang === 'id'
+            ? `Passkey "${cred.label}" telah dihapus dari VZ Vault perangkat ini.`
+            : `Passkey "${cred.label}" removed from VZ Vault on this device.`
+        );
+      }
+    );
+  };
+
+  const handleSealBiometricPhrase = () => {
+    runWithSensitivePinGate(
+      'Kunci Frasa ke Brankas Biometrik (PRF)',
+      'Seal Phrase to Biometric Locker (PRF)',
+      async () => {
+        resetMessages();
+        const phraseToSeal = (generatedMnemonic || passphrase).trim();
+        setBiometricBusy(true);
+        try {
+          const res = await sealPhraseWithBiometricPrf(username, phraseToSeal, {
+            lang,
+          });
+          if (res.ok) {
+            setBiometricLockerMeta(res.meta);
+            setPasskeyConfig(getVaultPasskeyConfig(username));
+            setStatusMessage(
+              lang === 'id'
+                ? `Frasa kunci berhasil dienkripsi dengan WebAuthn PRF (${res.meta.credentialLabel} · HKDF-SHA256 + AES-256-GCM).`
+                : `Recovery phrase sealed via WebAuthn PRF (${res.meta.credentialLabel} · HKDF-SHA256 + AES-256-GCM).`
+            );
+          } else {
+            setErrorMessage(res.error);
+          }
+        } finally {
+          setBiometricBusy(false);
+        }
+      }
+    );
+  };
+
+  const handleUnsealBiometricPhrase = async () => {
+    resetMessages();
+    setBiometricBusy(true);
+    try {
+      const res = await unsealPhraseWithBiometricPrf(username, lang);
+      if (res.ok) {
+        setGeneratedMnemonic(res.phrase);
+        setPassphrase(res.phrase);
+        setImportPassphrase(res.phrase);
+        setPasskeyConfig(getVaultPasskeyConfig(username));
+        setStatusMessage(
+          lang === 'id'
+            ? `Brankas Biometrik terbuka (${res.credentialLabel})! Frasa kunci otomatis diisi ke kolom ekspor & impor.`
+            : `Biometric Locker unlocked (${res.credentialLabel})! Recovery phrase filled into export & import fields.`
+        );
+      } else {
+        setErrorMessage(res.error);
+      }
+    } finally {
+      setBiometricBusy(false);
+    }
+  };
+
+  const handleClearBiometricPhrase = () => {
+    runWithSensitivePinGate(
+      'Hapus Brankas Frasa Biometrik',
+      'Clear Biometric Phrase Locker',
+      () => {
+        clearBiometricPhraseLocker(username);
+        setBiometricLockerMeta(null);
+        setStatusMessage(
+          lang === 'id'
+            ? 'Brankas Frasa Biometrik pada perangkat ini telah dihapus.'
+            : 'Cleared Biometric Phrase Locker from this device.'
+        );
+      }
+    );
+  };
+
   const handleSkipFirstSetup = () => {
     const updated = setVaultFirstSetupPreference(username, {
       firstSetupDismissed: true,
@@ -430,8 +720,8 @@ export function VaultBackupModal({
     setVaultUnlocked(true);
     setStatusMessage(
       lang === 'id'
-        ? 'Anda dapat mengaktifkan Kunci PIN VZ Vault kapan saja melalui tombol "Kunci PIN" di kanan atas.'
-        : 'You can enable VZ Vault PIN Lock anytime via the "PIN Lock" button in the header.'
+        ? 'Anda dapat mengaktifkan Biometrik / Passkey atau Kunci PIN kapan saja lewat tombol "Keamanan Vault" di kanan atas.'
+        : 'You can enable Biometrics / Passkeys or PIN Lock anytime via the "Vault Security" button in the header.'
     );
   };
 
@@ -444,15 +734,33 @@ export function VaultBackupModal({
     >
   ) => {
     resetMessages();
-    const updated = updateVaultPinLockSettings(username, patch);
-    setPinConfig(updated);
-    setSetupAutoLock(updated.autoLockMinutes);
-    setSetupLockOnTabHidden(updated.lockOnTabHidden);
-    setSetupRequireFirst(updated.requireFirstSetup);
+    const updatedPin = updateVaultPinLockSettings(username, patch);
+    setPinConfig(updatedPin);
+    const updatedPasskeys = updateVaultPasskeySettings(username, {
+      lockMode:
+        patch.mode === 'sensitive_actions' || patch.mode === 'full_vault_autolock'
+          ? patch.mode
+          : undefined,
+      autoLockMinutes: patch.autoLockMinutes,
+      lockOnTabHidden: patch.lockOnTabHidden,
+    });
+    setPasskeyConfig(updatedPasskeys);
+    setSetupMode(
+      (patch.mode === 'sensitive_actions' || patch.mode === 'full_vault_autolock'
+        ? patch.mode
+        : updatedPasskeys.lockMode) as Exclude<VaultPinLockMode, 'off'>
+    );
+    setSetupAutoLock(
+      updatedPin.enabled ? updatedPin.autoLockMinutes : updatedPasskeys.autoLockMinutes
+    );
+    setSetupLockOnTabHidden(
+      updatedPin.enabled ? updatedPin.lockOnTabHidden : updatedPasskeys.lockOnTabHidden
+    );
+    setSetupRequireFirst(updatedPin.requireFirstSetup);
     setStatusMessage(
       lang === 'id'
-        ? 'Pengaturan Kunci PIN VZ Vault berhasil diperbarui.'
-        : 'VZ Vault PIN Lock settings updated.'
+        ? 'Pengaturan Keamanan VZ Vault berhasil diperbarui.'
+        : 'VZ Vault Security settings updated.'
     );
   };
 
@@ -807,7 +1115,24 @@ export function VaultBackupModal({
 
   const executeExportEncryptedVault = async () => {
     resetMessages();
-    if (passphrase.trim().length < 8) {
+    let effectivePassphrase = passphrase.trim();
+    let prfLabelUsed: string | null = null;
+
+    if (exportKeyMode === 'passkey_prf') {
+      setBiometricBusy(true);
+      try {
+        const prfRes = await deriveBackupPassphraseViaPrf(username, { lang });
+        if (!prfRes.ok) {
+          setErrorMessage(prfRes.error);
+          return;
+        }
+        effectivePassphrase = prfRes.secretKey;
+        prfLabelUsed = prfRes.credentialLabel;
+        setPasskeyConfig(getVaultPasskeyConfig(username));
+      } finally {
+        setBiometricBusy(false);
+      }
+    } else if (effectivePassphrase.length < 8) {
       setErrorMessage(
         lang === 'id'
           ? 'Masukkan kata sandi atau frasa 12-kata minimal 8 karakter.'
@@ -835,7 +1160,7 @@ export function VaultBackupModal({
           bioProfile,
           shortlinks,
         },
-        passphrase.trim(),
+        effectivePassphrase,
         {
           format: exportFormat,
           packagingMode: activeMode,
@@ -854,11 +1179,14 @@ export function VaultBackupModal({
           : activeMode === 'polyglot_zip'
             ? 'Polyglot Stealth (ZIP Carrier)'
             : 'Polyglot Stealth (PDF Carrier)';
+      const keyTag = prfLabelUsed
+        ? ` · Passkey PRF (${prfLabelUsed})`
+        : '';
 
       setStatusMessage(
         lang === 'id'
-          ? `Berhasil mengenkripsi ${messages.length} email + profil bio + shortlinks ke ${artifact.filename} (${activeFormatInfo.badge} · ${modeLabel} · PBKDF2 ${artifact.iterations.toLocaleString()} iterasi).`
-          : `Encrypted ${messages.length} emails + bio profile + shortlinks into ${artifact.filename} (${activeFormatInfo.badge} · ${modeLabel} · PBKDF2 ${artifact.iterations.toLocaleString()} iterations).`
+          ? `Berhasil mengenkripsi ${messages.length} email + profil bio + shortlinks ke ${artifact.filename} (${activeFormatInfo.badge} · ${modeLabel}${keyTag} · PBKDF2 ${artifact.iterations.toLocaleString()} iterasi).`
+          : `Encrypted ${messages.length} emails + bio profile + shortlinks into ${artifact.filename} (${activeFormatInfo.badge} · ${modeLabel}${keyTag} · PBKDF2 ${artifact.iterations.toLocaleString()} iterations).`
       );
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -922,8 +1250,23 @@ export function VaultBackupModal({
         rawTextPreview.includes('---CV_PRO_v3_SIG---');
 
       if (isEncryptedVaultFile) {
-        const effectiveKey = (importPassphrase || passphrase).trim();
-        if (!effectiveKey) {
+        let effectiveKey = (importPassphrase || passphrase).trim();
+        let prfUsedLabel: string | null = null;
+        if (importKeyMode === 'passkey_prf') {
+          setBiometricBusy(true);
+          try {
+            const prfRes = await deriveBackupPassphraseViaPrf(username, { lang });
+            if (!prfRes.ok) {
+              setErrorMessage(prfRes.error);
+              return;
+            }
+            effectiveKey = prfRes.secretKey;
+            prfUsedLabel = prfRes.credentialLabel;
+            setPasskeyConfig(getVaultPasskeyConfig(username));
+          } finally {
+            setBiometricBusy(false);
+          }
+        } else if (!effectiveKey) {
           setErrorMessage(
             lang === 'id'
               ? 'Masukkan kata sandi atau frasa 12-kata dekripsi terlebih dahulu sebelum memilih berkas .anf / .cvp / .enc.'
@@ -949,10 +1292,11 @@ export function VaultBackupModal({
         const fmtUpper = `.${detectedFormat.toUpperCase()}`;
         const modeDesc =
           detectedMode === 'polyglot' ? 'Polyglot Stealth' : 'Standard JSON';
+        const prfSuffix = prfUsedLabel ? ` · Passkey PRF (${prfUsedLabel})` : '';
         setStatusMessage(
           lang === 'id'
-            ? `Berhasil mendekripsi & memulihkan ${payload.messages.length} email dari kontainer ${fmtUpper} (${modeDesc} · PBKDF2 ${iterations.toLocaleString()} iterasi)!`
-            : `Decrypted & restored ${payload.messages.length} emails from ${fmtUpper} container (${modeDesc} · PBKDF2 ${iterations.toLocaleString()} iterations)!`
+            ? `Berhasil mendekripsi & memulihkan ${payload.messages.length} email dari kontainer ${fmtUpper} (${modeDesc}${prfSuffix} · PBKDF2 ${iterations.toLocaleString()} iterasi)!`
+            : `Decrypted & restored ${payload.messages.length} emails from ${fmtUpper} container (${modeDesc}${prfSuffix} · PBKDF2 ${iterations.toLocaleString()} iterations)!`
         );
       } else if (lowerName.endsWith('.mbox')) {
         const text = new TextDecoder().decode(rawBytes);
@@ -994,17 +1338,25 @@ export function VaultBackupModal({
     }
   };
 
-  const pinModeSummary = !pinConfig.enabled
+  const securitySummary = !anyLockEnabled
     ? lang === 'id'
-      ? 'Kunci PIN: Nonaktif'
-      : 'PIN Lock: Off'
-    : pinConfig.mode === 'full_vault_autolock'
+      ? 'Keamanan Vault: Nonaktif'
+      : 'Vault Security: Off'
+    : hasPasskeys && pinConfig.enabled
       ? lang === 'id'
-        ? `PIN Penuh · Auto-Lock ${pinConfig.autoLockMinutes}m`
-        : `Full PIN · Auto-Lock ${pinConfig.autoLockMinutes}m`
-      : lang === 'id'
-        ? 'PIN Aksi Sensitif'
-        : 'Sensitive Action PIN';
+        ? `Passkey + PIN · ${effectiveLockMode === 'full_vault_autolock' ? `Auto-Lock ${effectiveAutoLockMinutes}m` : 'Aksi Sensitif'}`
+        : `Passkey + PIN · ${effectiveLockMode === 'full_vault_autolock' ? `Auto-Lock ${effectiveAutoLockMinutes}m` : 'Sensitive Gate'}`
+      : hasPasskeys
+        ? lang === 'id'
+          ? `Passkey (${passkeyConfig.credentials.length}) · ${effectiveLockMode === 'full_vault_autolock' ? `Auto-Lock ${effectiveAutoLockMinutes}m` : 'Aksi Sensitif'}`
+          : `Passkey (${passkeyConfig.credentials.length}) · ${effectiveLockMode === 'full_vault_autolock' ? `Auto-Lock ${effectiveAutoLockMinutes}m` : 'Sensitive Gate'}`
+        : effectiveLockMode === 'full_vault_autolock'
+          ? lang === 'id'
+            ? `PIN Penuh · Auto-Lock ${effectiveAutoLockMinutes}m`
+            : `Full PIN · Auto-Lock ${effectiveAutoLockMinutes}m`
+          : lang === 'id'
+            ? 'PIN Aksi Sensitif'
+            : 'Sensitive Action PIN';
 
   const remainingAttempts = Math.max(
     1,
@@ -1038,15 +1390,15 @@ export function VaultBackupModal({
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
               {lang === 'id'
-                ? 'Standar enkripsi lokal VZ Mail terintegrasi dengan CipherVault Pro & VZ Desk (.anf, .cvp, .enc) dengan proteksi Kunci PIN lokal opsional (PBKDF2-SHA256).'
-                : 'VZ Mail local backup powered by the CipherVault Pro & VZ Desk standard (.anf, .cvp, .enc) with opt-in local PIN protection (PBKDF2-SHA256).'}
+                ? 'Standar enkripsi lokal VZ Mail terintegrasi dengan CipherVault Pro & VZ Desk (.anf, .cvp, .enc) dengan proteksi opsional Biometrik / Passkey (WebAuthn + PRF) & Kunci PIN.'
+                : 'VZ Mail local backup powered by the CipherVault Pro & VZ Desk standard (.anf, .cvp, .enc) with opt-in Biometrics / Passkeys (WebAuthn + PRF) & PIN Lock.'}
             </p>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
             {!showFullLockScreen && !showFirstOpenSetup && (
               <>
-                {pinConfig.enabled &&
-                  pinConfig.mode === 'full_vault_autolock' &&
+                {anyLockEnabled &&
+                  effectiveLockMode === 'full_vault_autolock' &&
                   vaultUnlocked && (
                     <button
                       type="button"
@@ -1069,14 +1421,20 @@ export function VaultBackupModal({
                   type="button"
                   onClick={() => setPinSettingsOpen((v) => !v)}
                   className={`min-h-[36px] inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border transition-colors whitespace-nowrap cursor-pointer ${
-                    pinConfig.enabled
+                    anyLockEnabled
                       ? 'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-900/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/50'
                       : 'text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] border-slate-200 dark:border-[#2A303D] hover:bg-slate-200 dark:hover:bg-[#232A38]'
                   }`}
                 >
-                  <Settings2 className="w-3.5 h-3.5 shrink-0" />
-                  <span className="hidden sm:inline">{pinModeSummary}</span>
-                  <span className="sm:hidden">PIN</span>
+                  {hasPasskeys ? (
+                    <Fingerprint className="w-3.5 h-3.5 shrink-0" />
+                  ) : (
+                    <Settings2 className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  <span className="hidden sm:inline">{securitySummary}</span>
+                  <span className="sm:hidden">
+                    {hasPasskeys ? 'Passkey' : lang === 'id' ? 'Keamanan' : 'Security'}
+                  </span>
                 </button>
               </>
             )}
@@ -1105,73 +1463,132 @@ export function VaultBackupModal({
         )}
 
         {/* ================================================================ */}
-        {/* MODE 1: FULL-VAULT PIN LOCK SCREEN                               */}
+        {/* MODE 1: FULL-VAULT LOCK SCREEN (PASSKEY PRIMARY + PIN FALLBACK)  */}
         {/* ================================================================ */}
         {showFullLockScreen ? (
-          <form
-            onSubmit={handleUnlockFullVault}
-            className="p-5 sm:p-7 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] max-w-md mx-auto text-center space-y-4"
-          >
-            <div className="w-12 h-12 mx-auto rounded-xl bg-emerald-100 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800/70 flex items-center justify-center text-emerald-700 dark:text-emerald-300">
-              <Lock className="w-6 h-6" />
+          <div className="p-5 sm:p-7 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] max-w-md mx-auto text-center space-y-4">
+            <div className="w-12 h-12 mx-auto rounded-xl bg-blue-50 dark:bg-blue-950/60 border border-blue-200 dark:border-blue-800/70 flex items-center justify-center text-blue-700 dark:text-blue-300">
+              {hasPasskeys ? (
+                <Fingerprint className="w-6 h-6" />
+              ) : (
+                <Lock className="w-6 h-6 text-emerald-700 dark:text-emerald-300" />
+              )}
             </div>
             <div className="space-y-1">
               <h3 className="text-base font-bold text-slate-900 dark:text-white font-display">
                 {lang === 'id' ? 'VZ Vault Terkunci' : 'VZ Vault Locked'}
               </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                {lang === 'id'
-                  ? `Masukkan PIN 4–6 digit untuk membuka modul VZ Vault milik @${username}. Auto-lock aktif (${pinConfig.autoLockMinutes} menit).`
-                  : `Enter your 4–6 digit PIN to unlock VZ Vault for @${username}. Auto-lock is active (${pinConfig.autoLockMinutes}m).`}
+                {hasPasskeys && pinConfig.enabled
+                  ? lang === 'id'
+                    ? `Verifikasi dengan Biometrik / Passkey atau PIN cadangan untuk membuka VZ Vault milik @${username}. Auto-lock aktif (${effectiveAutoLockMinutes} menit).`
+                    : `Verify with Biometrics / Passkey or fallback PIN to unlock VZ Vault for @${username}. Auto-lock active (${effectiveAutoLockMinutes}m).`
+                  : hasPasskeys
+                    ? lang === 'id'
+                      ? `Gunakan Biometrik / Passkey terdaftar untuk membuka VZ Vault milik @${username}. Auto-lock aktif (${effectiveAutoLockMinutes} menit).`
+                      : `Use your enrolled Biometric / Passkey to unlock VZ Vault for @${username}. Auto-lock active (${effectiveAutoLockMinutes}m).`
+                    : lang === 'id'
+                      ? `Masukkan PIN 4–6 digit untuk membuka modul VZ Vault milik @${username}. Auto-lock aktif (${effectiveAutoLockMinutes} menit).`
+                      : `Enter your 4–6 digit PIN to unlock VZ Vault for @${username}. Auto-lock is active (${effectiveAutoLockMinutes}m).`}
               </p>
             </div>
 
             {unlockError && (
-              <div className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300 text-left">
+              <div className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300 text-left leading-relaxed">
                 {unlockError}
               </div>
             )}
 
-            <div className="space-y-2.5">
-              <input
-                type="password"
-                inputMode="numeric"
-                autoComplete="off"
-                autoFocus
-                maxLength={6}
-                value={unlockPinInput}
-                onChange={(e) =>
-                  setUnlockPinInput(e.target.value.replace(/\D+/g, '').slice(0, 6))
-                }
-                placeholder={
-                  lang === 'id' ? 'Masukkan PIN (4–6 digit)...' : 'Enter 4–6 digit PIN...'
-                }
-                className="w-full px-4 py-3 text-center text-base tracking-[0.4em] font-mono tabular-nums bg-white dark:bg-[#13161C] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
-              />
-              <button
-                type="submit"
-                disabled={busy || unlockPinInput.length < 4}
-                className="w-full min-h-[44px] inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded-lg transition-colors cursor-pointer"
-              >
-                <Unlock className="w-4 h-4" />
-                <span>
-                  {busy
-                    ? lang === 'id'
-                      ? 'Memverifikasi...'
-                      : 'Verifying...'
-                    : lang === 'id'
-                      ? 'Buka VZ Vault'
-                      : 'Unlock VZ Vault'}
-                </span>
-              </button>
-            </div>
+            {hasPasskeys && (
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  disabled={biometricBusy || busy}
+                  onClick={() => void handleUnlockFullVaultWithPasskey()}
+                  className="w-full min-h-[44px] inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg transition-colors cursor-pointer"
+                >
+                  {biometricBusy ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Fingerprint className="w-4 h-4" />
+                  )}
+                  <span>
+                    {biometricBusy
+                      ? lang === 'id'
+                        ? 'Menunggu verifikasi biometrik perangkat...'
+                        : 'Waiting for device biometric verification...'
+                      : lang === 'id'
+                        ? 'Buka dengan Biometrik / Passkey'
+                        : 'Unlock with Biometrics / Passkey'}
+                  </span>
+                </button>
+                <div className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                  WebAuthn User Verification · {passkeyConfig.credentials.length}{' '}
+                  {lang === 'id' ? 'Passkey aktif' : 'active Passkey(s)'}
+                  {hasPrfPasskey ? ' · PRF' : ''}
+                </div>
+              </div>
+            )}
 
-            <div className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
-              {lang === 'id'
-                ? `PBKDF2-SHA256 lokal · Sisa ${remainingAttempts} dari ${VAULT_PIN_LOCK_MAX_ATTEMPTS} percobaan sebelum auto-reset`
-                : `Local PBKDF2-SHA256 · ${remainingAttempts} of ${VAULT_PIN_LOCK_MAX_ATTEMPTS} attempts before auto-reset`}
-            </div>
-          </form>
+            {hasPasskeys && pinConfig.enabled && (
+              <div className="flex items-center gap-3 text-[11px] text-slate-400 dark:text-slate-500">
+                <div className="flex-1 h-px bg-slate-200 dark:bg-[#232732]" />
+                <span>
+                  {lang === 'id'
+                    ? 'atau gunakan PIN cadangan'
+                    : 'or use fallback PIN'}
+                </span>
+                <div className="flex-1 h-px bg-slate-200 dark:bg-[#232732]" />
+              </div>
+            )}
+
+            {pinConfig.enabled && (
+              <form onSubmit={handleUnlockFullVault} className="space-y-2.5">
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  autoFocus={!hasPasskeys}
+                  maxLength={6}
+                  value={unlockPinInput}
+                  onChange={(e) =>
+                    setUnlockPinInput(e.target.value.replace(/\D+/g, '').slice(0, 6))
+                  }
+                  placeholder={
+                    lang === 'id'
+                      ? 'Masukkan PIN (4–6 digit)...'
+                      : 'Enter 4–6 digit PIN...'
+                  }
+                  className="w-full px-4 py-3 text-center text-base tracking-[0.4em] font-mono tabular-nums bg-white dark:bg-[#13161C] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:border-emerald-500"
+                />
+                <button
+                  type="submit"
+                  disabled={busy || biometricBusy || unlockPinInput.length < 4}
+                  className={`w-full min-h-[44px] inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer disabled:opacity-50 ${
+                    hasPasskeys
+                      ? 'text-slate-800 dark:text-slate-100 bg-white dark:bg-[#171C26] border border-slate-300 dark:border-[#2D3545] hover:bg-slate-100 dark:hover:bg-[#1E2432]'
+                      : 'text-white bg-emerald-600 hover:bg-emerald-700'
+                  }`}
+                >
+                  <Unlock className="w-4 h-4" />
+                  <span>
+                    {busy
+                      ? lang === 'id'
+                        ? 'Memverifikasi...'
+                        : 'Verifying...'
+                      : lang === 'id'
+                        ? 'Buka dengan PIN'
+                        : 'Unlock with PIN'}
+                  </span>
+                </button>
+                <div className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                  {lang === 'id'
+                    ? `PBKDF2-SHA256 lokal · Sisa ${remainingAttempts} dari ${VAULT_PIN_LOCK_MAX_ATTEMPTS} percobaan sebelum auto-reset`
+                    : `Local PBKDF2-SHA256 · ${remainingAttempts} of ${VAULT_PIN_LOCK_MAX_ATTEMPTS} attempts before auto-reset`}
+                </div>
+              </form>
+            )}
+          </div>
         ) : showFirstOpenSetup ? (
           /* ================================================================ */
           /* MODE 3: OPT-IN FIRST-OPEN PIN SETUP PROMPT                       */
@@ -1187,16 +1604,61 @@ export function VaultBackupModal({
               <div className="space-y-1 min-w-0">
                 <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white font-display">
                   {lang === 'id'
-                    ? 'Lindungi VZ Vault dengan Kunci PIN Lokal (Opt-In)'
-                    : 'Protect VZ Vault with a Local PIN Lock (Opt-In)'}
+                    ? 'Lindungi VZ Vault dengan Biometrik / Passkey atau Kunci PIN (Opt-In)'
+                    : 'Protect VZ Vault with Biometrics / Passkeys or Local PIN Lock (Opt-In)'}
                 </h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
                   {lang === 'id'
-                    ? 'Cegah akses tidak sah saat perangkat Anda dipakai orang lain. PIN tidak pernah disimpan dalam teks biasa — hanya verifier PBKDF2-SHA256 150.000 iterasi dengan auto-reset setelah 5x salah.'
-                    : 'Prevent unauthorized local access on shared devices. Your PIN is never stored in plaintext — only a 150,000-iteration PBKDF2-SHA256 verifier with 5-attempt auto-wipe.'}
+                    ? 'Aktifkan Face ID / Touch ID / Windows Hello / Passkey (WebAuthn + PRF ala CipherVault Pro) secara langsung atau buat PIN 4–6 digit lokal dengan auto-reset 5x salah.'
+                    : 'Enable Face ID / Touch ID / Windows Hello / Passkeys (CipherVault Pro WebAuthn + PRF) standalone or create a 4–6 digit local PIN with 5-attempt auto-wipe.'}
                 </p>
               </div>
             </div>
+
+            {/* Quick 1-Tap Biometric / Passkey Enrollment Option */}
+            {webAuthnCaps?.supported && (
+              <div className="p-3.5 rounded-lg bg-white dark:bg-[#13161C] border border-blue-200 dark:border-blue-900/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-0.5 min-w-0">
+                  <div className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                    <Fingerprint className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                    <span>
+                      {lang === 'id'
+                        ? 'Aktifkan Biometrik / Passkey Langsung (Tanpa Perlu PIN)'
+                        : 'Enable Biometrics / Passkey Directly (No PIN Required)'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    {lang === 'id'
+                      ? 'Mendukung Face ID, Touch ID, Biometrik Android, Windows Hello, serta derivasi kunci hardware WebAuthn PRF.'
+                      : 'Supports Face ID, Touch ID, Android Biometrics, Windows Hello, and WebAuthn PRF hardware key derivation.'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={biometricBusy || busy}
+                  onClick={() =>
+                    void handleRegisterPasskey({
+                      label: suggestDefaultPasskeyLabel('platform', lang),
+                      authenticatorType: webAuthnCaps.platformAuthenticatorAvailable
+                        ? 'platform'
+                        : 'cross-platform',
+                    })
+                  }
+                  className="min-h-[44px] inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  {biometricBusy ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Fingerprint className="w-4 h-4" />
+                  )}
+                  <span>
+                    {lang === 'id'
+                      ? 'Daftarkan Biometrik / Passkey'
+                      : 'Enroll Biometric / Passkey'}
+                  </span>
+                </button>
+              </div>
+            )}
 
             {/* Mode Picker (Mode 1 vs Mode 2) */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -1365,26 +1827,31 @@ export function VaultBackupModal({
         ) : (
           <>
             {/* ============================================================== */}
-            {/* MODE 2: INLINE SENSITIVE ACTION PIN VERIFICATION GATE          */}
+            {/* MODE 2: INLINE SENSITIVE ACTION VERIFICATION GATE              */}
             {/* ============================================================== */}
             {pendingSensitive && (
-              <form
-                onSubmit={handleConfirmSensitivePin}
-                className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800/80 space-y-3"
-              >
+              <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800/80 space-y-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-start gap-2.5 min-w-0">
                     <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
                     <div className="space-y-0.5 min-w-0">
                       <div className="text-xs font-bold text-amber-950 dark:text-amber-100">
                         {lang === 'id'
-                          ? `Verifikasi PIN diperlukan: ${pendingSensitive.labelId}`
-                          : `PIN verification required: ${pendingSensitive.labelEn}`}
+                          ? `Verifikasi Keamanan diperlukan: ${pendingSensitive.labelId}`
+                          : `Security verification required: ${pendingSensitive.labelEn}`}
                       </div>
                       <p className="text-[11px] text-amber-800 dark:text-amber-200/90">
-                        {lang === 'id'
-                          ? `Masukkan PIN VZ Vault 4–6 digit Anda untuk melanjutkan (sisa ${remainingAttempts} percobaan).`
-                          : `Enter your 4–6 digit VZ Vault PIN to proceed (${remainingAttempts} attempts remaining).`}
+                        {hasPasskeys && pinConfig.enabled
+                          ? lang === 'id'
+                            ? `Konfirmasi dengan Biometrik / Passkey atau masukkan PIN cadangan (sisa ${remainingAttempts} percobaan).`
+                            : `Confirm with Biometrics / Passkey or enter fallback PIN (${remainingAttempts} attempts remaining).`
+                          : hasPasskeys
+                            ? lang === 'id'
+                              ? 'Verifikasi dengan Biometrik / Passkey Anda untuk melanjutkan aksi sensitif ini.'
+                              : 'Verify with your enrolled Biometric / Passkey to continue this sensitive action.'
+                            : lang === 'id'
+                              ? `Masukkan PIN VZ Vault 4–6 digit Anda untuk melanjutkan (sisa ${remainingAttempts} percobaan).`
+                              : `Enter your 4–6 digit VZ Vault PIN to proceed (${remainingAttempts} attempts remaining).`}
                       </p>
                     </div>
                   </div>
@@ -1407,54 +1874,79 @@ export function VaultBackupModal({
                   </div>
                 )}
 
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                  <input
-                    type="password"
-                    inputMode="numeric"
-                    autoComplete="off"
-                    autoFocus
-                    maxLength={6}
-                    value={sensitivePinInput}
-                    onChange={(e) =>
-                      setSensitivePinInput(
-                        e.target.value.replace(/\D+/g, '').slice(0, 6)
-                      )
-                    }
-                    placeholder={
-                      lang === 'id'
-                        ? 'PIN VZ Vault (4–6 digit)...'
-                        : 'VZ Vault PIN (4–6 digits)...'
-                    }
-                    className="sm:w-52 px-3 py-2 text-xs font-mono tabular-nums bg-white dark:bg-[#13161C] border border-amber-300 dark:border-amber-700 rounded-lg text-slate-900 dark:text-white"
-                  />
-                  <button
-                    type="submit"
-                    disabled={busy || sensitivePinInput.length < 4}
-                    className="min-h-[38px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 rounded-lg cursor-pointer whitespace-nowrap"
-                  >
-                    <Unlock className="w-3.5 h-3.5" />
-                    <span>
-                      {lang === 'id'
-                        ? 'Verifikasi & Lanjutkan'
-                        : 'Verify & Continue'}
-                    </span>
-                  </button>
+                <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2">
+                  {hasPasskeys && (
+                    <button
+                      type="button"
+                      disabled={biometricBusy || busy}
+                      onClick={() => void handleConfirmSensitiveWithPasskey()}
+                      className="min-h-[40px] inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg cursor-pointer whitespace-nowrap"
+                    >
+                      {biometricBusy ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Fingerprint className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {lang === 'id'
+                          ? 'Verifikasi Biometrik / Passkey'
+                          : 'Verify Biometric / Passkey'}
+                      </span>
+                    </button>
+                  )}
+
+                  {pinConfig.enabled && (
+                    <form
+                      onSubmit={handleConfirmSensitivePin}
+                      className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
+                    >
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        autoComplete="off"
+                        autoFocus={!hasPasskeys}
+                        maxLength={6}
+                        value={sensitivePinInput}
+                        onChange={(e) =>
+                          setSensitivePinInput(
+                            e.target.value.replace(/\D+/g, '').slice(0, 6)
+                          )
+                        }
+                        placeholder={
+                          lang === 'id'
+                            ? 'PIN VZ Vault (4–6 digit)...'
+                            : 'VZ Vault PIN (4–6 digits)...'
+                        }
+                        className="sm:w-48 px-3 py-2 text-xs font-mono tabular-nums bg-white dark:bg-[#13161C] border border-amber-300 dark:border-amber-700 rounded-lg text-slate-900 dark:text-white"
+                      />
+                      <button
+                        type="submit"
+                        disabled={busy || biometricBusy || sensitivePinInput.length < 4}
+                        className="min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 rounded-lg cursor-pointer whitespace-nowrap"
+                      >
+                        <Unlock className="w-3.5 h-3.5" />
+                        <span>
+                          {lang === 'id' ? 'Verifikasi PIN' : 'Verify PIN'}
+                        </span>
+                      </button>
+                    </form>
+                  )}
                 </div>
-              </form>
+              </div>
             )}
 
             {/* ============================================================== */}
-            {/* COLLAPSIBLE VZ VAULT PIN LOCK SETTINGS PANEL                   */}
+            {/* COLLAPSIBLE UNIFIED VAULT SECURITY PANEL (PASSKEYS + PIN)      */}
             {/* ============================================================== */}
             {pinSettingsOpen && (
-              <div className="p-4 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-4">
-                <div className="flex items-center justify-between gap-2">
+              <div className="p-4 rounded-xl bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] space-y-5">
+                <div className="flex items-center justify-between gap-2 border-b border-slate-200 dark:border-[#232732] pb-3">
                   <div className="text-xs font-bold text-slate-900 dark:text-white font-display flex items-center gap-1.5">
                     <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                     <span>
                       {lang === 'id'
-                        ? 'Pengaturan Kunci PIN VZ Vault (3 Opsi Opt-In)'
-                        : 'VZ Vault PIN Lock Settings (3 Opt-In Options)'}
+                        ? 'Keamanan VZ Vault — Biometrik / Passkey & Kunci PIN'
+                        : 'VZ Vault Security — Biometrics / Passkeys & PIN Lock'}
                     </span>
                   </div>
                   <button
@@ -1465,6 +1957,118 @@ export function VaultBackupModal({
                     {lang === 'id' ? 'Tutup' : 'Close'}
                   </button>
                 </div>
+
+                {/* 1. WebAuthn Biometrics & Passkeys Management */}
+                <VaultPasskeySettingsSection
+                  lang={lang}
+                  capabilities={webAuthnCaps}
+                  passkeyConfig={passkeyConfig}
+                  busy={busy || biometricBusy}
+                  onRegisterPasskey={handleRegisterPasskey}
+                  onTestPasskey={handleTestPasskey}
+                  onRenamePasskey={handleRenamePasskey}
+                  onRemovePasskey={handleRemovePasskey}
+                />
+
+                {/* 2. Unified Lock Behavior Controls (applies to Passkey and/or PIN) */}
+                {anyLockEnabled && (
+                  <div className="pt-4 border-t border-slate-200 dark:border-[#232732] space-y-3">
+                    <div className="text-xs font-bold text-slate-900 dark:text-white font-display">
+                      {lang === 'id'
+                        ? 'Kebijakan Kunci Aktif (Berlaku untuk Passkey & PIN)'
+                        : 'Active Lock Policy (Applies to Passkeys & PIN)'}
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleUpdatePinSettings({ mode: 'full_vault_autolock' })
+                        }
+                        className={`min-h-[40px] p-2.5 rounded-lg border text-left text-xs cursor-pointer ${
+                          effectiveLockMode === 'full_vault_autolock'
+                            ? 'bg-white dark:bg-[#161B24] border-emerald-600 text-slate-900 dark:text-white font-semibold'
+                            : 'bg-white/60 dark:bg-[#13161C] border-slate-200 dark:border-[#232732] text-slate-600 dark:text-slate-400'
+                        }`}
+                      >
+                        {lang === 'id'
+                          ? '1. Layar Kunci Penuh + Auto-Lock'
+                          : '1. Full Lock Screen + Auto-Lock'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleUpdatePinSettings({ mode: 'sensitive_actions' })
+                        }
+                        className={`min-h-[40px] p-2.5 rounded-lg border text-left text-xs cursor-pointer ${
+                          effectiveLockMode === 'sensitive_actions'
+                            ? 'bg-white dark:bg-[#161B24] border-emerald-600 text-slate-900 dark:text-white font-semibold'
+                            : 'bg-white/60 dark:bg-[#13161C] border-slate-200 dark:border-[#232732] text-slate-600 dark:text-slate-400'
+                        }`}
+                      >
+                        {lang === 'id'
+                          ? '2. Verifikasi Khusus Aksi Sensitif'
+                          : '2. Sensitive Actions Gate'}
+                      </button>
+                    </div>
+
+                    {effectiveLockMode === 'full_vault_autolock' && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732]">
+                        <div className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+                          <Clock className="w-3.5 h-3.5 text-slate-400" />
+                          <span>Auto-Lock:</span>
+                          {([1, 5, 15] as const).map((m) => (
+                            <button
+                              key={m}
+                              type="button"
+                              onClick={() =>
+                                handleUpdatePinSettings({ autoLockMinutes: m })
+                              }
+                              className={`px-2 py-0.5 text-[11px] font-mono tabular-nums rounded border cursor-pointer ${
+                                effectiveAutoLockMinutes === m
+                                  ? 'bg-emerald-600 text-white border-emerald-600'
+                                  : 'bg-slate-50 dark:bg-[#0B0D11] text-slate-600 dark:text-slate-300 border-slate-200 dark:border-[#2A303D]'
+                              }`}
+                            >
+                              {m}m
+                            </button>
+                          ))}
+                        </div>
+                        <label className="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={effectiveLockOnTabHidden}
+                            onChange={(e) =>
+                              handleUpdatePinSettings({
+                                lockOnTabHidden: e.target.checked,
+                              })
+                            }
+                            className="rounded border-slate-300"
+                          />
+                          <span>
+                            {lang === 'id'
+                              ? 'Kunci saat pindah tab'
+                              : 'Lock on tab switch'}
+                          </span>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 3. Local PIN Lock Section (Fallback or Standalone) */}
+                <div className="pt-4 border-t border-slate-200 dark:border-[#232732] space-y-3">
+                  <div className="text-xs font-bold text-slate-900 dark:text-white font-display flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                    <span>
+                      {hasPasskeys
+                        ? lang === 'id'
+                          ? 'Kunci PIN Lokal (Opsional sebagai Cadangan Passkey)'
+                          : 'Local PIN Lock (Optional Fallback for Passkeys)'
+                        : lang === 'id'
+                          ? 'Kunci PIN Lokal (PBKDF2-SHA256)'
+                          : 'Local PIN Lock (PBKDF2-SHA256)'}
+                    </span>
+                  </div>
 
                 {!pinConfig.enabled ? (
                   <form onSubmit={handleCreateVaultPin} className="space-y-3">
@@ -1559,82 +2163,6 @@ export function VaultBackupModal({
                   </form>
                 ) : (
                   <div className="space-y-3">
-                    {/* Active Mode Switcher */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleUpdatePinSettings({ mode: 'full_vault_autolock' })
-                        }
-                        className={`p-2.5 rounded-lg border text-left text-xs cursor-pointer ${
-                          pinConfig.mode === 'full_vault_autolock'
-                            ? 'bg-white dark:bg-[#161B24] border-emerald-600 text-slate-900 dark:text-white font-semibold'
-                            : 'bg-white/60 dark:bg-[#13161C] border-slate-200 dark:border-[#232732] text-slate-600 dark:text-slate-400'
-                        }`}
-                      >
-                        {lang === 'id'
-                          ? '1. Layar Kunci Penuh + Auto-Lock'
-                          : '1. Full Lock Screen + Auto-Lock'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleUpdatePinSettings({ mode: 'sensitive_actions' })
-                        }
-                        className={`p-2.5 rounded-lg border text-left text-xs cursor-pointer ${
-                          pinConfig.mode === 'sensitive_actions'
-                            ? 'bg-white dark:bg-[#161B24] border-emerald-600 text-slate-900 dark:text-white font-semibold'
-                            : 'bg-white/60 dark:bg-[#13161C] border-slate-200 dark:border-[#232732] text-slate-600 dark:text-slate-400'
-                        }`}
-                      >
-                        {lang === 'id'
-                          ? '2. PIN Khusus Aksi Sensitif'
-                          : '2. Sensitive Actions PIN Gate'}
-                      </button>
-                    </div>
-
-                    {pinConfig.mode === 'full_vault_autolock' && (
-                      <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732]">
-                        <div className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
-                          <Clock className="w-3.5 h-3.5 text-slate-400" />
-                          <span>Auto-Lock:</span>
-                          {([1, 5, 15] as const).map((m) => (
-                            <button
-                              key={m}
-                              type="button"
-                              onClick={() =>
-                                handleUpdatePinSettings({ autoLockMinutes: m })
-                              }
-                              className={`px-2 py-0.5 text-[11px] font-mono rounded border cursor-pointer ${
-                                pinConfig.autoLockMinutes === m
-                                  ? 'bg-emerald-600 text-white border-emerald-600'
-                                  : 'bg-slate-50 dark:bg-[#0B0D11] text-slate-600 dark:text-slate-300 border-slate-200 dark:border-[#2A303D]'
-                              }`}
-                            >
-                              {m}m
-                            </button>
-                          ))}
-                        </div>
-                        <label className="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={pinConfig.lockOnTabHidden}
-                            onChange={(e) =>
-                              handleUpdatePinSettings({
-                                lockOnTabHidden: e.target.checked,
-                              })
-                            }
-                            className="rounded border-slate-300"
-                          />
-                          <span>
-                            {lang === 'id'
-                              ? 'Kunci saat pindah tab'
-                              : 'Lock on tab switch'}
-                          </span>
-                        </label>
-                      </div>
-                    )}
-
                     <label className="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
                       <input
                         type="checkbox"
@@ -1648,8 +2176,8 @@ export function VaultBackupModal({
                       />
                       <span>
                         {lang === 'id'
-                          ? '3. Wajib buat PIN baru jika kunci PIN pernah direset/dihapus'
-                          : '3. Require new PIN prompt if PIN lock is ever reset'}
+                          ? '3. Wajib tampilkan panduan keamanan jika kunci PIN/Passkey pernah direset'
+                          : '3. Require setup prompt if PIN/Passkey lock is ever reset'}
                       </span>
                     </label>
 
@@ -1732,6 +2260,7 @@ export function VaultBackupModal({
                     </form>
                   </div>
                 )}
+                </div>
               </div>
             )}
 
@@ -1983,48 +2512,202 @@ export function VaultBackupModal({
                     )}
                   </div>
                 </div>
+
+                {/* Biometric PRF Phrase Locker Row (CipherVault Pro Standard) */}
+                <div className="pt-2.5 border-t border-slate-100 dark:border-[#1E232D] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="text-[11px] text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
+                    <Fingerprint className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                    <span className="font-semibold text-slate-800 dark:text-slate-100">
+                      {lang === 'id'
+                        ? 'Brankas Frasa Biometrik (WebAuthn PRF)'
+                        : 'Biometric Phrase Locker (WebAuthn PRF)'}
+                    </span>
+                    {biometricLockerMeta && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="text-emerald-700 dark:text-emerald-400">
+                          {lang === 'id'
+                            ? `Terkunci oleh ${biometricLockerMeta.credentialLabel}`
+                            : `Sealed by ${biometricLockerMeta.credentialLabel}`}
+                        </span>
+                      </>
+                    )}
+                  </div>
+
+                  {hasPrfPasskey ? (
+                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        disabled={busy || biometricBusy}
+                        onClick={handleSealBiometricPhrase}
+                        className="min-h-[34px] inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 rounded-lg cursor-pointer whitespace-nowrap shrink-0"
+                      >
+                        <Fingerprint className="w-3 h-3" />
+                        <span>
+                          {lang === 'id'
+                            ? 'Kunci via Biometrik (PRF)'
+                            : 'Seal with Biometrics (PRF)'}
+                        </span>
+                      </button>
+                      {biometricLockerMeta && (
+                        <>
+                          <button
+                            type="button"
+                            disabled={busy || biometricBusy}
+                            onClick={() => void handleUnsealBiometricPhrase()}
+                            className="min-h-[34px] inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg cursor-pointer whitespace-nowrap shrink-0"
+                          >
+                            {biometricBusy ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Unlock className="w-3 h-3" />
+                            )}
+                            <span>
+                              {lang === 'id'
+                                ? 'Isi Frasa via Biometrik'
+                                : 'Autofill via Biometrics'}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy || biometricBusy}
+                            onClick={handleClearBiometricPhrase}
+                            title={
+                              lang === 'id'
+                                ? 'Hapus brankas frasa biometrik'
+                                : 'Clear biometric phrase locker'
+                            }
+                            className="inline-flex items-center justify-center p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 rounded-lg cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  ) : hasPasskeys ? (
+                    <span className="text-[11px] text-amber-700 dark:text-amber-400">
+                      {lang === 'id'
+                        ? 'Passkey aktif mode Non-PRF (buka Vault aktif; kunci frasa PRF butuh browser/key PRF).'
+                        : 'Enrolled Passkey is Non-PRF (Vault unlock active; PRF phrase sealing needs a PRF-capable browser/key).'}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setPinSettingsOpen(true)}
+                      className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer whitespace-nowrap shrink-0 text-left"
+                    >
+                      {lang === 'id'
+                        ? 'Aktifkan Biometrik / Passkey di Pengaturan Keamanan →'
+                        : 'Enable Biometrics / Passkeys in Security Settings →'}
+                    </button>
+                  )}
+                </div>
               </div>
 
+              {/* Export Encryption Key Mode Switch (Passphrase vs Direct Passkey PRF) */}
+              {hasPrfPasskey && (
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 rounded-lg bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732]">
+                  <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">
+                    {lang === 'id'
+                      ? 'Sumber Kunci Enkripsi Ekspor:'
+                      : 'Export Encryption Key Source:'}
+                  </span>
+                  <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#0B0D11] rounded-lg border border-slate-200/80 dark:border-[#232732]">
+                    <button
+                      type="button"
+                      onClick={() => setExportKeyMode('passphrase')}
+                      className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        exportKeyMode === 'passphrase'
+                          ? 'bg-white dark:bg-[#191E28] text-slate-900 dark:text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      {lang === 'id' ? 'Frasa Sandi / 12-Kata' : 'Passphrase / 12-Word'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExportKeyMode('passkey_prf')}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        exportKeyMode === 'passkey_prf'
+                          ? 'bg-blue-600 text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      <Fingerprint className="w-3 h-3" />
+                      <span>
+                        {lang === 'id' ? 'Kunci Passkey (PRF)' : 'Passkey Key (PRF)'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Passphrase Input & Submit */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 items-center">
-                <div className="relative sm:col-span-2">
-                  <input
-                    type={showPassphrase ? 'text' : 'password'}
-                    value={passphrase}
-                    onChange={(e) => setPassphrase(e.target.value)}
-                    placeholder={
-                      lang === 'id'
-                        ? `Kata sandi kustom atau frasa 12-kata (${activeFormatInfo.ext})...`
-                        : `Custom passphrase or 12-word phrase (${activeFormatInfo.ext})...`
-                    }
-                    className="w-full pl-3 pr-9 py-2 text-xs bg-white dark:bg-[#13161C] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white font-mono"
-                  />
+              {exportKeyMode === 'passkey_prf' && hasPrfPasskey ? (
+                <div className="p-3 rounded-lg bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="text-[11px] text-blue-900 dark:text-blue-200 leading-relaxed min-w-0">
+                    {lang === 'id'
+                      ? 'Enkripsi langsung memakai kunci 256-bit dari hardware Passkey (WebAuthn PRF) tanpa mengetik sandi. Pastikan tetap menyimpan satu salinan backup berbasis Frasa 12-Kata untuk pemulihan darurat jika perangkat hilang.'
+                      : 'Encrypts directly with a 256-bit key derived from your hardware Passkey (WebAuthn PRF) with zero typing. Keep an additional 12-Word Phrase backup for disaster recovery if this authenticator is lost.'}
+                  </div>
                   <button
-                    type="button"
-                    onClick={() => setShowPassphrase((v) => !v)}
-                    aria-label="Toggle passphrase visibility"
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                    type="submit"
+                    disabled={busy || biometricBusy}
+                    className="min-h-[42px] inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg cursor-pointer whitespace-nowrap shrink-0"
                   >
-                    {showPassphrase ? (
-                      <EyeOff className="w-3.5 h-3.5" />
+                    {biometricBusy ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
                     ) : (
-                      <Eye className="w-3.5 h-3.5" />
+                      <Fingerprint className="w-3.5 h-3.5" />
                     )}
+                    <span>
+                      {lang === 'id'
+                        ? `Ekspor via Passkey (${activeFormatInfo.ext})`
+                        : `Export via Passkey (${activeFormatInfo.ext})`}
+                    </span>
                   </button>
                 </div>
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="w-full min-h-[38px] inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  <KeyRound className="w-3.5 h-3.5" />
-                  <span>
-                    {lang === 'id'
-                      ? `Ekspor Vault (${activeFormatInfo.ext})`
-                      : `Export Vault (${activeFormatInfo.ext})`}
-                  </span>
-                </button>
-              </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 items-center">
+                  <div className="relative sm:col-span-2">
+                    <input
+                      type={showPassphrase ? 'text' : 'password'}
+                      value={passphrase}
+                      onChange={(e) => setPassphrase(e.target.value)}
+                      placeholder={
+                        lang === 'id'
+                          ? `Kata sandi kustom atau frasa 12-kata (${activeFormatInfo.ext})...`
+                          : `Custom passphrase or 12-word phrase (${activeFormatInfo.ext})...`
+                      }
+                      className="w-full pl-3 pr-9 py-2 text-xs bg-white dark:bg-[#13161C] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassphrase((v) => !v)}
+                      aria-label="Toggle passphrase visibility"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                    >
+                      {showPassphrase ? (
+                        <EyeOff className="w-3.5 h-3.5" />
+                      ) : (
+                        <Eye className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={busy || biometricBusy}
+                    className="w-full min-h-[38px] inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <KeyRound className="w-3.5 h-3.5" />
+                    <span>
+                      {lang === 'id'
+                        ? `Ekspor Vault (${activeFormatInfo.ext})`
+                        : `Export Vault (${activeFormatInfo.ext})`}
+                    </span>
+                  </button>
+                </div>
+              )}
             </form>
 
             {/* Section 02 & 03 Grid: Standard Email Exports (.mbox / .eml) + Auto-Detect Restore */}
@@ -2081,31 +2764,84 @@ export function VaultBackupModal({
                     : 'Automatically detects .anf (VZ Mail & VZ Desk), .cvp (CipherVault Pro v3), and .enc (MyVault) archives in both Standard JSON and Polyglot Stealth modes.'}
                 </p>
                 <div className="space-y-2">
-                  <div className="relative">
-                    <input
-                      type={showImportPassphrase ? 'text' : 'password'}
-                      value={importPassphrase}
-                      onChange={(e) => setImportPassphrase(e.target.value)}
-                      placeholder={
-                        lang === 'id'
-                          ? 'Kata sandi atau frasa 12-kata dekripsi (.anf / .cvp / .enc)...'
-                          : 'Decryption passphrase or 12-word phrase (.anf / .cvp / .enc)...'
-                      }
-                      className="w-full pl-3 pr-9 py-2 text-xs bg-white dark:bg-[#13161C] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white font-mono"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowImportPassphrase((v) => !v)}
-                      aria-label="Toggle import passphrase visibility"
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
-                    >
-                      {showImportPassphrase ? (
-                        <EyeOff className="w-3.5 h-3.5" />
-                      ) : (
-                        <Eye className="w-3.5 h-3.5" />
+                  {hasPrfPasskey && (
+                    <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#13161C] rounded-lg border border-slate-200/80 dark:border-[#232732]">
+                      <button
+                        type="button"
+                        onClick={() => setImportKeyMode('passphrase')}
+                        className={`flex-1 px-2 py-1 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                          importKeyMode === 'passphrase'
+                            ? 'bg-white dark:bg-[#191E28] text-slate-900 dark:text-white shadow-xs'
+                            : 'text-slate-600 dark:text-slate-400'
+                        }`}
+                      >
+                        {lang === 'id' ? 'Frasa / Sandi' : 'Passphrase'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setImportKeyMode('passkey_prf')}
+                        className={`flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                          importKeyMode === 'passkey_prf'
+                            ? 'bg-blue-600 text-white shadow-xs'
+                            : 'text-slate-600 dark:text-slate-400'
+                        }`}
+                      >
+                        <Fingerprint className="w-3 h-3" />
+                        <span>Passkey (PRF)</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {importKeyMode === 'passkey_prf' && hasPrfPasskey ? (
+                    <div className="p-2.5 rounded-lg bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/60 text-[11px] text-blue-900 dark:text-blue-200 leading-relaxed">
+                      {lang === 'id'
+                        ? 'Mode Passkey (PRF) aktif: setelah memilih berkas .anf / .cvp / .enc, pindai Biometrik / Passkey Anda untuk mendekripsi secara otomatis.'
+                        : 'Passkey (PRF) mode active: after picking your .anf / .cvp / .enc file, scan your Biometric / Passkey to decrypt automatically.'}
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <div className="relative">
+                        <input
+                          type={showImportPassphrase ? 'text' : 'password'}
+                          value={importPassphrase}
+                          onChange={(e) => setImportPassphrase(e.target.value)}
+                          placeholder={
+                            lang === 'id'
+                              ? 'Kata sandi atau frasa 12-kata dekripsi (.anf / .cvp / .enc)...'
+                              : 'Decryption passphrase or 12-word phrase (.anf / .cvp / .enc)...'
+                          }
+                          className="w-full pl-3 pr-9 py-2 text-xs bg-white dark:bg-[#13161C] border border-slate-300 dark:border-[#2A303D] rounded-lg text-slate-900 dark:text-white font-mono"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowImportPassphrase((v) => !v)}
+                          aria-label="Toggle import passphrase visibility"
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                        >
+                          {showImportPassphrase ? (
+                            <EyeOff className="w-3.5 h-3.5" />
+                          ) : (
+                            <Eye className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
+                      {biometricLockerMeta && hasPrfPasskey && (
+                        <button
+                          type="button"
+                          disabled={busy || biometricBusy}
+                          onClick={() => void handleUnsealBiometricPhrase()}
+                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                        >
+                          <Fingerprint className="w-3 h-3" />
+                          <span>
+                            {lang === 'id'
+                              ? `Isi frasa dekripsi dari Biometrik (${biometricLockerMeta.credentialLabel})`
+                              : `Autofill decryption phrase via Biometrics (${biometricLockerMeta.credentialLabel})`}
+                          </span>
+                        </button>
                       )}
-                    </button>
-                  </div>
+                    </div>
+                  )}
                   <input
                     ref={importFileInputRef}
                     type="file"
@@ -2115,15 +2851,23 @@ export function VaultBackupModal({
                   />
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || biometricBusy}
                     onClick={handleTriggerImportFilePicker}
                     className="w-full min-h-[38px] inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 bg-white dark:bg-[#191E28] border border-slate-300 dark:border-[#2E3646] hover:border-blue-500 rounded-lg cursor-pointer"
                   >
-                    <Upload className="w-3.5 h-3.5" />
+                    {importKeyMode === 'passkey_prf' && hasPrfPasskey ? (
+                      <Fingerprint className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                    ) : (
+                      <Upload className="w-3.5 h-3.5" />
+                    )}
                     <span>
-                      {lang === 'id'
-                        ? 'Pilih Berkas (.anf / .cvp / .enc / .mbox / .eml)'
-                        : 'Choose File (.anf / .cvp / .enc / .mbox / .eml)'}
+                      {importKeyMode === 'passkey_prf' && hasPrfPasskey
+                        ? lang === 'id'
+                          ? 'Pilih Berkas & Dekripsi via Passkey'
+                          : 'Choose File & Decrypt via Passkey'
+                        : lang === 'id'
+                          ? 'Pilih Berkas (.anf / .cvp / .enc / .mbox / .eml)'
+                          : 'Choose File (.anf / .cvp / .enc / .mbox / .eml)'}
                     </span>
                   </button>
                 </div>

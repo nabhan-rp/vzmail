@@ -6,6 +6,18 @@ Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.
 
 ---
 
+## VZ Mail & VZ Links — `v1.1.4` (2026-11-27)
+
+**Domain:** `mail.vz.gay` · `links.vz.gay` · `*.imy.li`  
+**Rilis:** Biometrik & Passkey VZ Vault (Standar CipherVault Pro · WebAuthn + PRF)
+
+### Added & Security
+- **Biometrik & Passkey Multi-Perangkat pada VZ Vault (100% Client-Side):** Menambahkan pendaftaran, pengujian, pengubahan nama, dan pencabutan hingga 8 Passkey (Face ID, Touch ID, Biometrik Android, Windows Hello, serta Security Key FIDO2/YubiKey lintas perangkat) dengan validasi ketat `clientDataJSON` (`type`, `challenge`, `origin`) dan `authenticatorData` (`rpIdHash` SHA-256 + flag `UP` & `UV`).
+- **Buka Vault & Gerbang Aksi Sensitif Terpadu (Mandiri atau + Cadangan PIN):** Biometrik/Passkey dapat diaktifkan secara mandiri tanpa wajib membuat PIN, atau berdampingan dengan Kunci PIN 4–6 digit sebagai cadangan pada Layar Kunci Penuh + Auto-Lock (1/5/15 menit & pindah tab) maupun Gerbang Aksi Sensitif.
+- **Brankas Frasa Biometrik & Mode Kunci Backup Langsung WebAuthn PRF:** Pada browser/authenticator yang mendukung ekstensi WebAuthn PRF, pengguna dapat mengunci frasa 12-kata / kata sandi secara lokal dengan `HKDF-SHA256` → `AES-256-GCM` untuk isi otomatis 1-ketuk, serta mengenkripsi/mendekripsi berkas `.anf` / `.cvp` / `.enc` langsung memakai kunci derivasi Passkey PRF—dengan fallback mulus untuk perangkat Non-PRF.
+
+---
+
 ## VZ Mail & VZ Links — `v1.1.3` (2026-11-27)
 
 **Domain:** `mail.vz.gay` · `links.vz.gay` · `*.imy.li`  

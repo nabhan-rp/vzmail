@@ -24,7 +24,7 @@ export interface ChangelogServiceRelease {
   highlights: ChangelogItem[];
 }
 
-export const CHANGELOG_VERSION = 'v1.1.3';
+export const CHANGELOG_VERSION = 'v1.1.4';
 export const CHANGELOG_RELEASE_DATE = '2026-11-27';
 
 export const CHANGELOG_CATEGORY_LABELS: Record<ChangelogCategoryId, BilingualText> = {
@@ -47,6 +47,59 @@ export const CHANGELOG_CATEGORY_LABELS: Record<ChangelogCategoryId, BilingualTex
 };
 
 export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
+  {
+    serviceId: 'vz-mail',
+    serviceName: 'VZ Mail & VZ Links',
+    domains: ['mail.vz.gay', 'links.vz.gay', '*.imy.li'],
+    version: '1.1.4',
+    releaseDate: '2026-11-27',
+    codename: {
+      id: 'Biometrik & Passkey VZ Vault (Standar CipherVault Pro · WebAuthn + PRF)',
+      en: 'VZ Vault Biometrics & Passkeys (CipherVault Pro Standard · WebAuthn + PRF)',
+    },
+    summary: {
+      id: 'Menambahkan dukungan opt-in Biometrik & Passkey (Face ID, Touch ID, Biometrik Android, Windows Hello, dan Security Key YubiKey) pada VZ Vault dengan verifikasi WebAuthn ketat, Brankas Frasa Biometrik berbasis ekstensi WebAuthn PRF (HKDF-SHA256 + AES-256-GCM), serta mode enkripsi/dekripsi langsung via Passkey PRF.',
+      en: 'Adds opt-in Biometrics & Passkeys (Face ID, Touch ID, Android Biometrics, Windows Hello, and YubiKey security keys) to VZ Vault with strict WebAuthn assertion verification, a WebAuthn PRF Biometric Phrase Locker (HKDF-SHA256 + AES-256-GCM), and direct Passkey PRF backup encryption/decryption.',
+    },
+    highlights: [
+      {
+        id: 'vault-passkey-multi-enroll-v114',
+        category: 'privacy_security',
+        title: {
+          id: 'Pendaftaran Multi-Passkey & Biometrik Perangkat (100% Client-Side)',
+          en: 'Multi-Passkey & Platform Biometric Enrollment (100% Client-Side)',
+        },
+        description: {
+          id: 'Pengguna dapat mendaftarkan hingga 8 Passkey (Biometrik Perangkat Ini maupun Security Key lintas perangkat), menamai ulang, menguji verifikasi langsung, dan mencabut kredensial tanpa menyimpan kunci privat di server.',
+          en: 'Users can enroll up to 8 Passkeys (platform biometrics or cross-platform security keys), rename labels, test assertions live, and revoke credentials with zero server-side key storage.',
+        },
+      },
+      {
+        id: 'vault-passkey-unlock-and-pin-fallback-v114',
+        category: 'core',
+        title: {
+          id: 'Buka Vault & Gerbang Aksi Sensitif via Biometrik + Cadangan PIN',
+          en: 'Biometric Vault Unlock & Sensitive Action Gate with PIN Fallback',
+        },
+        description: {
+          id: 'Berfungsi mandiri tanpa wajib membuat PIN, atau berdampingan dengan Kunci PIN 4–6 digit sebagai cadangan. Seluruh kebijakan Layar Kunci Penuh, Auto-Lock (1/5/15 menit & pindah tab), dan Gerbang Aksi Sensitif berlaku terpadu.',
+          en: 'Works standalone without forcing a PIN, or paired with the 4–6 digit PIN lock as fallback. Full Vault Lock, Auto-Lock (1/5/15m & tab-switch), and Sensitive Action Gates apply uniformly.',
+        },
+      },
+      {
+        id: 'vault-webauthn-prf-crypto-v114',
+        category: 'ux_tools',
+        title: {
+          id: 'Brankas Frasa Biometrik & Enkripsi Backup Langsung WebAuthn PRF',
+          en: 'WebAuthn PRF Biometric Phrase Locker & Direct Hardware-Key Backups',
+        },
+        description: {
+          id: 'Pada authenticator yang mendukung ekstensi PRF, pengguna dapat mengunci frasa 12-kata dengan kunci non-ekstrak HKDF-SHA256 -> AES-256-GCM untuk isi otomatis 1-ketuk, atau mengenkripsi/mendekripsi arsip .anf/.cvp/.enc langsung dari Passkey. Perangkat Non-PRF tetap mendukung buka biometrik secara otomatis.',
+          en: 'On PRF-capable authenticators, users can seal 12-word recovery phrases via non-extractable HKDF-SHA256 -> AES-256-GCM keys for 1-tap autofill, or encrypt/decrypt .anf/.cvp/.enc archives directly via Passkey PRF. Non-PRF devices degrade gracefully to standard biometric unlock.',
+        },
+      },
+    ],
+  },
   {
     serviceId: 'vz-mail',
     serviceName: 'VZ Mail & VZ Links',
