@@ -95,8 +95,8 @@ export default defineConfig(() => {
     server: {
       port: 5173,
       strictPort: true,
-      // HMR can be disabled via DISABLE_HMR=true when needed.
-      hmr: process.env.DISABLE_HMR !== 'true',
+      // HMR is disabled by default in this runtime to avoid WebSocket port 24678 conflicts.
+      hmr: process.env.ENABLE_HMR === 'true',
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
   };

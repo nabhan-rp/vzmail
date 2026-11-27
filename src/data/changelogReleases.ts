@@ -24,8 +24,8 @@ export interface ChangelogServiceRelease {
   highlights: ChangelogItem[];
 }
 
-export const CHANGELOG_VERSION = 'v1.0.0';
-export const CHANGELOG_RELEASE_DATE = '2026-11-25';
+export const CHANGELOG_VERSION = 'v1.1.0';
+export const CHANGELOG_RELEASE_DATE = '2026-11-26';
 
 export const CHANGELOG_CATEGORY_LABELS: Record<ChangelogCategoryId, BilingualText> = {
   core: {
@@ -50,9 +50,74 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
   {
     serviceId: 'vz-mail',
     serviceName: 'VZ Mail',
+    domains: ['mail.vz.gay', '@imy.li', 'files.vz.gay', 'chipervaultro.app.vz.gay'],
+    version: '1.1.0',
+    releaseDate: '2026-11-26',
+    codename: {
+      id: 'Standar Enkripsi Ekosistem VZ (.anf & CipherVault Pro) + VZ Files Cloud (>10 MB)',
+      en: 'VZ Ecosystem Encryption Standard (.anf & CipherVault Pro) + VZ Files Cloud (>10 MB)',
+    },
+    summary: {
+      id: 'Pembaruan skema ekspor & enkripsi Vault lokal ke standar ekosistem VZ menggunakan format .anf (Advanced/Archival Neural File — kompatibel lintas VZ Mail & VZ Desk) serta mesin CipherVault Pro (.cvp) dan kompatibilitas .enc, dilengkapi mode Polyglot Stealth, generator frasa 12-kata + brankas PIN, serta transfer file besar >10 MB via VZ Files (files.vz.gay).',
+      en: 'Upgrades local Vault backup & encryption to the VZ ecosystem standard using .anf (Advanced/Archival Neural File — interoperable across VZ Mail & VZ Desk), native CipherVault Pro (.cvp), and .enc compatibility, complete with Polyglot Stealth mode, a 12-word Mnemonic + PIN key manager, and >10 MB cloud transfers via VZ Files (files.vz.gay).',
+    },
+    highlights: [
+      {
+        id: 'mail-anf-ciphervault-upgrade',
+        category: 'privacy_security',
+        title: {
+          id: 'Standar Enkripsi Ekosistem VZ .anf (Advanced/Archival Neural File) + Opsi .cvp & .enc',
+          en: 'VZ Ecosystem .anf (Advanced/Archival Neural File) Standard + .cvp & .enc Options',
+        },
+        description: {
+          id: 'Skema ekspor dan pemulihan email lokal kini ditingkatkan ke standar platform CipherVault Pro (chipervaultro.app.vz.gay) seperti pada VZ Desk (desk.vz.gay). Format default .anf (vz-anf-v1, AES-256-GCM + PBKDF2-SHA256 200.000 iterasi) dirancang khusus untuk ekosistem VZ (Mail & Desk), disertai 2 opsi tambahan: .cvp (format bawaan CipherVault Pro v3, 100.000 iterasi) dan .enc (standar MyVault 310.000 iterasi untuk kompatibilitas aplikasi dekripsi lain).',
+          en: 'Local email export and recovery now adopts the CipherVault Pro (chipervaultro.app.vz.gay) platform architecture shared with VZ Desk (desk.vz.gay). The default .anf format (vz-anf-v1, AES-256-GCM + PBKDF2-SHA256 200,000 iterations) powers VZ ecosystem archival across Mail & Desk, alongside two selectable options: .cvp (native CipherVault Pro v3, 100,000 iterations) and .enc (standard MyVault 310,000 iterations for cross-tool decryption compatibility).',
+        },
+      },
+      {
+        id: 'mail-polyglot-stealth-mnemonic',
+        category: 'privacy_security',
+        title: {
+          id: 'Mode Kontainer Standard JSON & Polyglot Stealth + Generator Frasa 12-Kata & PIN',
+          en: 'Standard JSON & Polyglot Stealth Container Modes + 12-Word Mnemonic & PIN Vault',
+        },
+        description: {
+          id: 'Ekspor .anf dan .cvp mendukung mode Standard JSON maupun Polyglot Stealth (menyisipkan ciphertext AES-256-GCM di balik header biner PDF atau ZIP sintetis dengan penanda ---VZ_ANF_v1_SIG--- / ---CV_PRO_v3_SIG---). Dilengkapi Generator Frasa Pemulihan 12-Kata (CSPRNG) yang dapat dikunci di perangkat menggunakan PIN 4–6 digit (PBKDF2 150.000 iterasi).',
+          en: 'Both .anf and .cvp exports support Standard JSON and Polyglot Stealth modes (embedding raw AES-256-GCM ciphertext behind synthetic PDF or ZIP binary headers with ---VZ_ANF_v1_SIG--- / ---CV_PRO_v3_SIG--- metadata trailers). Includes a CSPRNG 12-Word Recovery Phrase Generator with optional 4–6 digit local PIN lock (PBKDF2 150,000 iterations).',
+        },
+      },
+      {
+        id: 'mail-vzfiles-external-links',
+        category: 'core',
+        title: {
+          id: 'Transfer File Besar (>10 MB) via VZ Files (files.vz.gay) & Media Inline Langsung',
+          en: 'Large File Transfer (>10 MB) via VZ Files (files.vz.gay) & Direct Inline Media',
+        },
+        description: {
+          id: 'Mendukung pengiriman file berukuran di atas batas lampiran 10 MB dengan unggah langsung ke layanan VZ Files (https://files.vz.gay) dari dalam komposer email maupun penempelan tautan eksternal (Google Drive, Imgur, atau direct file). Tautan gambar langsung (direct image URL) otomatis dirender inline di dalam isi email.',
+          en: 'Supports transferring files over the 10 MB attachment limit via direct in-composer upload to VZ Files (https://files.vz.gay) or external link insertion (Google Drive, Imgur, or direct files). Direct image links automatically render inline inside the email body.',
+        },
+      },
+      {
+        id: 'mail-outbound-delivery-infra',
+        category: 'seo_infra',
+        title: {
+          id: 'Penyempurnaan Pengiriman Brevo / Resend & Stabilitas Runtime Edge/Dev',
+          en: 'Brevo / Resend Outbound Delivery Hardening & Edge/Dev Runtime Stability',
+        },
+        description: {
+          id: 'Standarisasi header Reply-To pada provider Brevo dan Resend, penanganan validasi format lampiran secara transparan dengan opsi simpan ke Draf Lokal, sinkronisasi lockfile npm untuk Cloudflare Workers Builds, serta penonaktifan WebSocket HMR standalone untuk mencegah konflik port.',
+          en: 'Standardized Reply-To headers across Brevo and Resend providers, transparent attachment format validation with one-click Local Draft fallback, synchronized npm lockfile for Cloudflare Workers Builds, and disabled standalone HMR WebSocket to prevent port collisions.',
+        },
+      },
+    ],
+  },
+  {
+    serviceId: 'vz-mail',
+    serviceName: 'VZ Mail',
     domains: ['mail.vz.gay', '@imy.li'],
     version: '1.0.0',
-    releaseDate: CHANGELOG_RELEASE_DATE,
+    releaseDate: '2026-11-25',
     codename: {
       id: 'Rilis Perdana Zero-Retention Local-First',
       en: 'Initial Zero-Retention Local-First Release',
@@ -106,8 +171,8 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
           en: 'AES-GCM Encrypted MyVault Backup & Sender Verification (DNS/RDAP/VZ Search)',
         },
         description: {
-          id: 'Ekspor dan pulihkan seluruh arsip percakapan lokal dalam berkas .vzvault terenkripsi berbasis kata sandi di browser, dilengkapi panel verifikasi domain SPF/DKIM/DMARC/RDAP dan pencarian grounding search.vz.gay.',
-          en: 'Export and restore full local conversation archives into password-encrypted .vzvault files directly in-browser, paired with SPF/DKIM/DMARC/RDAP domain checks and search.vz.gay grounding.',
+          id: 'Ekspor dan pulihkan seluruh arsip percakapan lokal dalam berkas terenkripsi berbasis kata sandi di browser, dilengkapi panel verifikasi domain SPF/DKIM/DMARC/RDAP dan pencarian grounding search.vz.gay.',
+          en: 'Export and restore full local conversation archives into password-encrypted files directly in-browser, paired with SPF/DKIM/DMARC/RDAP domain checks and search.vz.gay grounding.',
         },
       },
       {
@@ -129,7 +194,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
     serviceName: 'VZ Links',
     domains: ['links.vz.gay', '*.imy.li', 'imy.li/s/'],
     version: '1.0.0',
-    releaseDate: CHANGELOG_RELEASE_DATE,
+    releaseDate: '2026-11-25',
     codename: {
       id: 'Rilis Perdana Multi-Page Bio, Shortlink & QR Studio',
       en: 'Initial Multi-Page Bio, Shortlink & QR Studio Release',

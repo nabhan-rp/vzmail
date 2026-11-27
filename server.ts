@@ -1668,13 +1668,18 @@ async function startServer() {
       process.env.npm_lifecycle_event === 'start' ||
       (process.env.NODE_ENV !== 'development' && fs.existsSync(distIndexPath)));
 
+  let viteServer: Awaited<ReturnType<typeof import('vite')['createServer']>> | null = null;
+
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
+    viteServer = await createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: false,
+      },
       appType: 'spa',
     });
-    app.use(vite.middlewares);
+    app.use(viteServer.middlewares);
   } else {
     app.use(express.static(distPath, { maxAge: '1d' }));
     app.use((req, res, next) => {
@@ -1698,7 +1703,14 @@ async function startServer() {
 
   const shutdown = (signal: string) => {
     console.log(`Received ${signal}, shutting down server gracefully...`);
-    server.close(() => process.exit(0));
+    const finish = () => {
+      if (viteServer) {
+        void viteServer.close().finally(() => process.exit(0));
+      } else {
+        process.exit(0);
+      }
+    };
+    server.close(finish);
     setTimeout(() => process.exit(0), 5000).unref();
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));

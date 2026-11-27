@@ -104,9 +104,9 @@ export function ChangelogReleasesView({
               [
                 {
                   id: 'all' as const,
-                  label: lang === 'id' ? 'Semua Layanan (2)' : 'All Services (2)',
+                  label: lang === 'id' ? 'Semua Layanan' : 'All Services',
                 },
-                { id: 'vz-mail' as const, label: 'VZ Mail v1.0.0' },
+                { id: 'vz-mail' as const, label: 'VZ Mail v1.1.0' },
                 { id: 'vz-links' as const, label: 'VZ Links v1.0.0' },
               ] as const
             ).map((tab) => {
@@ -172,7 +172,7 @@ export function ChangelogReleasesView({
           const isMail = release.serviceId === 'vz-mail';
           return (
             <article
-              key={release.serviceId}
+              key={`${release.serviceId}-${release.version}`}
               className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-10 pb-12 border-b border-slate-200 dark:border-[#232732] last:border-b-0 last:pb-0"
             >
               {/* Left Sticky Release Metadata Column */}
@@ -195,7 +195,7 @@ export function ChangelogReleasesView({
                       </span>
                     </h2>
                     <p className="text-xs font-mono text-slate-500 dark:text-slate-400">
-                      {release.domains.join(' · ')}
+                      {release.releaseDate} · {release.domains.join(' · ')}
                     </p>
                   </div>
                 </div>
