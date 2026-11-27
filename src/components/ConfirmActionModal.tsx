@@ -1,6 +1,7 @@
 import { AlertTriangle, Check, Copy, ShieldAlert, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
+import { copyTextSafely } from '../utils/clipboard';
 
 export interface ConfirmSecondaryAction {
   label: string;
@@ -89,7 +90,7 @@ export function ConfirmActionModal({
 
   const handleCopyPhrase = () => {
     if (!requireTypedText) return;
-    navigator.clipboard?.writeText(requireTypedText).catch(() => {});
+    void copyTextSafely(requireTypedText);
     setCopiedPhrase(true);
     window.setTimeout(() => setCopiedPhrase(false), 1800);
   };

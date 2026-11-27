@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 // VZ Mail (mail.vz.gay) & VZ Links (links.vz.gay) Multi-OS PWA Service Worker
-const CACHE_NAME = 'vz-pwa-v1.3.0';
+const CACHE_NAME = 'vz-pwa-v1.3.1';
 
 const PRECACHE_ASSETS = [
   '/',
@@ -60,6 +60,46 @@ self.addEventListener('message', (event) => {
   }
 });
 
+// Lightweight PWA Periodic Background Sync (Chromium PWA) — nudges open clients without caching mail data
+self.addEventListener('periodicsync', (event) => {
+  if (event.tag !== 'vz-mail-sync') return;
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: 'window', includeUncontrolled: true })
+      .then((clientList) => {
+        for (const client of clientList) {
+          client.postMessage({
+            type: 'VZ_MAIL_PERIODIC_SYNC',
+            triggeredAt: Date.now(),
+          });
+        }
+      })
+      .catch(() => undefined)
+  );
+});
+
+// Focus or open VZ Mail cleanly when the user taps an opt-in incoming mail notification
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: 'window', includeUncontrolled: true })
+      .then((clientList) => {
+        for (const client of clientList) {
+          if ('focus' in client) {
+            client.postMessage({ type: 'VZ_MAIL_NOTIFICATION_CLICK' });
+            return client.focus();
+          }
+        }
+        if (self.clients.openWindow) {
+          return self.clients.openWindow('/');
+        }
+        return undefined;
+      })
+      .catch(() => undefined)
+  );
+});
+
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
@@ -93,10 +133,15 @@ self.addEventListener('fetch', (event) => {
 
   // 4. HTML Navigation requests: Network-First with offline cached SPA fallback
   if (req.mode === 'navigate') {
+    const hasAuthCallbackParams =
+      url.searchParams.has('code') ||
+      url.searchParams.has('state') ||
+      url.searchParams.has('error');
+
     event.respondWith(
       fetch(req)
         .then((networkRes) => {
-          if (networkRes.status === 200) {
+          if (networkRes.status === 200 && !hasAuthCallbackParams && !url.search) {
             const copy = networkRes.clone();
             caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
           }

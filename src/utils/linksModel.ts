@@ -766,23 +766,7 @@ export function detectRawImageMime(bytes: Uint8Array): string | null {
     return 'image/x-icon';
   }
 
-  // SVG (sanitized check: starts with <svg or <?xml + <svg, and contains no <script/foreignObject/event handlers)
-  const headText = new TextDecoder('utf-8', { fatal: false })
-    .decode(bytes.subarray(0, Math.min(bytes.byteLength, 2048)))
-    .trimStart()
-    .toLowerCase();
-  if (headText.startsWith('<svg') || (headText.startsWith('<?xml') && headText.includes('<svg'))) {
-    const fullText = new TextDecoder('utf-8', { fatal: false }).decode(bytes).toLowerCase();
-    if (
-      !fullText.includes('<script') &&
-      !fullText.includes('javascript:') &&
-      !fullText.includes('<foreignobject') &&
-      !/\bon[a-z]+\s*=/.test(fullText)
-    ) {
-      return 'image/svg+xml';
-    }
-  }
-
+  // SVG is intentionally rejected to prevent stored XML/script XSS vectors.
   return null;
 }
 

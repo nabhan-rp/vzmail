@@ -89,6 +89,9 @@ createRoot(document.getElementById('root')!).render(
     <Auth0Provider
       domain={auth0Config.domain}
       clientId={auth0Config.clientId}
+      cacheLocation="localstorage"
+      useRefreshTokens={true}
+      useRefreshTokensFallback={true}
       skipRedirectCallback={auth0Config.isPreviewHost || auth0Config.isImyExternalHost}
       authorizationParams={{
         redirect_uri: auth0Config.redirectUri,

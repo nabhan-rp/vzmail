@@ -7,8 +7,8 @@ export interface AvatarCropTransform {
 
 export interface EncodedAvatarResult {
   blob: Blob;
-  mimeType: 'image/avif' | 'image/webp';
-  formatLabel: 'AVIF' | 'WebP';
+  mimeType: 'image/avif' | 'image/webp' | 'image/jpeg';
+  formatLabel: 'AVIF' | 'WebP' | 'JPEG';
   width: number;
   height: number;
   byteSize: number;
@@ -144,7 +144,26 @@ export async function encodeCroppedAvatarToAvif(
     }
   }
 
-  throw new Error('Browser tidak mendukung kompresi AVIF atau WebP.');
+  // Universal JPEG fallback for older iOS Safari, Firefox ESR, and privacy-hardened WebViews
+  const jpegQualities = [0.86, 0.74, 0.62];
+  for (const q of jpegQualities) {
+    const blob = await canvasToBlob(canvas, 'image/jpeg', q);
+    if (blob && blob.type === 'image/jpeg') {
+      if (blob.size <= AVATAR_TARGET_MAX_BYTES * 2 || q === jpegQualities[jpegQualities.length - 1]) {
+        return {
+          blob,
+          mimeType: 'image/jpeg',
+          formatLabel: 'JPEG',
+          width: outputSize,
+          height: outputSize,
+          byteSize: blob.size,
+          fallbackUsed: true,
+        };
+      }
+    }
+  }
+
+  throw new Error('Browser tidak mendukung kompresi gambar (AVIF, WebP, maupun JPEG).');
 }
 
 export function formatBytesCompact(bytes: number): string {

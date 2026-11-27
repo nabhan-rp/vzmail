@@ -1,7 +1,9 @@
 import {
+  Activity,
   AlertCircle,
   Archive,
   ArrowLeft,
+  Bell,
   CheckCircle2,
   Clock,
   Download,
@@ -16,6 +18,7 @@ import {
   Loader2,
   Lock,
   MailPlus,
+  Menu,
   MessageSquare,
   Paperclip,
   QrCode,
@@ -34,6 +37,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import type { ThemePreference } from '../hooks/useTheme';
+import { apiFetch } from '../utils/apiAuthClient';
 import {
   MAIL_ATTACHMENT_MAX_COUNT,
   MAIL_ATTACHMENT_MAX_TOTAL_BYTES,
@@ -64,12 +68,33 @@ import {
   formatFileSizeLabel,
   normalizeAndClassifyExternalLink,
   type MailExternalLink,
+  type OutboundEmailFormat,
 } from '../utils/mailExternalLinks';
+import {
+  computeNextSyncDelayMs,
+  detectDeviceResourceProfile,
+  filterOutRecentlyAckedPackets,
+  hasInitialTransitSeedBeenCompleted,
+  markInitialTransitSeedCompleted,
+  readBackgroundSyncPrefs,
+  readPreferredOutboundFormat,
+  recordRecentlyAckedPacketIds,
+  showIncomingMailNotification,
+  syncPeriodicSyncRegistration,
+  writeBackgroundSyncPrefs,
+  writePreferredOutboundFormat,
+  type MailBackgroundSyncPrefs,
+} from '../utils/mailBackgroundSync';
 import {
   uploadFileToVzFiles,
   type VzFilesUploadProgress,
 } from '../utils/vzFilesUploader';
 import { ConfirmActionModal } from './ConfirmActionModal';
+import { MailBackgroundSyncModal } from './MailBackgroundSyncModal';
+import {
+  MailDiagnosticsModal,
+  type MailSyncErrorInfo,
+} from './MailDiagnosticsModal';
 import { MailExternalLinksView } from './MailExternalLinksView';
 import {
   MailFloatingComposer,
@@ -273,12 +298,25 @@ export function VzMailWorkspace({
   // Ephemeral Edge Transit Queue state
   const [edgePackets, setEdgePackets] = useState<EphemeralEdgePacket[]>([]);
   const [syncingEdge, setSyncingEdge] = useState(false);
+  const [lastSyncError, setLastSyncError] = useState<MailSyncErrorInfo | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [lastPurgeReceipt, setLastPurgeReceipt] = useState<string>(
     'PURGED-CF-EDGE-0B-RETAINED'
   );
   const [quotaUsed, setQuotaUsed] = useState(1);
   const [quotaLimit, setQuotaLimit] = useState(25);
   const [toastNotice, setToastNotice] = useState<ToastNotification | null>(null);
+
+  // Opt-In Low-RAM Background Sync, Notifications & Diagnostics state
+  const [bgSyncPrefs, setBgSyncPrefs] = useState<MailBackgroundSyncPrefs>(() =>
+    readBackgroundSyncPrefs(user)
+  );
+  const [bgSyncModalOpen, setBgSyncModalOpen] = useState(false);
+  const [periodicSyncRegistered, setPeriodicSyncRegistered] = useState(false);
+  const [diagnosticsState, setDiagnosticsState] = useState<{
+    open: boolean;
+    tab: 'inbound' | 'dns';
+  }>({ open: false, tab: 'inbound' });
 
   // Floating Gmail / Hotmail-Style Composer state
   const [composeMode, setComposeMode] = useState<ComposeWindowMode>('closed');
@@ -287,11 +325,21 @@ export function VzMailWorkspace({
   const [composeFromAlias, setComposeFromAlias] = useState(primaryEmail);
   const [composeSubject, setComposeSubject] = useState('');
   const [composeBody, setComposeBody] = useState('');
+  const [composeOutboundFormat, setComposeOutboundFormat] =
+    useState<OutboundEmailFormat>(() => readPreferredOutboundFormat(user));
   const [composeAttachments, setComposeAttachments] = useState<PendingComposeAttachment[]>([]);
   const [composeExternalLinks, setComposeExternalLinks] = useState<MailExternalLink[]>([]);
   const [oversizedFiles, setOversizedFiles] = useState<File[]>([]);
   const [vzUploadProgress, setVzUploadProgress] = useState<VzFilesUploadProgress | null>(null);
   const [composeSending, setComposeSending] = useState(false);
+  const messagesRef = useRef<LocalMailMessage[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+  useEffect(() => {
+    setBgSyncPrefs(readBackgroundSyncPrefs(user));
+    setComposeOutboundFormat(readPreferredOutboundFormat(user));
+  }, [user]);
   const [composeFeedback, setComposeFeedback] = useState<ComposeFeedbackState>({
     kind: 'idle',
     message: '',
@@ -429,14 +477,33 @@ export function VzMailWorkspace({
 
   const checkEdgeTransitQueue = useCallback(
     async (signal?: AbortSignal) => {
-      const localPending = readLocalFallbackQueue(user);
+      const localPending = filterOutRecentlyAckedPackets(
+        user,
+        readLocalFallbackQueue(user)
+      );
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/mail/queue?username=${encodeURIComponent(user)}`,
           { signal }
         );
         if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as {
+            error?: string;
+          } | null;
           setEdgePackets(localPending);
+          setLastSyncError({
+            status: res.status,
+            message:
+              errBody?.error ||
+              (res.status === 401 || res.status === 403
+                ? lang === 'id'
+                  ? `Sesi API ditolak (HTTP ${res.status}). Silakan muat ulang atau login ulang SSO agar email masuk dapat ditarik.`
+                  : `API session rejected (HTTP ${res.status}). Refresh or sign in again via SSO to pull incoming mail.`
+                : lang === 'id'
+                  ? `Gagal memeriksa antrean Edge (HTTP ${res.status}).`
+                  : `Failed to check Edge queue (HTTP ${res.status}).`),
+            at: new Date().toISOString(),
+          });
           return;
         }
         const data = await res.json();
@@ -448,7 +515,13 @@ export function VzMailWorkspace({
           for (const pkt of [...remotePackets, ...localPending]) {
             mergedMap.set(pkt.id, pkt);
           }
-          setEdgePackets(Array.from(mergedMap.values()));
+          const activePackets = filterOutRecentlyAckedPackets(
+            user,
+            Array.from(mergedMap.values())
+          );
+          setEdgePackets(activePackets);
+          setLastSyncError(null);
+          setLastSyncedAt(new Date().toISOString());
           if (data.outboundQuota) {
             setQuotaUsed(data.outboundQuota.usedToday ?? 0);
             setQuotaLimit(data.outboundQuota.dailyLimit ?? 25);
@@ -460,7 +533,7 @@ export function VzMailWorkspace({
         setEdgePackets(localPending);
       }
     },
-    [user]
+    [user, lang]
   );
 
   useEffect(() => {
@@ -468,44 +541,49 @@ export function VzMailWorkspace({
     let cancelled = false;
 
     const init = async () => {
+      let localList: LocalMailMessage[] = [];
       setLoadingLocal(true);
       try {
-        const list = await ensureUserMessagesSeeded(user, domain);
+        localList = await ensureUserMessagesSeeded(user, domain);
         if (cancelled) return;
-        setMessages(list);
-        if (list.length > 0) {
+        setMessages(localList);
+        if (localList.length > 0) {
           setSelectedThreadId((prev) =>
-            prev && list.some((m) => m.threadId === prev) ? prev : list[0].threadId
+            prev && localList.some((m) => m.threadId === prev)
+              ? prev
+              : localList[0].threadId
           );
           setSelectedMessageId((prev) =>
-            prev && list.some((m) => m.id === prev) ? prev : list[0].id
+            prev && localList.some((m) => m.id === prev) ? prev : localList[0].id
           );
         }
       } finally {
         if (!cancelled) setLoadingLocal(false);
       }
 
-      try {
-        const seedRes = await fetch('/api/mail/seed-transit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: user }),
-          signal: controller.signal,
-        });
-        if (seedRes.ok) {
-          const seedData = await seedRes.json();
-          const seededFlagKey = `vz_seeded_local_transit_v1:${user}`;
-          if (
-            seedData.ok &&
-            seedData.seedPacket &&
-            !sessionStorage.getItem(seededFlagKey)
-          ) {
-            enqueueLocalFallbackPacket(seedData.seedPacket as EphemeralEdgePacket);
-            sessionStorage.setItem(seededFlagKey, '1');
+      // One-time onboarding transit seed ONLY when mailbox has never been seeded before.
+      // Prevents the infinite "(1)" Pull & Purge ghost packet loop!
+      const alreadyHasLocalInit = localList.some((m) => m.id === `cf-q-${user}-init`);
+      if (alreadyHasLocalInit) {
+        markInitialTransitSeedCompleted(user);
+      } else if (!hasInitialTransitSeedBeenCompleted(user)) {
+        try {
+          const seedRes = await apiFetch('/api/mail/seed-transit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: user }),
+            signal: controller.signal,
+          });
+          if (seedRes.ok) {
+            const seedData = await seedRes.json();
+            markInitialTransitSeedCompleted(user);
+            if (seedData.ok && seedData.seedPacket && !seedData.alreadySeeded) {
+              enqueueLocalFallbackPacket(seedData.seedPacket as EphemeralEdgePacket);
+            }
           }
+        } catch {
+          // Ignore offline/abort errors
         }
-      } catch {
-        // Ignore offline/abort errors
       }
 
       if (!cancelled) {
@@ -522,115 +600,350 @@ export function VzMailWorkspace({
 
   // Pull pending packets from Cloudflare Edge Queue:
   // 1. Commit durably to local IndexedDB FIRST (zero data-loss guarantee)
-  // 2. ACK server to permanently purge from Edge KV & clear session fallback buffer
+  // 2. ACK server to permanently purge from Edge KV & stamp 90s tombstone
   // 3. Stamp authoritative purge receipt onto committed local messages
-  const handlePopAndPurgeEdgeQueue = async () => {
-    setSyncingEdge(true);
-    try {
-      const localPending = readLocalFallbackQueue(user);
-      let remotePackets: EphemeralEdgePacket[] = [];
-
+  const handlePopAndPurgeEdgeQueue = useCallback(
+    async (options?: { silent?: boolean; notifyIfNew?: boolean }) => {
+      const silent = Boolean(options?.silent);
+      const notifyIfNew = Boolean(options?.notifyIfNew);
+      setSyncingEdge(true);
       try {
-        const res = await fetch(
-          `/api/mail/queue?username=${encodeURIComponent(user)}`
+        const localPending = filterOutRecentlyAckedPackets(
+          user,
+          readLocalFallbackQueue(user)
         );
-        if (res.ok) {
-          const data = await res.json();
-          if (data.ok && Array.isArray(data.packets)) {
-            remotePackets = data.packets;
+        let remotePackets: EphemeralEdgePacket[] = [];
+
+        try {
+          const res = await apiFetch(
+            `/api/mail/queue?username=${encodeURIComponent(user)}`
+          );
+          if (res.ok) {
+            const data = await res.json();
+            if (data.ok && Array.isArray(data.packets)) {
+              remotePackets = data.packets;
+              setLastSyncError(null);
+              setLastSyncedAt(new Date().toISOString());
+              if (data.outboundQuota) {
+                setQuotaUsed(data.outboundQuota.usedToday ?? 0);
+                setQuotaLimit(data.outboundQuota.dailyLimit ?? 25);
+              }
+            }
+          } else {
+            const errBody = (await res.json().catch(() => null)) as {
+              error?: string;
+            } | null;
+            setLastSyncError({
+              status: res.status,
+              message:
+                errBody?.error ||
+                (lang === 'id'
+                  ? `Gagal menarik antrean Edge (HTTP ${res.status}).`
+                  : `Failed to pull Edge queue (HTTP ${res.status}).`),
+              at: new Date().toISOString(),
+            });
+          }
+        } catch {
+          // Proceed with localPending if offline
+        }
+
+        const mergedMap = new Map<string, EphemeralEdgePacket>();
+        for (const pkt of [...remotePackets, ...localPending]) {
+          mergedMap.set(pkt.id, pkt);
+        }
+        const packets = filterOutRecentlyAckedPackets(
+          user,
+          Array.from(mergedMap.values())
+        );
+
+        if (packets.length === 0) {
+          setEdgePackets([]);
+          writeLocalFallbackQueue(user, []);
+          if (!silent) {
+            showToast(
+              lang === 'id'
+                ? 'Antrean transit edge bersih (0 pesan di server). Semua pesan sudah ada di IndexedDB lokal.'
+                : 'Edge transit queue is empty (0 messages on server). All messages are in local IndexedDB.'
+            );
+          }
+          return;
+        }
+
+        const existingLocalIds = new Set(messagesRef.current.map((m) => m.id));
+        const provisionalReceipt = `COMMITTED-LOCAL-${Date.now().toString(36).toUpperCase()}`;
+        const localMsgs = packets.map((pkt) =>
+          normalizeInboundPacketToLocalMessage(
+            {
+              ...pkt,
+              ephemeralQueueReceipt: provisionalReceipt,
+            },
+            [domain, ...DEFAULT_SUPPORTED_DOMAINS]
+          )
+        );
+        const genuinelyNewMsgs = localMsgs.filter((m) => !existingLocalIds.has(m.id));
+
+        // STEP 1: Commit to local device IndexedDB BEFORE purging server queue!
+        await saveMessagesBatch(localMsgs);
+
+        // STEP 2: Immediately record local 90s tombstones & ACK server to purge KV
+        const packetIds = packets.map((p) => p.id);
+        recordRecentlyAckedPacketIds(user, packetIds);
+        markInitialTransitSeedCompleted(user);
+
+        let receipt = provisionalReceipt;
+        try {
+          const ackRes = await apiFetch('/api/mail/ack', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              username: user,
+              packetIds,
+            }),
+          });
+          if (ackRes.ok) {
+            const ackData = await ackRes.json();
+            if (ackData.receiptCode) {
+              receipt = ackData.receiptCode;
+            }
+          }
+        } catch {
+          // Local messages are already safely persisted
+        }
+
+        // STEP 3: Clear fallback buffer & stamp authoritative purge receipt
+        writeLocalFallbackQueue(user, []);
+        if (receipt !== provisionalReceipt) {
+          await saveMessagesBatch(
+            localMsgs.map((m) => ({ ...m, ephemeralQueueReceipt: receipt }))
+          );
+        }
+
+        setLastPurgeReceipt(receipt);
+        setEdgePackets([]);
+        await loadLocalMessages();
+
+        if (!silent && genuinelyNewMsgs[0]) {
+          setSelectedThreadId(genuinelyNewMsgs[0].threadId);
+          setSelectedMessageId(genuinelyNewMsgs[0].id);
+        }
+
+        if (notifyIfNew && genuinelyNewMsgs.length > 0) {
+          void showIncomingMailNotification({
+            count: genuinelyNewMsgs.length,
+            latestFrom:
+              genuinelyNewMsgs[0].from.name || genuinelyNewMsgs[0].from.address,
+            latestSubject: genuinelyNewMsgs[0].subject,
+            lang,
+          });
+        }
+
+        if (!silent) {
+          if (genuinelyNewMsgs.length === 0) {
+            showToast(
+              lang === 'id'
+                ? `Antrean duplikat di Edge berhasil dibersihkan (${receipt}). Tidak ada email baru.`
+                : `Duplicate Edge queue packet cleaned (${receipt}). No new emails.`
+            );
+          } else {
+            showToast(
+              lang === 'id'
+                ? `${genuinelyNewMsgs.length} email baru tersimpan di IndexedDB lokal & dihapus permanen dari server (${receipt}).`
+                : `${genuinelyNewMsgs.length} new email(s) saved to local IndexedDB & permanently purged from edge (${receipt}).`,
+              { kind: 'success' }
+            );
           }
         }
       } catch {
-        // Proceed with localPending if offline
+        if (!silent) {
+          showToast(
+            lang === 'id'
+              ? 'Gagal menyimpan pesan ke IndexedDB lokal. Pesan tetap aman di antrean edge.'
+              : 'Failed to commit messages to local IndexedDB. Packets remain safely queued on edge.',
+            { kind: 'error' }
+          );
+        }
+      } finally {
+        setSyncingEdge(false);
       }
+    },
+    [user, domain, lang, loadLocalMessages, showToast]
+  );
 
-      const mergedMap = new Map<string, EphemeralEdgePacket>();
-      for (const pkt of [...remotePackets, ...localPending]) {
-        mergedMap.set(pkt.id, pkt);
-      }
-      const packets = Array.from(mergedMap.values());
-
-      if (packets.length === 0) {
-        setEdgePackets([]);
-        showToast(
-          lang === 'id'
-            ? 'Antrean transit edge bersih (0 pesan di server). Semua pesan sudah ada di IndexedDB lokal.'
-            : 'Edge transit queue is empty (0 messages on server). All messages are in local IndexedDB.'
-        );
+  // Low-RAM Adaptive Background Sync Engine (strictly opt-in via bgSyncPrefs.enabled)
+  const bgSyncRunningRef = useRef(false);
+  const runLightweightBackgroundCheck = useCallback(async () => {
+    if (bgSyncRunningRef.current) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    bgSyncRunningRef.current = true;
+    try {
+      // Step 1: Tiny metadata-only request (zero body deserialization when queue is empty!)
+      const res = await apiFetch(
+        `/api/mail/queue?username=${encodeURIComponent(user)}&metaOnly=1`
+      );
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        setLastSyncError({
+          status: res.status,
+          message:
+            errBody?.error ||
+            (lang === 'id'
+              ? `Background Sync gagal (HTTP ${res.status}).`
+              : `Background Sync failed (HTTP ${res.status}).`),
+          at: new Date().toISOString(),
+        });
         return;
       }
 
-      // STEP 1: Commit to local device IndexedDB BEFORE purging server queue!
-      const provisionalReceipt = `COMMITTED-LOCAL-${Date.now().toString(36).toUpperCase()}`;
-      const localMsgs = packets.map((pkt) =>
-        normalizeInboundPacketToLocalMessage(
-          {
-            ...pkt,
-            ephemeralQueueReceipt: provisionalReceipt,
-          },
-          [domain, ...DEFAULT_SUPPORTED_DOMAINS]
-        )
-      );
-      await saveMessagesBatch(localMsgs);
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        pendingCount?: number;
+        packetIds?: string[];
+        outboundQuota?: { usedToday: number; dailyLimit: number };
+      } | null;
 
-      // STEP 2: Only after local IndexedDB write succeeded, ACK to purge server queue
-      let receipt = provisionalReceipt;
-      try {
-        const ackRes = await fetch('/api/mail/ack', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            username: user,
-            packetIds: packets.map((p) => p.id),
-          }),
+      if (!data?.ok) return;
+      setLastSyncError(null);
+      setLastSyncedAt(new Date().toISOString());
+      if (data.outboundQuota) {
+        setQuotaUsed(data.outboundQuota.usedToday ?? 0);
+        setQuotaLimit(data.outboundQuota.dailyLimit ?? 25);
+      }
+
+      const rawIds = Array.isArray(data.packetIds) ? data.packetIds : [];
+      const activeIds = filterOutRecentlyAckedPackets(
+        user,
+        rawIds.map((id) => ({ id }))
+      );
+
+      if (activeIds.length === 0) {
+        // Queue is empty: avoid touching full message state or causing unnecessary re-renders
+        setEdgePackets((prev) => (prev.length === 0 ? prev : []));
+        return;
+      }
+
+      if (bgSyncPrefs.autoPullOnSync) {
+        await handlePopAndPurgeEdgeQueue({
+          silent: true,
+          notifyIfNew: bgSyncPrefs.notificationsEnabled,
         });
-        if (ackRes.ok) {
-          const ackData = await ackRes.json();
-          if (ackData.receiptCode) {
-            receipt = ackData.receiptCode;
-          }
+      } else {
+        await checkEdgeTransitQueue();
+        if (bgSyncPrefs.notificationsEnabled) {
+          void showIncomingMailNotification({
+            count: activeIds.length,
+            latestFrom: 'VZ Mail Edge',
+            latestSubject:
+              lang === 'id'
+                ? `${activeIds.length} email baru menunggu ditarik ke perangkat.`
+                : `${activeIds.length} new email(s) ready to pull to device.`,
+            lang,
+          });
         }
-      } catch {
-        // Local messages are already safely persisted
       }
-
-      // STEP 3: Clear fallback buffer & stamp authoritative purge receipt
-      writeLocalFallbackQueue(user, []);
-      if (receipt !== provisionalReceipt) {
-        await saveMessagesBatch(
-          localMsgs.map((m) => ({ ...m, ephemeralQueueReceipt: receipt }))
-        );
-      }
-
-      setLastPurgeReceipt(receipt);
-      setEdgePackets([]);
-      await loadLocalMessages();
-
-      if (localMsgs[0]) {
-        setSelectedThreadId(localMsgs[0].threadId);
-        setSelectedMessageId(localMsgs[0].id);
-      }
-
-      showToast(
-        lang === 'id'
-          ? `${localMsgs.length} email tersimpan di IndexedDB lokal & dihapus permanen dari server (${receipt}).`
-          : `${localMsgs.length} email(s) saved to local IndexedDB & permanently purged from edge (${receipt}).`
-      );
     } catch {
-      showToast(
-        lang === 'id'
-          ? 'Gagal menyimpan pesan ke IndexedDB lokal. Pesan tetap aman di antrean edge.'
-          : 'Failed to commit messages to local IndexedDB. Packets remain safely queued on edge.'
-      );
+      // Stay silent on transient offline errors
     } finally {
-      setSyncingEdge(false);
+      bgSyncRunningRef.current = false;
     }
-  };
+  }, [
+    user,
+    lang,
+    bgSyncPrefs.autoPullOnSync,
+    bgSyncPrefs.notificationsEnabled,
+    handlePopAndPurgeEdgeQueue,
+    checkEdgeTransitQueue,
+  ]);
+
+  useEffect(() => {
+    void syncPeriodicSyncRegistration(bgSyncPrefs.enabled).then((res) => {
+      setPeriodicSyncRegistered(res.registered);
+    });
+
+    if (!bgSyncPrefs.enabled) {
+      return;
+    }
+
+    let timerId: number | null = null;
+    let disposed = false;
+
+    const scheduleNext = () => {
+      if (disposed) return;
+      if (timerId !== null) {
+        window.clearTimeout(timerId);
+        timerId = null;
+      }
+      const profile = detectDeviceResourceProfile();
+      const delayMs = computeNextSyncDelayMs(
+        bgSyncPrefs.mode,
+        profile,
+        document.hidden
+      );
+      if (delayMs === null) return;
+      timerId = window.setTimeout(() => {
+        void runLightweightBackgroundCheck().finally(() => {
+          scheduleNext();
+        });
+      }, delayMs);
+    };
+
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        void runLightweightBackgroundCheck();
+      }
+      scheduleNext();
+    };
+
+    const onOnline = () => {
+      void runLightweightBackgroundCheck();
+      scheduleNext();
+    };
+
+    const onSwMessage = (event: MessageEvent) => {
+      if (
+        event.data &&
+        (event.data.type === 'VZ_MAIL_PERIODIC_SYNC' ||
+          event.data.type === 'VZ_MAIL_NOTIFICATION_CLICK')
+      ) {
+        void runLightweightBackgroundCheck();
+      }
+    };
+
+    scheduleNext();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('online', onOnline);
+    navigator.serviceWorker?.addEventListener('message', onSwMessage);
+
+    return () => {
+      disposed = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('online', onOnline);
+      navigator.serviceWorker?.removeEventListener('message', onSwMessage);
+    };
+  }, [bgSyncPrefs.enabled, bgSyncPrefs.mode, runLightweightBackgroundCheck]);
+
+  const handleUpdateBgSyncPrefs = useCallback(
+    (next: MailBackgroundSyncPrefs) => {
+      const saved = writeBackgroundSyncPrefs(user, next);
+      setBgSyncPrefs(saved);
+    },
+    [user]
+  );
+
+  const handleChangeOutboundFormat = useCallback(
+    (fmt: OutboundEmailFormat) => {
+      setComposeOutboundFormat(fmt);
+      writePreferredOutboundFormat(user, fmt);
+    },
+    [user]
+  );
 
   const handleSimulateInbound = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/mail/simulate-inbound', {
+      const res = await apiFetch('/api/mail/simulate-inbound', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -934,7 +1247,7 @@ export function VzMailWorkspace({
           user
         )}&filename=${encodeURIComponent(att.filename)}`;
 
-        const upRes = await fetch(uploadUrl, {
+        const upRes = await apiFetch(uploadUrl, {
           method: 'POST',
           headers: {
             'Content-Type': att.mimeType || 'application/octet-stream',
@@ -1000,15 +1313,17 @@ export function VzMailWorkspace({
         });
       }
 
-      const res = await fetch('/api/mail/send', {
+      const res = await apiFetch('/api/mail/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           senderUser: user,
+          senderName: session.name || user,
           fromAddress: cleanFrom,
           toAddress: cleanTo,
           subject: cleanSubject,
           bodyText: cleanBody,
+          format: composeOutboundFormat,
           attachments: uploadedMeta,
           externalLinks: params.externalLinks,
         }),
@@ -1305,7 +1620,7 @@ export function VzMailWorkspace({
     const ephemId = att.ephemeralId || att.id;
     setDownloadingAttId(att.id);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/mail/attachments/${encodeURIComponent(owner)}/${encodeURIComponent(ephemId)}`
       );
 
@@ -1395,15 +1710,17 @@ export function VzMailWorkspace({
         ? latestSubject
         : `Re: ${latestSubject}`;
 
-      const res = await fetch('/api/mail/send', {
+      const res = await apiFetch('/api/mail/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           senderUser: user,
+          senderName: session.name || user,
           fromAddress: primaryEmail,
           toAddress: selectedThreadId,
           subject: replySubject,
           bodyText: quickReplyText.trim(),
+          format: composeOutboundFormat,
         }),
       });
       const data = await res.json();
@@ -1931,6 +2248,54 @@ export function VzMailWorkspace({
         </div>
       </div>
 
+      {/* Background Sync (Opt-In) & Mail Diagnostics Quick Controls */}
+      <div className="pt-4 border-t border-slate-200 dark:border-[#232732] space-y-2 text-xs">
+        <div className="font-semibold text-slate-900 dark:text-white">
+          {lang === 'id' ? 'Sinkronisasi & Diagnostik' : 'Sync & Diagnostics'}
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            onCloseDrawer?.();
+            setBgSyncModalOpen(true);
+          }}
+          className="w-full min-h-[40px] px-3 py-2 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-200 bg-[#FAFAFA] dark:bg-[#0B0D11] hover:bg-slate-100 dark:hover:bg-[#1B202B] border border-slate-200 dark:border-[#232732] flex items-center justify-between gap-2 transition-colors cursor-pointer"
+        >
+          <span className="inline-flex items-center gap-2 truncate">
+            <Bell className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+            <span className="truncate">
+              {lang === 'id' ? 'Background Sync & Notif' : 'Background Sync & Alerts'}
+            </span>
+          </span>
+          <span
+            className={`text-[11px] font-mono shrink-0 ${
+              bgSyncPrefs.enabled
+                ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+                : 'text-slate-400'
+            }`}
+          >
+            {bgSyncPrefs.enabled ? 'ON' : 'OFF'}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            onCloseDrawer?.();
+            setDiagnosticsState({ open: true, tab: 'inbound' });
+          }}
+          className="w-full min-h-[40px] px-3 py-2 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-200 bg-[#FAFAFA] dark:bg-[#0B0D11] hover:bg-slate-100 dark:hover:bg-[#1B202B] border border-slate-200 dark:border-[#232732] flex items-center justify-between gap-2 transition-colors cursor-pointer"
+        >
+          <span className="inline-flex items-center gap-2 truncate">
+            <Activity className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <span className="truncate">
+              {lang === 'id'
+                ? 'Diagnostik & SPF/DKIM/DMARC'
+                : 'Diagnostics & SPF/DKIM/DMARC'}
+            </span>
+          </span>
+        </button>
+      </div>
+
       {/* Local Device IndexedDB & Zero Server Retention Telemetry */}
       <div className="pt-4 border-t border-slate-200 dark:border-[#232732] space-y-2 text-xs">
         <div className="flex items-center justify-between text-slate-700 dark:text-slate-300 font-medium">
@@ -1972,11 +2337,11 @@ export function VzMailWorkspace({
   );
 
   return (
-    <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-4 sm:py-6 space-y-4">
+    <div className="w-full max-w-[1440px] mx-auto px-4 sm:px-6 py-4 sm:py-6 space-y-4 overflow-x-clip">
       {reservedMailCheck.isReserved && (
         <div className="bg-rose-50 dark:bg-rose-950/40 text-rose-800 dark:text-rose-200 border border-rose-200 dark:border-rose-900/60 rounded-lg px-4 py-3 text-xs flex items-start gap-2.5">
           <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
-          <div className="leading-relaxed">
+          <div className="leading-relaxed min-w-0 [overflow-wrap:anywhere]">
             <strong>
               {lang === 'id'
                 ? `Username sistem "${user}" dilindungi (Reserved):`
@@ -1989,11 +2354,45 @@ export function VzMailWorkspace({
         </div>
       )}
 
-      {/* Fixed Floating Toast Notification (ALWAYS above modals & floating composer) */}
+      {/* Non-Silent Inbound Sync Error Alert Strip */}
+      {lastSyncError && (
+        <div
+          role="alert"
+          className="bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 border border-amber-200 dark:border-amber-900/60 rounded-xl px-4 py-3 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+        >
+          <div className="flex items-start gap-2.5 min-w-0">
+            <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 leading-relaxed [overflow-wrap:anywhere]">
+              <strong>
+                {lang === 'id' ? 'Sinkronisasi Inbound Terkendala:' : 'Inbound Sync Issue:'}
+              </strong>{' '}
+              {lastSyncError.message}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => void checkEdgeTransitQueue()}
+              className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-amber-900 dark:text-amber-100 bg-white/80 dark:bg-amber-900/40 border border-amber-300 dark:border-amber-700 rounded-lg cursor-pointer whitespace-nowrap"
+            >
+              {lang === 'id' ? 'Coba Lagi' : 'Retry'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDiagnosticsState({ open: true, tab: 'inbound' })}
+              className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 rounded-lg cursor-pointer whitespace-nowrap"
+            >
+              {lang === 'id' ? 'Buka Diagnostik' : 'Diagnostics'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Fixed Floating Toast Notification (strictly clamped to viewport so long email addresses NEVER widen or zoom mobile view) */}
       {toastNotice && (
         <div
           role={toastNotice.kind === 'error' ? 'alert' : 'status'}
-          className={`fixed top-4 right-4 z-[70] w-[min(440px,calc(100vw-2rem))] rounded-xl px-4 py-3 text-xs shadow-2xl border flex items-start justify-between gap-3 ${
+          className={`fixed top-[max(0.75rem,env(safe-area-inset-top))] left-4 right-4 sm:left-auto sm:right-[max(1rem,env(safe-area-inset-right))] sm:w-[min(440px,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] overflow-hidden z-[70] rounded-xl px-4 py-3 text-xs shadow-2xl border flex items-start justify-between gap-3 ${
             toastNotice.kind === 'error'
               ? 'bg-rose-950 text-rose-50 border-rose-700'
               : toastNotice.kind === 'success'
@@ -2001,14 +2400,14 @@ export function VzMailWorkspace({
                 : 'bg-slate-900 dark:bg-[#171E2E] text-white border-slate-700 dark:border-blue-800'
           }`}
         >
-          <div className="flex items-start gap-2.5 min-w-0">
+          <div className="flex items-start gap-2.5 min-w-0 flex-1">
             {toastNotice.kind === 'error' ? (
               <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
             ) : (
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
             )}
-            <div className="space-y-1.5 min-w-0">
-              <p className="break-words leading-snug font-medium">
+            <div className="space-y-1.5 min-w-0 flex-1">
+              <p className="break-words [overflow-wrap:anywhere] leading-snug font-medium">
                 {toastNotice.message}
               </p>
               {toastNotice.actionLabel && toastNotice.onAction && (
@@ -2030,29 +2429,37 @@ export function VzMailWorkspace({
             type="button"
             onClick={() => setToastNotice(null)}
             aria-label="Dismiss notification"
-            className="w-7 h-7 inline-flex items-center justify-center text-white/70 hover:text-white shrink-0 cursor-pointer"
+            className="w-8 h-8 inline-flex items-center justify-center text-white/70 hover:text-white shrink-0 cursor-pointer"
           >
-            <X className="w-3.5 h-3.5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
       {/* Workspace Control Toolbar */}
       <div className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-3 sm:px-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-        {/* Top / Left Row: Mobile Folders + Compose, View Switcher, Search */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Mobile / Tablet Folders Drawer Trigger + Quick Compose (< lg) */}
+        {/* Top / Left Row: Dedicated Mail Menu Hamburger + Compose (Mobile < lg), View Switcher, Search */}
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
+          {/* Second Hamburger (Mail Menu) + Quick Compose (< lg) */}
           <div className="flex items-center gap-2 w-full sm:w-auto lg:hidden">
             <button
               type="button"
               onClick={() => setMobileFoldersOpen(true)}
-              className="flex-1 sm:flex-none min-h-[44px] inline-flex items-center justify-between sm:justify-start gap-2 px-3 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232A38] border border-slate-200 dark:border-[#2A303D] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              aria-label={
+                lang === 'id'
+                  ? `Buka Menu Mail (folder aktif: ${activeFolderMeta.label})`
+                  : `Open Mail Menu (active folder: ${activeFolderMeta.label})`
+              }
+              aria-expanded={mobileFoldersOpen}
+              className="flex-1 sm:flex-none min-h-[44px] min-w-0 inline-flex items-center justify-between sm:justify-start gap-2 px-3 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232A38] border border-slate-200 dark:border-[#2A303D] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <span className="inline-flex items-center gap-2">
-                <FolderOpen className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
-                <span>{activeFolderMeta.label}</span>
+              <span className="inline-flex items-center gap-2 min-w-0">
+                <Menu className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                <span className="truncate">
+                  {lang === 'id' ? 'Menu Mail' : 'Mail Menu'} · {activeFolderMeta.label}
+                </span>
               </span>
-              <span className="font-mono tabular-nums text-[11px] text-slate-500 dark:text-slate-400">
+              <span className="font-mono tabular-nums text-[11px] text-slate-500 dark:text-slate-400 shrink-0">
                 {activeFolderMeta.count}
               </span>
             </button>
@@ -2119,11 +2526,11 @@ export function VzMailWorkspace({
           </div>
         </div>
 
-        {/* Right: Pop & Purge Edge Relay, Simulate Inbound, Local Vault, Lang/Theme */}
-        <div className="flex flex-wrap items-center gap-2">
+        {/* Right: Pop & Purge Edge Relay, Background Sync, Diagnostics, Simulate Inbound, Local Vault */}
+        <div className="flex flex-nowrap lg:flex-wrap items-center gap-2 overflow-x-auto pb-0.5 lg:pb-0 -mx-1 px-1">
           <button
             type="button"
-            onClick={handlePopAndPurgeEdgeQueue}
+            onClick={() => void handlePopAndPurgeEdgeQueue()}
             disabled={syncingEdge}
             className={`min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               edgePackets.length > 0
@@ -2143,6 +2550,30 @@ export function VzMailWorkspace({
                   ? 'Edge Queue: 0'
                   : 'Edge Queue: 0'}
             </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setBgSyncModalOpen(true)}
+            className={`min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              bgSyncPrefs.enabled
+                ? 'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-900/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/50'
+                : 'text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] border-transparent hover:bg-slate-200 dark:hover:bg-[#232A38]'
+            }`}
+          >
+            <Bell className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              {lang === 'id' ? 'Sync' : 'Sync'} · {bgSyncPrefs.enabled ? 'ON' : 'OFF'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setDiagnosticsState({ open: true, tab: 'inbound' })}
+            className="min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-[#1B202B] hover:bg-slate-200 dark:hover:bg-[#232A38] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Activity className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+            <span>{lang === 'id' ? 'Diagnostik' : 'Diagnostics'}</span>
           </button>
 
           <button
@@ -2231,12 +2662,12 @@ export function VzMailWorkspace({
         </div>
       </div>
 
-      {/* Mobile / Tablet Slide-Over Folders & Identity Drawer (< lg) */}
+      {/* Mobile / Tablet Slide-Over Mail Menu Drawer (< lg) — Second Hamburger specifically for Mail */}
       {mobileFoldersOpen && (
         <div
           role="dialog"
           aria-modal="true"
-          aria-label={lang === 'id' ? 'Folder & Identitas Mail' : 'Mail Folders & Identity'}
+          aria-label={lang === 'id' ? 'Menu Mail (Folder, Spam & Sync)' : 'Mail Menu (Folders, Spam & Sync)'}
           className="fixed inset-0 z-50 lg:hidden flex"
         >
           <div
@@ -2244,18 +2675,25 @@ export function VzMailWorkspace({
             className="fixed inset-0 bg-black/55 backdrop-blur-xs"
             aria-hidden="true"
           />
-          <aside className="relative z-10 w-[300px] max-w-[86vw] h-full bg-white dark:bg-[#13161C] border-r border-slate-200 dark:border-[#232732] shadow-2xl flex flex-col">
+          <aside className="relative z-10 w-[300px] max-w-[86vw] h-full bg-white dark:bg-[#13161C] border-r border-slate-200 dark:border-[#232732] shadow-2xl flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]">
             <div className="h-14 px-4 border-b border-slate-200 dark:border-[#232732] flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2 min-w-0">
                 <FolderOpen className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
-                <span className="text-sm font-bold text-slate-900 dark:text-white font-display truncate">
-                  {lang === 'id' ? 'Folder & Identitas' : 'Folders & Identity'}
-                </span>
+                <div className="min-w-0">
+                  <div className="text-sm font-bold text-slate-900 dark:text-white font-display truncate">
+                    {lang === 'id' ? 'Menu Mail' : 'Mail Menu'}
+                  </div>
+                  <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                    {lang === 'id'
+                      ? 'Kotak Masuk · Spam · Alias · Sync'
+                      : 'Inbox · Spam · Aliases · Sync'}
+                  </div>
+                </div>
               </div>
               <button
                 type="button"
                 onClick={() => setMobileFoldersOpen(false)}
-                aria-label={lang === 'id' ? 'Tutup panel folder' : 'Close folders drawer'}
+                aria-label={lang === 'id' ? 'Tutup menu mail' : 'Close mail menu'}
                 className="w-11 h-11 inline-flex items-center justify-center rounded-lg text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-[#1B202B] cursor-pointer"
               >
                 <X className="w-5 h-5" />
@@ -3210,6 +3648,9 @@ export function VzMailWorkspace({
         onClearFeedback={() => setComposeFeedback({ kind: 'idle', message: '' })}
         quotaUsed={quotaUsed}
         quotaLimit={quotaLimit}
+        outboundFormat={composeOutboundFormat}
+        onChangeOutboundFormat={handleChangeOutboundFormat}
+        onOpenDnsCheck={() => setDiagnosticsState({ open: true, tab: 'dns' })}
         onSend={handleSendOutboundEmail}
         onSaveDraft={handleSaveDraft}
         onDiscard={() => {
@@ -3435,6 +3876,38 @@ export function VzMailWorkspace({
         discoveredPlusTags={discoveredPlusTags}
         initialEmail={mailQrState.initialEmail}
         onClose={() => setMailQrState({ open: false })}
+      />
+
+      <MailBackgroundSyncModal
+        open={bgSyncModalOpen}
+        onClose={() => setBgSyncModalOpen(false)}
+        lang={lang}
+        prefs={bgSyncPrefs}
+        onUpdatePrefs={handleUpdateBgSyncPrefs}
+        lastSyncedAt={lastSyncedAt}
+        periodicSyncRegistered={periodicSyncRegistered}
+        syncingNow={syncingEdge}
+        onSyncNow={async () => {
+          await runLightweightBackgroundCheck();
+          await checkEdgeTransitQueue();
+        }}
+      />
+
+      <MailDiagnosticsModal
+        open={diagnosticsState.open}
+        initialTab={diagnosticsState.tab}
+        onClose={() => setDiagnosticsState((prev) => ({ ...prev, open: false }))}
+        lang={lang}
+        username={user}
+        primaryDomain={domain}
+        lastSyncError={lastSyncError}
+        lastSyncedAt={lastSyncedAt}
+        onRetryQueueSync={async () => {
+          await checkEdgeTransitQueue();
+        }}
+        onPullAndPurge={async () => {
+          await handlePopAndPurgeEdgeQueue();
+        }}
       />
     </div>
   );

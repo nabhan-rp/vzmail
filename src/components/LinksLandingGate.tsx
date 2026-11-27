@@ -12,6 +12,7 @@ import { useEffect, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import { checkReservedUsername } from '../utils/reservedUsernames';
+import { InAppSsoNotice } from './InAppSsoNotice';
 import type { ActiveHostView } from './MailLinksTopBar';
 
 interface LinksLandingGateProps {
@@ -233,17 +234,20 @@ export function LinksLandingGate({
                 </div>
               </>
             ) : (
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={onLoginWithAuth0}
-                  className="min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <span>
-                    {lang === 'id' ? 'Masuk SSO untuk Atur Bio' : 'Sign In SSO to Manage Bio'}
-                  </span>
-                  <ArrowRight className="w-4 h-4 shrink-0" />
-                </button>
+              <div className="space-y-3">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={onLoginWithAuth0}
+                    className="min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <span>
+                      {lang === 'id' ? 'Masuk SSO untuk Atur Bio' : 'Sign In SSO to Manage Bio'}
+                    </span>
+                    <ArrowRight className="w-4 h-4 shrink-0" />
+                  </button>
+                </div>
+                <InAppSsoNotice lang={lang} />
               </div>
             )}
           </div>

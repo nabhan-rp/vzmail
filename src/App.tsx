@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { ConfirmActionModal } from './components/ConfirmActionModal';
 import { CrossServiceOfferBar } from './components/CrossServiceOfferBar';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { InAppBrowserBanner } from './components/InAppBrowserBanner';
 import { MailLandingGate } from './components/MailLandingGate';
 import {
   MailLinksTopBar,
@@ -383,7 +384,8 @@ export default function App() {
 
   return (
     <ErrorBoundary>
-      <div className="min-h-screen flex flex-col bg-[#FAFAFA] text-slate-900 dark:bg-[#0B0D11] dark:text-slate-100">
+      <div className="min-h-[100dvh] w-full max-w-[100vw] overflow-x-clip flex flex-col bg-[#FAFAFA] text-slate-900 dark:bg-[#0B0D11] dark:text-slate-100">
+        <InAppBrowserBanner lang={lang} />
         {!hideGlobalChrome && (
           <MailLinksTopBar
             lang={lang}
@@ -437,7 +439,7 @@ export default function App() {
           </div>
         )}
 
-        <main className="flex-1">
+        <main className="flex-1 min-w-0">
           <Suspense fallback={<WorkspaceFallback />}>
             {activeHost === 'mail.vz.gay' &&
               (session.isAuthenticated && session.mailActivated ? (
@@ -547,7 +549,7 @@ export default function App() {
         </main>
 
         {!hideGlobalChrome && (
-          <footer className="border-t border-slate-200 dark:border-[#232732] bg-white dark:bg-[#0D1016] pb-16 md:pb-0">
+          <footer className="border-t border-slate-200 dark:border-[#232732] bg-white dark:bg-[#0D1016] pb-[calc(4rem+env(safe-area-inset-bottom))] md:pb-0 pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
             <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-5 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
               <div>
                 <span>© 2026 PT Galeri Langkah Bahagia Yuwana (galbay)</span>
@@ -565,7 +567,7 @@ export default function App() {
                   }}
                   className="hover:text-slate-900 dark:hover:text-white transition-colors font-medium"
                 >
-                  {lang === 'id' ? 'Changelog v1.0.0' : 'Changelog v1.0.0'}
+                  {lang === 'id' ? 'Changelog v1.1.2' : 'Changelog v1.1.2'}
                 </a>
                 <a
                   href="/terms"

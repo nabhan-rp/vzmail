@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
+import { copyTextSafely } from '../utils/clipboard';
 import type { BioQrDesignConfig } from '../utils/linksModel';
 import {
   buildMailtoPayload,
@@ -66,7 +67,7 @@ export function QrCodeModal({
   const isExternalHttp = /^https?:\/\//i.test(url);
 
   const handleCopy = () => {
-    navigator.clipboard?.writeText(url).catch(() => {});
+    void copyTextSafely(url);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
   };
@@ -338,9 +339,7 @@ export function MailQrModal({
   const filenameBase = `${format}-${effectiveEmail.replace(/[@+]/g, '-')}`;
 
   const handleCopy = () => {
-    navigator.clipboard
-      ?.writeText(format === 'mailto' ? effectiveEmail : qrPayload)
-      .catch(() => {});
+    void copyTextSafely(format === 'mailto' ? effectiveEmail : qrPayload);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
   };

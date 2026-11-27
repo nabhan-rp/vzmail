@@ -142,7 +142,9 @@ export function resolveCanonicalEmail(
   rawEmail: string,
   activeDomains: readonly string[] = ['imy.li']
 ): ResolvedEmailIdentity {
-  const trimmed = rawEmail.trim().toLowerCase().slice(0, 254);
+  const angleMatch = rawEmail.match(/<([^<>@\s]+@[^<>@\s]+)>/);
+  const extracted = angleMatch ? angleMatch[1] : rawEmail;
+  const trimmed = extracted.trim().replace(/^<+|>+$/g, '').toLowerCase().slice(0, 254);
   const atIndex = trimmed.lastIndexOf('@');
 
   if (atIndex <= 0 || atIndex === trimmed.length - 1) {

@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
+import { copyTextSafely } from '../utils/clipboard';
 import {
   BIO_QR_PRESETS,
   getDefaultQrDesignForTheme,
@@ -112,7 +113,7 @@ export function BioQrCustomizerPanel({
   };
 
   const handleCopyUrl = () => {
-    navigator.clipboard?.writeText(publicUrl).catch(() => {});
+    void copyTextSafely(publicUrl);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1800);
   };

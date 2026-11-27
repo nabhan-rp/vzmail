@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
+import { copyTextSafely } from '../utils/clipboard';
 import { getOrSeedDomains, saveDomainOption } from '../utils/localMailDb';
 import { sanitizeDomain, type MailDomainOption } from '../utils/mailIdentity';
 import {
@@ -278,7 +279,7 @@ export function WorkerDomainConsole({
   };
 
   const handleCopy = (label: string, code: string) => {
-    navigator.clipboard?.writeText(code).catch(() => {});
+    void copyTextSafely(code);
     flashCopied(
       lang === 'id'
         ? `${label} disalin ke clipboard.`

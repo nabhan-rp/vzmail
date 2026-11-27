@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Language } from '../data/i18n';
+import { apiFetch } from '../utils/apiAuthClient';
 import type { LocalMailMessage } from '../utils/localMailDb';
 
 export interface MailSearchGroundingDrawerProps {
@@ -268,7 +269,7 @@ export function MailSearchGroundingDrawer({
       });
 
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/mail/verify-domain?domain=${encodeURIComponent(cleanDomain)}`,
           { cache: 'no-store' }
         );
@@ -367,7 +368,7 @@ export function MailSearchGroundingDrawer({
       setSearchError(null);
 
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/mail/vz-search?q=${encodeURIComponent(cleanQ)}&page=${pageToRun}`
         );
         const data = (await res.json().catch(() => null)) as {

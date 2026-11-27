@@ -29,15 +29,18 @@ import {
   Trash2,
   Upload,
   User,
+  X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
+import { apiFetch } from '../utils/apiAuthClient';
 import {
   MAX_RAW_UPLOAD_BYTES,
   formatBytesCompact,
   type EncodedAvatarResult,
 } from '../utils/avatarEncoder';
+import { copyTextSafely } from '../utils/clipboard';
 import {
   BIO_DELETE_COOLDOWN_DAYS,
   BIO_THEMES,
@@ -170,6 +173,7 @@ export function VzLinksWorkspace({
 
   const [activePageSlug, setActivePageSlug] = useState<string>('');
   const [editorTab, setEditorTab] = useState<EditorTab>('links');
+  const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
 
   // Bio avatar crop & upload state (independent from Auth0/myaccount SSO avatar)
   const [cropFile, setCropFile] = useState<File | null>(null);
@@ -257,7 +261,7 @@ export function VzLinksWorkspace({
   const loadRecycleBin = useCallback(async () => {
     setLoadingRecycle(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/links/recycle-bin?owner=${encodeURIComponent(username)}`,
         { cache: 'no-store' }
       );
@@ -278,7 +282,7 @@ export function VzLinksWorkspace({
   const loadWorkspace = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/links/bio/${encodeURIComponent(username)}`, {
+      const res = await apiFetch(`/api/links/bio/${encodeURIComponent(username)}`, {
         cache: 'no-store',
       });
       const json = (await res.json().catch(() => null)) as {
@@ -388,7 +392,7 @@ export function VzLinksWorkspace({
   ) => {
     setSaving(true);
     try {
-      const res = await fetch(`/api/links/bio/${encodeURIComponent(username)}`, {
+      const res = await apiFetch(`/api/links/bio/${encodeURIComponent(username)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -452,14 +456,16 @@ export function VzLinksWorkspace({
     if (!file) return;
 
     const lowerName = file.name.toLowerCase();
+    const isSvgFile =
+      file.type.toLowerCase() === 'image/svg+xml' || /\.svgz?$/.test(lowerName);
     const hasRecognizedImageExt =
-      /\.(jpe?g|png|webp|gif|avif|heic|heif|bmp|tiff?|ico|svg)$/.test(lowerName);
-    if (!file.type.startsWith('image/') && !hasRecognizedImageExt) {
+      /\.(jpe?g|png|webp|gif|avif|heic|heif|bmp|tiff?|ico)$/.test(lowerName);
+    if (isSvgFile || (!file.type.startsWith('image/') && !hasRecognizedImageExt)) {
       flashStatus(
         'error',
         lang === 'id'
-          ? 'Pilih file gambar yang valid (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF, SVG, atau AVIF).'
-          : 'Please choose a valid image file (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF, SVG, or AVIF).'
+          ? 'Pilih file gambar raster yang valid (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF, atau AVIF). SVG tidak diizinkan demi keamanan.'
+          : 'Please choose a valid raster image file (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF, or AVIF). SVG is blocked for security.'
       );
       return;
     }
@@ -544,7 +550,7 @@ export function VzLinksWorkspace({
           ? `/api/links/avatar/${encodeURIComponent(username)}`
           : `/api/links/avatar/${encodeURIComponent(username)}/${encodeURIComponent(cropTargetScope)}`;
 
-      const res = await fetch(endpoint, {
+      const res = await apiFetch(endpoint, {
         method: 'PUT',
         headers: { 'Content-Type': encoded.mimeType },
         body: encoded.blob,
@@ -600,7 +606,7 @@ export function VzLinksWorkspace({
           ? `/api/links/avatar/${encodeURIComponent(username)}`
           : `/api/links/avatar/${encodeURIComponent(username)}/${encodeURIComponent(cropTargetScope)}`;
 
-      const res = await fetch(`${baseEndpoint}?convert=server`, {
+      const res = await apiFetch(`${baseEndpoint}?convert=server`, {
         method: 'PUT',
         headers: {
           'Content-Type': rawFile.type || 'application/octet-stream',
@@ -657,7 +663,7 @@ export function VzLinksWorkspace({
           ? `/api/links/avatar/${encodeURIComponent(username)}`
           : `/api/links/avatar/${encodeURIComponent(username)}/${encodeURIComponent(scope)}`;
 
-      await fetch(endpoint, { method: 'DELETE' }).catch(() => {});
+      await apiFetch(endpoint, { method: 'DELETE' }).catch(() => {});
 
       const nextWorkspace: BioWorkspaceData =
         scope === 'main'
@@ -738,7 +744,7 @@ export function VzLinksWorkspace({
     payload: unknown
   ) => {
     try {
-      const res = await fetch('/api/links/recycle-bin', {
+      const res = await apiFetch('/api/links/recycle-bin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -774,7 +780,7 @@ export function VzLinksWorkspace({
       }
 
       if (page.avatarUrl && !moveToRecycleBin) {
-        await fetch(
+        await apiFetch(
           `/api/links/avatar/${encodeURIComponent(username)}/${encodeURIComponent(page.pageSlug)}`,
           { method: 'DELETE' }
         ).catch(() => {});
@@ -915,7 +921,7 @@ export function VzLinksWorkspace({
     setTogglingDeactivate(true);
     setConfirmBusy(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/links/bio/${encodeURIComponent(username)}/status`,
         {
           method: 'PATCH',
@@ -971,7 +977,7 @@ export function VzLinksWorkspace({
   const handlePermanentDeleteBio = async () => {
     setConfirmBusy(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/links/bio/${encodeURIComponent(username)}`,
         { method: 'DELETE' }
       );
@@ -1017,7 +1023,7 @@ export function VzLinksWorkspace({
   const handleRestoreRecycleItem = async (item: RecycleBinRecord) => {
     setRecycleActionId(item.id);
     try {
-      const res = await fetch('/api/links/recycle-bin/restore', {
+      const res = await apiFetch('/api/links/recycle-bin/restore', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: item.id, ownerUser: username }),
@@ -1059,7 +1065,7 @@ export function VzLinksWorkspace({
     setConfirmBusy(true);
     setRecycleActionId(item.id);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/links/recycle-bin/${encodeURIComponent(item.id)}?owner=${encodeURIComponent(username)}`,
         { method: 'DELETE' }
       );
@@ -1082,7 +1088,7 @@ export function VzLinksWorkspace({
   const executeEmptyRecycleBin = async () => {
     setConfirmBusy(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/links/recycle-bin?owner=${encodeURIComponent(username)}`,
         { method: 'DELETE' }
       );
@@ -1117,7 +1123,7 @@ export function VzLinksWorkspace({
   };
 
   const handleCopyActiveUrl = () => {
-    navigator.clipboard?.writeText(`https://${activePublicPath}`).catch(() => {});
+    void copyTextSafely(`https://${activePublicPath}`);
     setCopiedUrl(true);
     window.setTimeout(() => setCopiedUrl(false), 1800);
   };
@@ -1161,7 +1167,16 @@ export function VzLinksWorkspace({
           </h1>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-nowrap sm:flex-wrap items-center gap-2 overflow-x-auto pb-0.5 sm:pb-0 -mx-1 px-1">
+          <button
+            type="button"
+            onClick={() => setMobilePreviewOpen(true)}
+            className="lg:hidden min-h-[40px] px-3.5 py-2 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60 rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            <span>{lang === 'id' ? 'Pratinjau Bio' : 'Live Preview'}</span>
+          </button>
+
           <button
             type="button"
             onClick={() => onSelectHost('shortlinks')}
@@ -1286,20 +1301,20 @@ export function VzLinksWorkspace({
         </div>
       )}
 
-      {/* Multi-Page Switcher Bar ($USERNAME.imy.li & $USERNAME.imy.li/$PAGE) */}
-      <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-4 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-2">
+      {/* Multi-Page Switcher Bar ($USERNAME.imy.li & $USERNAME.imy.li/$PAGE) — Single-Row Touch Scroll on Mobile */}
+      <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl p-3.5 sm:p-4 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+          <div className="flex flex-nowrap sm:flex-wrap items-center gap-2 overflow-x-auto pb-0.5 sm:pb-0 -mx-1 px-1">
             {workspace.pages.map((page) => {
               const isSelected = page.pageSlug === activePage.pageSlug;
               const isRoot = page.pageSlug === '';
               const isSubpageHidden = !isRoot && page.isPublished === false;
               return (
-                <div key={page.id} className="inline-flex items-center">
+                <div key={page.id} className="inline-flex items-center shrink-0">
                   <button
                     type="button"
                     onClick={() => setActivePageSlug(page.pageSlug)}
-                    className={`min-h-[36px] px-3 py-1.5 text-xs font-mono font-semibold rounded-lg border transition-colors inline-flex items-center gap-1.5 cursor-pointer ${
+                    className={`min-h-[38px] px-3 py-1.5 text-xs font-mono font-semibold rounded-lg border transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
                       isSelected
                         ? 'bg-blue-600 text-white border-blue-600'
                         : isSubpageHidden
@@ -1334,7 +1349,7 @@ export function VzLinksWorkspace({
                 setAddingPage((v) => !v);
                 setNewPageError(null);
               }}
-              className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 bg-blue-50/70 dark:bg-blue-950/30 hover:bg-blue-100 dark:hover:bg-blue-950/50 border border-blue-200 dark:border-blue-900/60 rounded-lg inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+              className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 bg-blue-50/70 dark:bg-blue-950/30 hover:bg-blue-100 dark:hover:bg-blue-950/50 border border-blue-200 dark:border-blue-900/60 rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
             >
               <FilePlus2 className="w-3.5 h-3.5" />
               <span>{lang === 'id' ? '+ Halaman Baru (/$PAGE)' : '+ New Page (/$PAGE)'}</span>
@@ -1720,7 +1735,7 @@ export function VzLinksWorkspace({
                         <input
                           ref={subpageAvatarInputRef}
                           type="file"
-                          accept="image/*,.heic,.heif,.bmp,.tiff,.tif,.svg,.avif,.webp"
+                          accept="image/*,.heic,.heif,.bmp,.tiff,.tif,.avif,.webp"
                           onChange={(e) =>
                             handleSelectAvatarFile(e, activePage.pageSlug)
                           }
@@ -2041,8 +2056,8 @@ export function VzLinksWorkspace({
                           </div>
                           <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
                             {lang === 'id'
-                              ? 'Terpisah dari foto SSO myaccount.vz.gay. Unggah gambar format apa saja (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF, SVG maks 10 MB) — bisa potong 1:1 atau langsung biarkan server mengonversi otomatis ke AVIF ultra-ringan di R2.'
-                              : 'Independent from your myaccount.vz.gay SSO photo. Upload any image format (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF, SVG up to 10 MB) — crop 1:1 or let the server convert automatically to ultra-light AVIF in R2.'}
+                              ? 'Terpisah dari foto SSO myaccount.vz.gay. Unggah gambar raster format apa saja (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF maks 10 MB) — bisa potong 1:1 atau langsung biarkan server mengonversi otomatis ke AVIF ultra-ringan di R2.'
+                              : 'Independent from your myaccount.vz.gay SSO photo. Upload any raster image format (JPG, PNG, WebP, GIF, HEIC, BMP, TIFF up to 10 MB) — crop 1:1 or let the server convert automatically to ultra-light AVIF in R2.'}
                           </p>
                         </div>
                       </div>
@@ -2051,7 +2066,7 @@ export function VzLinksWorkspace({
                         <input
                           ref={mainAvatarInputRef}
                           type="file"
-                          accept="image/*,.heic,.heif,.bmp,.tiff,.tif,.svg,.avif,.webp"
+                          accept="image/*,.heic,.heif,.bmp,.tiff,.tif,.avif,.webp"
                           onChange={(e) => handleSelectAvatarFile(e, 'main')}
                           className="hidden"
                         />
@@ -2773,8 +2788,8 @@ export function VzLinksWorkspace({
           </div>
         </div>
 
-        {/* Right Live Mobile Preview */}
-        <div className="lg:col-span-5 lg:sticky lg:top-20 space-y-3">
+        {/* Right Live Mobile Preview (Sticky on lg+ Desktop, Bottom-Sheet Modal on < lg Mobile) */}
+        <div className="hidden lg:block lg:col-span-5 lg:sticky lg:top-20 space-y-3">
           <div className="flex items-center justify-between text-xs text-slate-500 font-mono">
             <span>{lang === 'id' ? 'Pratinjau Langsung' : 'Live Preview'}</span>
             <div className="flex items-center gap-2 min-w-0">
@@ -2902,6 +2917,216 @@ export function VzLinksWorkspace({
           </div>
         </div>
       </div>
+
+      {/* Floating Mobile Quick Preview Trigger (< lg) */}
+      <div className="lg:hidden fixed bottom-[calc(4.5rem+env(safe-area-inset-bottom))] right-[max(1rem,env(safe-area-inset-right))] z-40 flex items-center gap-2">
+        {hasUnsaved && (
+          <button
+            type="button"
+            onClick={() => void handleSaveToServer()}
+            disabled={saving || loading || isReservedHandle || isCooldownLocked}
+            className="min-h-[44px] px-3.5 py-2.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-lg inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>{saving ? '...' : lang === 'id' ? 'Simpan' : 'Save'}</span>
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => setMobilePreviewOpen(true)}
+          className="min-h-[44px] px-4 py-2.5 text-xs font-semibold text-white bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-700 border border-slate-700 dark:border-blue-500 rounded-xl shadow-xl inline-flex items-center gap-2 whitespace-nowrap cursor-pointer"
+        >
+          <Eye className="w-4 h-4" />
+          <span>{lang === 'id' ? 'Pratinjau Bio' : 'Bio Preview'}</span>
+        </button>
+      </div>
+
+      {/* Mobile Bottom-Sheet Live Bio Preview Drawer (< lg) */}
+      {mobilePreviewOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={lang === 'id' ? 'Pratinjau Langsung Bio' : 'Live Bio Preview'}
+          className="lg:hidden fixed inset-0 z-50 flex flex-col justify-end"
+        >
+          <div
+            onClick={() => setMobilePreviewOpen(false)}
+            className="fixed inset-0 bg-black/60 backdrop-blur-xs"
+          />
+          <div className="relative z-10 w-full max-h-[88dvh] bg-white dark:bg-[#13161C] border-t border-slate-200 dark:border-[#232732] rounded-t-2xl shadow-2xl flex flex-col overflow-hidden pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
+            {/* Sheet Grab Handle & Header */}
+            <div className="pt-2 px-4 pb-3 border-b border-slate-200 dark:border-[#232732] bg-[#FAFAFA] dark:bg-[#0E1117] shrink-0 space-y-2.5">
+              <div className="flex justify-center">
+                <span className="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-slate-900 dark:text-white font-display truncate">
+                    {lang === 'id' ? 'Pratinjau Langsung Bio' : 'Live Bio Preview'}
+                  </div>
+                  <div className="text-[11px] font-mono text-blue-600 dark:text-blue-400 truncate">
+                    https://{activePublicPath}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobilePreviewOpen(false);
+                      setEditorTab('qr_design');
+                    }}
+                    className="min-h-[38px] px-2.5 py-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60 rounded-lg inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>QR</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMobilePreviewOpen(false)}
+                    aria-label="Close preview"
+                    className="min-h-[38px] min-w-[38px] inline-flex items-center justify-center rounded-lg text-slate-500 hover:text-slate-900 dark:hover:text-white bg-slate-100 dark:bg-[#191E28] cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Quick Page Switcher inside Mobile Preview Sheet */}
+              {workspace.pages.length > 1 && (
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+                  {workspace.pages.map((p) => {
+                    const isSel = p.pageSlug === activePage.pageSlug;
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => setActivePageSlug(p.pageSlug)}
+                        className={`px-2.5 py-1 text-[11px] font-mono font-semibold rounded-md border whitespace-nowrap shrink-0 cursor-pointer ${
+                          isSel
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-white dark:bg-[#151922] text-slate-600 dark:text-slate-300 border-slate-200 dark:border-[#2A303E]'
+                        }`}
+                      >
+                        {p.pageSlug === '' ? `${username}.${domain}` : `/${p.pageSlug}`}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Scrollable Live Phone Bio Mockup */}
+            <div className="flex-1 overflow-y-auto p-4 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
+              <div
+                className={`rounded-2xl border p-5 min-h-[420px] flex flex-col justify-between transition-colors ${activeTheme.pageBgClass} ${activeTheme.dividerClass}`}
+              >
+                <div className="space-y-5">
+                  <div className="flex flex-col items-center text-center space-y-2">
+                    {effectivePreviewAvatar && !previewAvatarError ? (
+                      <img
+                        src={effectivePreviewAvatar}
+                        alt={
+                          activePage.pageSlug === ''
+                            ? workspace.displayName || username
+                            : activePage.title || activePage.pageSlug
+                        }
+                        referrerPolicy="no-referrer"
+                        onError={() => setPreviewAvatarError(true)}
+                        className="w-16 h-16 rounded-2xl object-cover border border-white/15"
+                      />
+                    ) : (
+                      <div
+                        className={`w-16 h-16 rounded-2xl flex items-center justify-center text-lg font-bold font-display ${activeTheme.avatarClass}`}
+                      >
+                        {(workspace.displayName || username).slice(0, 2).toUpperCase()}
+                      </div>
+                    )}
+
+                    <div className="space-y-1">
+                      <h2 className={`text-lg font-bold font-display ${activeTheme.titleClass}`}>
+                        {activePage.pageSlug === ''
+                          ? workspace.displayName || username
+                          : activePage.title || `/${activePage.pageSlug}`}
+                      </h2>
+                      {activePage.pageSlug === '' && workspace.headline && (
+                        <div className={`text-xs font-medium ${activeTheme.mutedClass}`}>
+                          {workspace.headline}
+                        </div>
+                      )}
+                      {(activePage.pageSlug === '' ? workspace.bio : activePage.description) && (
+                        <p
+                          className={`text-xs leading-relaxed max-w-[36ch] mx-auto ${activeTheme.bodyClass}`}
+                        >
+                          {activePage.pageSlug === ''
+                            ? workspace.bio
+                            : activePage.description}
+                        </p>
+                      )}
+                    </div>
+
+                    {activePage.showSocials && filledSocials.length > 0 && (
+                      <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                        {filledSocials.map((platform) => (
+                          <span
+                            key={platform.id}
+                            title={platform.label}
+                            className={`w-9 h-9 rounded-lg border inline-flex items-center justify-center ${activeTheme.socialBtnClass}`}
+                          >
+                            <SocialIconGlyph platform={platform.id} className="w-4 h-4" />
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-2.5">
+                    {activePage.links.filter((l) => l.enabled).length === 0 ? (
+                      <div
+                        className={`p-5 rounded-xl border border-dashed text-center text-xs ${activeTheme.dividerClass} ${activeTheme.mutedClass}`}
+                      >
+                        {lang === 'id'
+                          ? 'Belum ada tautan aktif di halaman ini.'
+                          : 'No active links on this page yet.'}
+                      </div>
+                    ) : (
+                      activePage.links
+                        .filter((l) => l.enabled)
+                        .map((link) => (
+                          <div
+                            key={link.id}
+                            className={`w-full px-4 py-3 border flex items-center justify-between gap-3 transition-colors ${buttonRadiusClass} ${
+                              activePage.buttonStyle === 'outline'
+                                ? activeTheme.linkOutlineClass
+                                : activeTheme.linkSolidClass
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold truncate">
+                                {link.title}
+                              </div>
+                              {link.subtitle && (
+                                <div className="text-[11px] opacity-75 truncate">
+                                  {link.subtitle}
+                                </div>
+                              )}
+                            </div>
+                            <ExternalLink className="w-3.5 h-3.5 opacity-70 shrink-0" />
+                          </div>
+                        ))
+                    )}
+                  </div>
+                </div>
+
+                <div
+                  className={`pt-4 mt-5 border-t text-center text-[11px] font-mono ${activeTheme.dividerClass} ${activeTheme.mutedClass}`}
+                >
+                  {activePublicPath}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Interactive 1:1 Crop or Direct Server -> AVIF Upload Modal */}
       <BioAvatarCropModal

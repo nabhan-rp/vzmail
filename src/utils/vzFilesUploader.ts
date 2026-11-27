@@ -5,6 +5,7 @@
  * Used in VZ Mail Composer for files > 10 MB (zero R2 storage footprint).
  */
 
+import { apiFetch, getApiAuthToken } from './apiAuthClient';
 import { buildVzFilesShareUrl } from './mailExternalLinks';
 
 export interface VzFilesUploadResult {
@@ -71,16 +72,20 @@ function putPartDirectWithProgress(
   });
 }
 
-function putPartViaProxyWithProgress(
+async function putPartViaProxyWithProgress(
   targetUrl: string,
   chunk: Blob,
   onChunkProgress: (loadedBytes: number) => void
 ): Promise<{ ok: boolean; etag?: string; error?: string }> {
+  const authToken = await getApiAuthToken();
   return new Promise((resolve) => {
     try {
       const xhr = new XMLHttpRequest();
       xhr.open('PUT', '/api/vzfiles/upload-part', true);
       xhr.setRequestHeader('x-target-url', targetUrl);
+      if (authToken) {
+        xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+      }
       xhr.upload.onprogress = (ev) => {
         if (ev.lengthComputable) {
           onChunkProgress(ev.loaded);
@@ -126,12 +131,16 @@ async function legacySingleUpload(
     detail: `Mengunggah ${file.name} via VZ Files...`,
   });
 
+  const authToken = await getApiAuthToken();
   const result = await new Promise<{ ok: boolean; hash?: string; error?: string }>(
     (resolve) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/vzfiles/legacy-upload', true);
       xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
       xhr.setRequestHeader('x-file-name', encodeURIComponent(file.name || 'upload.bin'));
+      if (authToken) {
+        xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+      }
       xhr.upload.onprogress = (ev) => {
         if (ev.lengthComputable && ev.total > 0) {
           const pct = Math.min(95, Math.max(15, Math.round((ev.loaded / ev.total) * 90)));
@@ -201,7 +210,7 @@ export async function uploadFileToVzFiles(
   // 1. Request multipart presigned URLs from VikingFile via same-origin proxy
   let initData: GetUploadUrlResponse | null = null;
   try {
-    const initRes = await fetch('/api/vzfiles/get-upload-url', {
+    const initRes = await apiFetch('/api/vzfiles/get-upload-url', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ size: file.size }),
@@ -213,7 +222,7 @@ export async function uploadFileToVzFiles(
     initData = null;
   }
 
-  // Fallback to legacy single upload if multipart init unavailable and file <= 95 MB
+  // Fallback to legacy single upload if multipart init unavailable and file <= 20 MB (safe for Worker 128 MB RAM limit)
   if (
     !initData ||
     !initData.uploadId ||
@@ -221,7 +230,7 @@ export async function uploadFileToVzFiles(
     !Array.isArray(initData.urls) ||
     initData.urls.length === 0
   ) {
-    if (file.size <= 95 * 1024 * 1024) {
+    if (file.size <= 20 * 1024 * 1024) {
       return legacySingleUpload(file, onProgress);
     }
     throw new Error(
@@ -298,7 +307,7 @@ export async function uploadFileToVzFiles(
     detail: 'Menyelesaikan tautan berbagi files.vz.gay...',
   });
 
-  const completeRes = await fetch('/api/vzfiles/complete-upload', {
+  const completeRes = await apiFetch('/api/vzfiles/complete-upload', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

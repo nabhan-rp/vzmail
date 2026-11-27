@@ -16,6 +16,7 @@ import {
   Plus,
   Save,
   Send,
+  ShieldCheck,
   Trash2,
   X,
 } from 'lucide-react';
@@ -31,6 +32,7 @@ import {
   getExternalProviderDisplayName,
   normalizeAndClassifyExternalLink,
   type MailExternalLink,
+  type OutboundEmailFormat,
 } from '../utils/mailExternalLinks';
 import type { VzFilesUploadProgress } from '../utils/vzFilesUploader';
 
@@ -88,6 +90,9 @@ interface MailFloatingComposerProps {
   onClearFeedback: () => void;
   quotaUsed: number;
   quotaLimit: number;
+  outboundFormat: OutboundEmailFormat;
+  onChangeOutboundFormat: (fmt: OutboundEmailFormat) => void;
+  onOpenDnsCheck?: () => void;
   onSend: (e: React.FormEvent) => void;
   onSaveDraft: () => void;
   onDiscard: () => void;
@@ -134,6 +139,9 @@ export function MailFloatingComposer({
   onClearFeedback,
   quotaUsed,
   quotaLimit,
+  outboundFormat,
+  onChangeOutboundFormat,
+  onOpenDnsCheck,
   onSend,
   onSaveDraft,
   onDiscard,
@@ -219,7 +227,7 @@ export function MailFloatingComposer({
       <div
         role="region"
         aria-label={lang === 'id' ? 'Jendela Tulis Email (Diperkecil)' : 'Minimized Email Composer'}
-        className="fixed bottom-16 lg:bottom-0 right-3 sm:right-6 z-50 w-72 sm:w-80 bg-slate-900 dark:bg-[#181D27] text-white border border-slate-700 dark:border-[#2C3344] rounded-t-xl lg:rounded-b-none rounded-b-xl shadow-2xl overflow-hidden"
+        className="fixed bottom-[calc(4rem+env(safe-area-inset-bottom))] lg:bottom-0 right-[max(0.75rem,env(safe-area-inset-right))] sm:right-6 z-50 w-72 sm:w-80 bg-slate-900 dark:bg-[#181D27] text-white border border-slate-700 dark:border-[#2C3344] rounded-t-xl lg:rounded-b-none rounded-b-xl shadow-2xl overflow-hidden"
       >
         <div className="h-11 px-3.5 flex items-center justify-between gap-2">
           <button
@@ -281,71 +289,78 @@ export function MailFloatingComposer({
       onDrop={handleDrop}
       className={
         isFullscreen
-          ? 'w-full max-w-4xl h-[min(88vh,780px)] bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#252B38] rounded-2xl shadow-2xl flex flex-col overflow-hidden'
-          : 'fixed bottom-16 lg:bottom-0 right-2 sm:right-6 z-50 w-[min(590px,calc(100vw-1rem))] max-h-[min(84vh,670px)] bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#282F3E] rounded-t-2xl lg:rounded-b-none rounded-b-2xl shadow-2xl flex flex-col overflow-hidden'
+          ? 'w-full max-w-4xl h-[min(92dvh,780px)] bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#252B38] rounded-2xl shadow-2xl flex flex-col overflow-hidden'
+          : 'fixed inset-x-0 bottom-0 sm:inset-x-auto sm:bottom-[calc(4rem+env(safe-area-inset-bottom))] lg:bottom-0 sm:right-[max(1.5rem,env(safe-area-inset-right))] z-50 w-full sm:w-[min(590px,calc(100vw-1.5rem))] h-[min(90dvh,calc(100dvh-3.5rem))] sm:h-auto sm:max-h-[min(84vh,670px)] bg-white dark:bg-[#13161C] border-t sm:border border-slate-200 dark:border-[#282F3E] rounded-t-2xl sm:rounded-b-2xl lg:rounded-b-none shadow-2xl flex flex-col overflow-hidden pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] sm:pl-0 sm:pr-0'
       }
     >
-      {/* Top Window Chrome Bar */}
-      <div className="px-4 py-2.5 bg-slate-900 dark:bg-[#181D27] text-white flex items-center justify-between gap-2 shrink-0">
-        <div className="min-w-0 flex items-center gap-2">
-          <Send className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-          <div className="min-w-0">
-            <div className="text-xs font-bold truncate font-display">
-              {headerTitle}
-            </div>
-            <div className="text-[11px] font-mono tabular-nums text-slate-300 truncate">
-              {editingDraftId
-                ? lang === 'id'
-                  ? 'Mengedit Draf Lokal'
-                  : 'Editing Local Draft'
-                : lang === 'id'
-                  ? 'Mode Mengambang · Bebas baca email lain'
-                  : 'Floating Mode · Read other emails freely'}{' '}
-              · {quotaUsed}/{quotaLimit}
+      {/* Top Window Chrome Bar + Mobile Sheet Grab Handle */}
+      <div className="bg-slate-900 dark:bg-[#181D27] text-white shrink-0">
+        {!isFullscreen && (
+          <div className="sm:hidden pt-2 flex justify-center">
+            <span className="w-10 h-1 rounded-full bg-slate-500/70" />
+          </div>
+        )}
+        <div className="px-4 py-2.5 flex items-center justify-between gap-2">
+          <div className="min-w-0 flex items-center gap-2">
+            <Send className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+            <div className="min-w-0">
+              <div className="text-xs font-bold truncate font-display">
+                {headerTitle}
+              </div>
+              <div className="text-[11px] font-mono tabular-nums text-slate-300 truncate">
+                {editingDraftId
+                  ? lang === 'id'
+                    ? 'Mengedit Draf Lokal'
+                    : 'Editing Local Draft'
+                  : lang === 'id'
+                    ? 'Mode Mengambang · Bebas baca email lain'
+                    : 'Floating Mode · Read other emails freely'}{' '}
+                · {quotaUsed}/{quotaLimit}
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className="flex items-center gap-0.5 shrink-0">
-          <button
-            type="button"
-            onClick={() => onChangeMode('minimized')}
-            title={lang === 'id' ? 'Perkecil (Minimize)' : 'Minimize'}
-            aria-label={lang === 'id' ? 'Perkecil jendela' : 'Minimize composer'}
-            className="w-8 h-8 inline-flex items-center justify-center rounded-md text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-          >
-            <Minus className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() => onChangeMode(isFullscreen ? 'floating' : 'fullscreen')}
-            title={
-              isFullscreen
-                ? lang === 'id'
-                  ? 'Keluar Layar Penuh'
-                  : 'Exit Fullscreen'
-                : lang === 'id'
-                  ? 'Layar Penuh (Fullscreen)'
-                  : 'Fullscreen'
-            }
-            aria-label={isFullscreen ? 'Exit fullscreen' : 'Expand to fullscreen'}
-            className="w-8 h-8 inline-flex items-center justify-center rounded-md text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-          >
-            {isFullscreen ? (
-              <Minimize2 className="w-3.5 h-3.5" />
-            ) : (
-              <Maximize2 className="w-3.5 h-3.5" />
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={() => onChangeMode('closed')}
-            title={lang === 'id' ? 'Tutup (isi tetap tersimpan sementara)' : 'Close'}
-            aria-label={lang === 'id' ? 'Tutup jendela' : 'Close composer'}
-            className="w-8 h-8 inline-flex items-center justify-center rounded-md text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-0.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => onChangeMode('minimized')}
+              title={lang === 'id' ? 'Perkecil (Minimize)' : 'Minimize'}
+              aria-label={lang === 'id' ? 'Perkecil jendela' : 'Minimize composer'}
+              className="w-9 h-9 sm:w-8 sm:h-8 inline-flex items-center justify-center rounded-md text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+            >
+              <Minus className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onChangeMode(isFullscreen ? 'floating' : 'fullscreen')}
+              title={
+                isFullscreen
+                  ? lang === 'id'
+                    ? 'Keluar Layar Penuh'
+                    : 'Exit Fullscreen'
+                  : lang === 'id'
+                    ? 'Layar Penuh (Fullscreen)'
+                    : 'Fullscreen'
+              }
+              aria-label={isFullscreen ? 'Exit fullscreen' : 'Expand to fullscreen'}
+              className="hidden sm:inline-flex w-8 h-8 items-center justify-center rounded-md text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+            >
+              {isFullscreen ? (
+                <Minimize2 className="w-3.5 h-3.5" />
+              ) : (
+                <Maximize2 className="w-3.5 h-3.5" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => onChangeMode('closed')}
+              title={lang === 'id' ? 'Tutup (isi tetap tersimpan sementara)' : 'Close'}
+              aria-label={lang === 'id' ? 'Tutup jendela' : 'Close composer'}
+              className="w-9 h-9 sm:w-8 sm:h-8 inline-flex items-center justify-center rounded-md text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -369,8 +384,8 @@ export function MailFloatingComposer({
             ) : (
               <Loader2 className="w-4 h-4 text-blue-600 dark:text-blue-400 animate-spin shrink-0 mt-0.5" />
             )}
-            <div className="space-y-1.5 min-w-0">
-              <p className="leading-snug break-words font-medium">
+            <div className="space-y-1.5 min-w-0 flex-1">
+              <p className="leading-snug break-words [overflow-wrap:anywhere] font-medium">
                 {feedback.message}
               </p>
               {feedback.kind === 'error' && (
@@ -422,7 +437,7 @@ export function MailFloatingComposer({
               value={fromAlias}
               onChange={(e) => onChangeFromAlias(e.target.value)}
               disabled={sending}
-              className="flex-1 min-w-0 px-2.5 py-1.5 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#282F3E] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:border-blue-600"
+              className="flex-1 min-w-0 px-2.5 py-2 sm:py-1.5 text-xs font-mono bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#282F3E] rounded-lg text-slate-900 dark:text-white focus:outline-none focus:border-blue-600"
             >
               <option value={primaryEmail}>{primaryEmail} (Utama)</option>
               {aliasExamples.map((ex) => (
@@ -480,7 +495,7 @@ export function MailFloatingComposer({
           {/* Message Body */}
           <textarea
             id="vz-compose-body"
-            rows={isFullscreen ? 12 : 6}
+            rows={isFullscreen ? 12 : 7}
             required
             disabled={sending}
             value={body}
@@ -490,7 +505,7 @@ export function MailFloatingComposer({
                 ? 'Tulis isi pesan Anda di sini... Seret file (<=10 MB ke R2, atau >10 MB langsung ke VZ Files) atau sisipkan tautan Google Drive / Imgur.'
                 : 'Write your message here... Drag & drop files (<=10 MB via R2, or >10 MB via VZ Files) or insert Google Drive / Imgur links.'
             }
-            className="w-full min-h-[125px] flex-1 px-2.5 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] rounded-lg text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-blue-600 resize-y leading-relaxed"
+            className="w-full min-h-[140px] flex-1 px-2.5 py-2 text-xs sm:text-sm bg-[#FAFAFA] dark:bg-[#0B0D11] border border-slate-200 dark:border-[#232732] rounded-lg text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-blue-600 resize-y leading-relaxed"
           />
 
           {/* Smart >10 MB Action Banner — Offers instant upload to VZ Files (https://files.vz.gay) */}
@@ -897,13 +912,82 @@ export function MailFloatingComposer({
           }}
         />
 
-        {/* Bottom Action Bar */}
-        <div className="px-4 py-3 bg-[#FAFAFA] dark:bg-[#0E1117] border-t border-slate-200 dark:border-[#232732] flex flex-wrap items-center justify-between gap-2 shrink-0">
-          <div className="flex flex-wrap items-center gap-1.5">
+        {/* Outbound Deliverability Format Selector & DNS Check Bar */}
+        <div className="px-3 sm:px-4 py-2 bg-white dark:bg-[#11141B] border-t border-slate-200 dark:border-[#232732] flex flex-wrap items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+              {lang === 'id' ? 'Format:' : 'Format:'}
+            </span>
+            <div
+              role="group"
+              aria-label={lang === 'id' ? 'Format Pengiriman Email' : 'Email Delivery Format'}
+              className="inline-flex items-center gap-0.5 p-0.5 bg-slate-100 dark:bg-[#0B0D11] border border-slate-200/80 dark:border-[#232732] rounded-lg"
+            >
+              {(
+                [
+                  {
+                    id: 'minimal_html',
+                    labelId: 'HTML Minimalis',
+                    labelEn: 'Minimal HTML',
+                    tipId: 'Bawaan anti-spam: rasio teks-HTML bersih seperti webmail standar',
+                    tipEn: 'Default anti-spam: clean text-to-HTML ratio like standard webmail',
+                  },
+                  {
+                    id: 'plain_text',
+                    labelId: 'Plain-Text',
+                    labelEn: 'Plain-Text',
+                    tipId: 'Teks murni tanpa HTML (risiko spam terendah di Gmail & Yandex)',
+                    tipEn: 'Pure text without HTML (lowest spam score on Gmail & Yandex)',
+                  },
+                  {
+                    id: 'rich_card',
+                    labelId: 'HTML Kartu',
+                    labelEn: 'Card HTML',
+                    tipId: 'Tampilan kartu kaya untuk tautan VZ Files / Drive / media',
+                    tipEn: 'Styled card layout for VZ Files / Drive / media links',
+                  },
+                ] as const
+              ).map((opt) => {
+                const active = outboundFormat === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    disabled={sending}
+                    onClick={() => onChangeOutboundFormat(opt.id)}
+                    title={lang === 'id' ? opt.tipId : opt.tipEn}
+                    className={`min-h-[30px] px-2 py-1 text-[11px] font-semibold rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                      active
+                        ? 'bg-white dark:bg-[#191E28] text-blue-600 dark:text-blue-400 shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    {lang === 'id' ? opt.labelId : opt.labelEn}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {onOpenDnsCheck && (
+            <button
+              type="button"
+              onClick={onOpenDnsCheck}
+              className="min-h-[30px] inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+              <span>{lang === 'id' ? 'Cek SPF/DKIM/DMARC' : 'Check SPF/DKIM/DMARC'}</span>
+            </button>
+          )}
+        </div>
+
+        {/* Bottom Action Bar (with mobile safe-area inset & 44px touch targets) */}
+        <div className="px-3 sm:px-4 pt-2.5 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-[#FAFAFA] dark:bg-[#0E1117] border-t border-slate-200 dark:border-[#232732] flex items-center justify-between gap-2 shrink-0 overflow-x-auto">
+          <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="submit"
               disabled={sending || isUploadingVzFiles || isOverAttachmentLimit}
-              className="min-h-[40px] inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="min-h-[42px] inline-flex items-center gap-1.5 px-3.5 sm:px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               {sending ? (
                 <>
@@ -913,7 +997,7 @@ export function MailFloatingComposer({
               ) : (
                 <>
                   <Send className="w-3.5 h-3.5" />
-                  <span>{lang === 'id' ? 'Kirim Email' : 'Send Email'}</span>
+                  <span>{lang === 'id' ? 'Kirim' : 'Send'}</span>
                 </>
               )}
             </button>
@@ -923,12 +1007,10 @@ export function MailFloatingComposer({
               disabled={sending || attachments.length >= MAIL_ATTACHMENT_MAX_COUNT}
               onClick={() => fileInputRef.current?.click()}
               title={lang === 'id' ? 'Lampirkan File (maks 10 MB via R2)' : 'Attach File (max 10 MB via R2)'}
-              className="min-h-[40px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#1F2532] border border-slate-200 dark:border-[#2A303E] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="min-h-[42px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#1F2532] border border-slate-200 dark:border-[#2A303E] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Paperclip className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">
-                {lang === 'id' ? 'File' : 'File'}
-              </span>
+              <span>File</span>
             </button>
 
             <button
@@ -940,10 +1022,10 @@ export function MailFloatingComposer({
                   ? 'Unggah File Besar (>10 MB) ke VZ Files (files.vz.gay)'
                   : 'Upload Large File (>10 MB) to VZ Files (files.vz.gay)'
               }
-              className="min-h-[40px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="min-h-[42px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900/60 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <CloudUpload className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">VZ Files</span>
+              <span>VZ Files</span>
             </button>
 
             <button
@@ -955,23 +1037,21 @@ export function MailFloatingComposer({
                   ? 'Sisipkan Link Google Drive, Imgur, atau Direct Media'
                   : 'Insert Google Drive, Imgur, or Direct Media Link'
               }
-              className={`min-h-[40px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium border rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 ${
+              className={`min-h-[42px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium border rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 ${
                 linkPanelOpen
                   ? 'bg-slate-900 dark:bg-blue-600 text-white border-slate-900 dark:border-blue-600'
                   : 'text-slate-700 dark:text-slate-200 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#1F2532] border-slate-200 dark:border-[#2A303E]'
               }`}
             >
               <Link2 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">
-                {lang === 'id' ? 'Link / Media' : 'Link / Media'}
-              </span>
+              <span>Link</span>
             </button>
 
             <button
               type="button"
               disabled={sending}
               onClick={onSaveDraft}
-              className="min-h-[40px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#1F2532] border border-slate-200 dark:border-[#2A303E] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="min-h-[42px] inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#171B24] hover:bg-slate-100 dark:hover:bg-[#1F2532] border border-slate-200 dark:border-[#2A303E] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Save className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">
@@ -986,7 +1066,7 @@ export function MailFloatingComposer({
             onClick={onDiscard}
             title={lang === 'id' ? 'Buang pesan ini' : 'Discard message'}
             aria-label={lang === 'id' ? 'Buang pesan' : 'Discard message'}
-            className="min-h-[40px] px-2 py-2 text-xs font-medium text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 inline-flex items-center gap-1 rounded-lg transition-colors cursor-pointer"
+            className="min-h-[42px] px-2.5 py-2 text-xs font-medium text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 inline-flex items-center gap-1 rounded-lg transition-colors shrink-0 cursor-pointer"
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
@@ -1003,12 +1083,23 @@ export function MailFloatingComposer({
             onChangeMode('floating');
           }
         }}
-        className="fixed inset-0 z-50 bg-slate-950/55 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6"
+        className="fixed inset-0 z-50 bg-slate-950/55 backdrop-blur-xs flex items-center justify-center pt-[max(0.75rem,env(safe-area-inset-top))] pb-[max(0.75rem,env(safe-area-inset-bottom))] pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] sm:p-6"
       >
         {windowShell}
       </div>
     );
   }
 
-  return windowShell;
+  return (
+    <>
+      {/* Mobile-only dimmed backdrop behind the bottom-sheet composer */}
+      <div
+        onClick={() => {
+          if (!sending) onChangeMode('minimized');
+        }}
+        className="sm:hidden fixed inset-0 z-40 bg-black/45 backdrop-blur-xs"
+      />
+      {windowShell}
+    </>
+  );
 }

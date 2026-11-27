@@ -16,6 +16,7 @@ import {
   resolveCanonicalEmail,
 } from '../utils/mailIdentity';
 import { checkReservedUsername } from '../utils/reservedUsernames';
+import { InAppSsoNotice } from './InAppSsoNotice';
 import type { ActiveHostView } from './MailLinksTopBar';
 
 interface MailLandingGateProps {
@@ -298,6 +299,7 @@ export function MailLandingGate({
                       : 'Open links.vz.gay'}
                   </button>
                 </div>
+                <InAppSsoNotice lang={lang} />
               </div>
             )}
           </div>

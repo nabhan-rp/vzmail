@@ -21,6 +21,62 @@ const BLOCKED_HOSTNAMES = new Set([
   '169.254.169.254',
 ]);
 
+function fillFallbackRandomBytes(bytes: Uint8Array): void {
+  const now = Date.now();
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = ((Math.floor(Math.random() * 256) ^ ((now >>> ((i % 4) * 8)) & 0xff)) + i * 31) & 0xff;
+  }
+}
+
+/**
+ * Checks whether a parsed URL hostname points to localhost, link-local, RFC1918,
+ * CGNAT (100.64.0.0/10), 0.0.0.0/8, or private/mapped IPv6 ranges.
+ */
+export function isPrivateOrLocalHostname(rawHost: string): boolean {
+  const host = rawHost.trim().toLowerCase();
+  if (!host) return true;
+  if (
+    BLOCKED_HOSTNAMES.has(host) ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.home.arpa')
+  ) {
+    return true;
+  }
+
+  // IPv4 private / reserved ranges
+  if (
+    /^0\./.test(host) ||
+    /^10\./.test(host) ||
+    /^127\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host)
+  ) {
+    return true;
+  }
+
+  // IPv6 literals (wrapped in [...] by WHATWG URL parser or bare)
+  const ipv6 = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  if (ipv6.includes(':')) {
+    const cleanV6 = ipv6.split('%')[0]; // Strip zone index if present
+    if (
+      cleanV6 === '::' ||
+      cleanV6 === '::1' ||
+      /^0*:0*:0*:0*:0*:0*:0*:[01]$/.test(cleanV6) ||
+      /^fe[89ab][0-9a-f]:/i.test(cleanV6) || // Link-local fe80::/10
+      /^f[cd][0-9a-f]{2}:/i.test(cleanV6) || // Unique local fc00::/7
+      /^::ffff:/i.test(cleanV6) // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1 / ::ffff:7f00:1)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /**
  * Generates a cryptographically strong identifier using Web Crypto.
  */
@@ -31,6 +87,8 @@ export function generateSecureId(prefix = 'id'): string {
   const bytes = new Uint8Array(16);
   if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
     crypto.getRandomValues(bytes);
+  } else {
+    fillFallbackRandomBytes(bytes);
   }
   const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
   return `${prefix}-${hex}`;
@@ -44,6 +102,8 @@ export function generateRandomSlug(length = 6): string {
   const bytes = new Uint8Array(length);
   if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
     crypto.getRandomValues(bytes);
+  } else {
+    fillFallbackRandomBytes(bytes);
   }
   let out = '';
   for (let i = 0; i < length; i++) {
@@ -160,22 +220,14 @@ export function sanitizeExternalUrl(
       return null;
     }
     const host = parsed.hostname.toLowerCase();
-    if (!host || !host.includes('.')) {
+    if (!host) {
       return null;
     }
-    if (blockPrivateHosts) {
-      if (
-        BLOCKED_HOSTNAMES.has(host) ||
-        host.endsWith('.local') ||
-        host.endsWith('.internal') ||
-        /^10\./.test(host) ||
-        /^192\.168\./.test(host) ||
-        /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-        /^127\./.test(host) ||
-        /^169\.254\./.test(host)
-      ) {
-        return null;
-      }
+    if (blockPrivateHosts && isPrivateOrLocalHostname(host)) {
+      return null;
+    }
+    if (!host.includes('.')) {
+      return null;
     }
     return parsed.toString();
   } catch {

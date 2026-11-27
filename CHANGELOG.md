@@ -6,6 +6,58 @@ Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.
 
 ---
 
+## VZ Mail & VZ Links — `v1.1.3` (2026-11-27)
+
+**Domain:** `mail.vz.gay` · `links.vz.gay` · `*.imy.li`  
+**Rilis:** Deliverability Anti-Spam, Diagnostik Inbound, Navigasi 2 Hamburger Mobile & Background Sync Hemat RAM
+
+### Fixed
+- **Deliverability Outbound Anti-Spam:** Mengganti format default email keluar menjadi **HTML Minimalis** bersih (dengan opsi pilihan **Plain-Text murni** dan **HTML Kartu** di komposer), menghapus header kustom `X-VZ-Zero-Retention` dan `reply_to` redundan, serta menambahkan tombol cek cepat SPF/DKIM/DMARC langsung di komposer.
+- **Inbound Fail-Closed & Normalisasi Alamat:** Memperbaiki Cloudflare Worker `email()` agar mengembalikan `451` sementara ketika binding `MAIL_TRANSIT_KV` tidak tersedia (mencegah email hilang diam-diam tanpa bounce di Gmail/Yandex), menormalisasi format `Nama <user@imy.li>`, serta menampilkan error sinkronisasi API secara eksplisit di UI.
+- **Bug Hantu `(1)` pada Pull & Purge:** Menambahkan penanda seeding satu kali (`meta:seeded:<user>`) dan tombstone ACK 90 detik (`ack:<user>:<id>` di KV & lokal) untuk mengatasi eventual consistency `KV.list()`, sehingga angka `(1)` tidak muncul lagi setelah di-purge.
+- **Bug Overflow & Auto-Zoom Mobile pada Toast Panjang:** Mengunci lebar maksimum `100vw` + `overflow-x: clip` serta menerapkan `overflow-wrap: anywhere` pada toast notifikasi, banner komposer, dan navbar bawah mobile agar alamat email sangat panjang tidak mengubah lebar layar atau merusak tata letak navbar bawah.
+
+### Added & Improved
+- **Navigasi Mobile 2 Hamburger:** Memisahkan tombol **Hamburger Global** di header kiri (Links, Mail, Profil Akun) dan tombol **Hamburger Menu Mail** di toolbar inbox (Kotak Masuk, Terkirim, Draf, Spam, Sampah, Alias `+/.`, Sync & Diagnostik).
+- **Panel Diagnostik Mail & SPF/DKIM/DMARC:** Menambahkan modal diagnostik untuk memantau status binding KV, jumlah antrean transit, waktu email masuk terakhir, dan hasil verifikasi DNS SPF/DKIM/DMARC/MX secara langsung.
+- **Background Sync Hemat RAM (Opt-In) & Notifikasi:** Menambahkan fitur sinkronisasi latar belakang opt-in (default mati) dengan 3 mode (Adaptif Hemat RAM sebagai default, Interval Manual `30 dtk`/`60 dtk`/`3 mnt`/`5 mnt`, dan Tab-Resume + Periodic Sync PWA) berbasis cek metadata `?metaOnly=1` tanpa WebSocket, plus notifikasi opsional yang mensyaratkan Background Sync aktif.
+
+---
+
+## VZ Mail & VZ Links — `v1.1.2` (2026-11-27)
+
+**Domain:** `mail.vz.gay` · `links.vz.gay` · `*.imy.li` · `imy.li/s/`  
+**Rilis:** Optimasi Safe-Area Multi-UA, Panduan SSO In-App Browser, Middleware Auth0 JWT & Kunci PIN VZ Vault
+
+### Added & Security
+- **Kunci PIN VZ Vault (3 Opsi Opt-In):** Menambahkan proteksi PIN lokal 4–6 digit (`PBKDF2-SHA256` 150.000 iterasi dengan auto-reset setelah 5x salah) yang mendukung seluruh 3 mode opt-in: (1) Layar Kunci Penuh + Auto-Lock (1/5/15 menit & kunci otomatis saat pindah tab), (2) Kunci PIN Khusus Aksi Sensitif (Ekspor, Impor/Restore, dan Frasa 12-Kata), serta (3) Panduan opt-in pembuatan PIN saat pertama kali membuka VZ Vault.
+- **Middleware Verifikasi Auth0 JWT Terpusat (Worker & Express):** Memisahkan middleware `runWorkerAuthMiddleware` (`src/utils/workerAuthMiddleware.ts`) dan `createExpressAuthMiddleware` (`src/utils/expressAuthMiddleware.ts`) dengan kebijakan rute terpadu, validasi `azp` multi-audiens OIDC, tantangan standar `WWW-Authenticate: Bearer` pada respons `401`, ketat di produksi dengan fallback dev lokal otomatis untuk `localhost` / preview.
+
+### Improved & Compatibility
+- **Safe-Area Mobile & Responsivitas Multi-UA:** Menerapkan `env(safe-area-inset-top/bottom/left/right)`, `overflow-x: clip`, dan fallback `dvh`/`vh` secara menyeluruh pada sticky header, banner atas, bottom navigation, komposer email mengambang/bottom-sheet, tombol pratinjau bio mengambang, drawer, modal, dan toast.
+- **Banner In-App Browser + Panduan SSO Langsung di Tombol Login:** Memperluas deteksi WebView (WhatsApp, Instagram, TikTok, Threads, Discord, LINE, Telegram, Shopee, Gojek, Grab, Slack, Notion, WebView Android/iOS generik) serta menampilkan panduan buka di browser utama / salin URL langsung di dekat tombol Login SSO pada VZ Mail, VZ Links, Shortlink Studio, dan drawer mobile.
+
+---
+
+## VZ Mail & VZ Links — `v1.1.1` (2026-11-27)
+
+**Domain:** `mail.vz.gay` · `links.vz.gay` · `*.imy.li` · `imy.li/s/` · `files.vz.gay`  
+**Rilis:** Pengerasan Keamanan API Auth0 JWT, Stabilitas Edge & Kompatibilitas Multi-Browser/OS
+
+### Security
+- **Verifikasi Auth0 RS256 OIDC JWT & Isolasi Kepemilikan Akun:** Menambahkan verifikasi RS256 JWKS zero-dependency pada Cloudflare Worker dan Express (`server.ts`) untuk seluruh endpoint privat `/api/mail/*`, `/api/vzfiles/*`, mutasi Bio/Avatar, Recycle Bin, serta pengelolaan shortlink berpemilik.
+- **Perbaikan Celah Hapus Shortlink Berpemilik:** Menolak penghapusan shortlink yang memiliki pemilik apabila permintaan tidak terautentikasi atau parameter pemilik tidak cocok.
+- **Pemblokiran Unggahan Avatar SVG & Sandbox Unduhan Lampiran:** Membatasi avatar Bio khusus format raster aman (`AVIF`, `WebP`, `PNG`, `JPEG`, `GIF`) serta menambahkan header `Content-Security-Policy: sandbox` dan pemaksaan `application/octet-stream` untuk tipe file aktif saat unduhan lampiran email.
+- **Pengerasan Allowlist VZ Files & Validasi IP Privat/IPv6:** Memperketat allowlist host unggahan multipart VZ Files, memblokir rentang IP `0.0.0.0/8`, CGNAT `100.64.0.0/10`, dan alamat IPv6 privat/loopback/mapped.
+- **Proteksi Brute-Force Brankas PIN Lokal:** Menghapus otomatis brankas kunci PIN lokal setelah 5 kali percobaan PIN salah berturut-turut, dilengkapi pengecekan HTTPS Web Crypto.
+
+### Fixed & Compatibility
+- **Decoder Email Inbound Quoted-Printable & HTML-Only:** Menambahkan decoder Quoted-Printable UTF-8 dan ekstraksi teks bersih untuk email masuk tanpa bagian `text/plain`.
+- **Konsistensi Lampiran Outbound & Batas Memori Worker:** Meneruskan lampiran pada `cpanel_relay`, menampilkan pesan eksplisit apabila provider `SEND_EMAIL` menerima lampiran biner, serta membatasi `/api/vzfiles/legacy-upload` maksimal 20 MB agar aman dari batas memori Worker 128 MB.
+- **Kompatibilitas Multi-Browser, Multi-OS & In-App Browser:** Menambahkan banner deteksi In-App Browser (WhatsApp, Instagram, TikTok, LINE, Facebook), dukungan `useRefreshTokens` Auth0 untuk Safari ITP & Brave Shields, header `COOP: same-origin-allow-popups`, fallback clipboard lintas browser, fallback kompresi avatar JPEG, deteksi iPadOS 13+, pencegahan auto-zoom input iOS, `viewport-fit=cover`, serta pengecualian cache Service Worker untuk parameter callback OAuth.
+
+---
+
 ## VZ Mail — `v1.1.0` (2026-11-26)
 
 **Domain:** `mail.vz.gay` · `@imy.li` · `files.vz.gay` · `chipervaultro.app.vz.gay`  

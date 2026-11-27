@@ -1,5 +1,6 @@
 import { useAuth0 } from '@auth0/auth0-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { setApiAuthTokenProvider } from '../utils/apiAuthClient';
 import { LINKS_CANONICAL_ORIGIN, resolveAuth0Config } from '../utils/auth0Config';
 import { sanitizeHandle } from '../utils/mailIdentity';
 
@@ -120,9 +121,29 @@ export function useSsoSession() {
     isAuthenticated: auth0Authenticated,
     error: authError,
     user: auth0User,
+    getIdTokenClaims,
     loginWithRedirect,
     logout: auth0Logout,
   } = useAuth0();
+
+  // Register live Auth0 ID Token JWT provider for backend API authorization headers
+  useEffect(() => {
+    if (!auth0Authenticated) {
+      setApiAuthTokenProvider(null);
+      return;
+    }
+    setApiAuthTokenProvider(async () => {
+      try {
+        const claims = await getIdTokenClaims();
+        return claims?.__raw || null;
+      } catch {
+        return null;
+      }
+    });
+    return () => {
+      setApiAuthTokenProvider(null);
+    };
+  }, [auth0Authenticated, getIdTokenClaims]);
 
   const auth0Config = useMemo(() => resolveAuth0Config(), []);
   const auth0Domain = auth0Config.domain;
@@ -232,16 +253,15 @@ export function useSsoSession() {
 
   const activateMail = useCallback(
     (triggerCrossOffer = true) => {
-      updateActivePrefs((prev) => {
-        if (triggerCrossOffer && !prev.linksActivated) {
-          setCrossOffer('offer_links_after_mail');
-        } else {
-          setCrossOffer(null);
-        }
-        return { ...prev, mailActivated: true };
-      });
+      const currentPrefs = auth0Key ? prefsMap[auth0Key] || DEFAULT_PREFS : DEFAULT_PREFS;
+      updateActivePrefs((prev) => ({ ...prev, mailActivated: true }));
+      if (triggerCrossOffer && !currentPrefs.linksActivated) {
+        setCrossOffer('offer_links_after_mail');
+      } else {
+        setCrossOffer(null);
+      }
     },
-    [updateActivePrefs]
+    [auth0Key, prefsMap, updateActivePrefs]
   );
 
   const deactivateMail = useCallback(() => {
@@ -251,16 +271,15 @@ export function useSsoSession() {
 
   const activateLinks = useCallback(
     (triggerCrossOffer = true) => {
-      updateActivePrefs((prev) => {
-        if (triggerCrossOffer && !prev.mailActivated) {
-          setCrossOffer('offer_mail_after_links');
-        } else {
-          setCrossOffer(null);
-        }
-        return { ...prev, linksActivated: true };
-      });
+      const currentPrefs = auth0Key ? prefsMap[auth0Key] || DEFAULT_PREFS : DEFAULT_PREFS;
+      updateActivePrefs((prev) => ({ ...prev, linksActivated: true }));
+      if (triggerCrossOffer && !currentPrefs.mailActivated) {
+        setCrossOffer('offer_mail_after_links');
+      } else {
+        setCrossOffer(null);
+      }
     },
-    [updateActivePrefs]
+    [auth0Key, prefsMap, updateActivePrefs]
   );
 
   const deactivateLinks = useCallback(() => {

@@ -30,6 +30,7 @@ import {
   resolveCanonicalEmail,
   sanitizeHandle,
 } from '../src/utils/mailIdentity.ts';
+import { runWorkerAuthMiddleware } from '../src/utils/workerAuthMiddleware.ts';
 import {
   generateSecureId,
   isValidEmailAddress,
@@ -42,8 +43,10 @@ import {
   buildOutboundEmailPayload,
   isAllowedVikingPartUrl,
   isAllowedVikingServerUrl,
+  normalizeOutboundEmailFormat,
   sanitizeExternalLinksArray,
   type MailExternalLink,
+  type OutboundEmailFormat,
 } from '../src/utils/mailExternalLinks.ts';
 import {
   AVATAR_MAX_BYTES,
@@ -136,6 +139,9 @@ export interface WorkerEnv {
   LINKS_DOMAIN?: string;
   PRIMARY_MAIL_DOMAIN?: string;
   AUTH0_DOMAIN?: string;
+  AUTH0_MAIL_CLIENT_ID?: string;
+  AUTH0_LINKS_CLIENT_ID?: string;
+  ALLOW_LOCAL_DEV_AUTH?: string;
   ACCOUNT_DASHBOARD_URL?: string;
   SPONSOR_DOMAIN?: string;
   DAILY_OUTBOUND_LIMIT?: string;
@@ -167,7 +173,8 @@ interface OutboundDispatchPayload {
   toEmail: string;
   subject: string;
   text: string;
-  html: string;
+  html?: string;
+  format: OutboundEmailFormat;
   rfcMessageId: string;
   attachments?: OutboundAttachmentBinary[];
 }
@@ -287,8 +294,19 @@ async function dispatchOutboundEmail(
         toEmail: payload.toEmail,
         subject: payload.subject,
         text: payload.text,
-        html: payload.html,
+        ...(payload.html ? { html: payload.html } : {}),
+        format: payload.format,
         messageId: payload.rfcMessageId,
+        ...(payload.attachments && payload.attachments.length > 0
+          ? {
+              attachments: payload.attachments.map((att) => ({
+                filename: att.filename,
+                mimeType: att.mimeType,
+                contentBase64: att.contentBase64,
+                sizeBytes: att.sizeBytes,
+              })),
+            }
+          : {}),
       }),
     });
 
@@ -309,31 +327,32 @@ async function dispatchOutboundEmail(
   }
 
   if (provider === 'resend') {
+    const resendPayload: Record<string, unknown> = {
+      from: `${payload.fromName} <${payload.fromEmail}>`,
+      to: [payload.toEmail],
+      subject: payload.subject,
+      text: payload.text,
+      headers: {
+        'Message-ID': payload.rfcMessageId,
+      },
+    };
+    if (payload.html) {
+      resendPayload.html = payload.html;
+    }
+    if (payload.attachments && payload.attachments.length > 0) {
+      resendPayload.attachments = payload.attachments.map((att) => ({
+        filename: att.filename,
+        content: att.contentBase64,
+      }));
+    }
+
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${env.RESEND_API_KEY!.trim()}`,
       },
-      body: JSON.stringify({
-        from: `${payload.fromName} <${payload.fromEmail}>`,
-        reply_to: payload.fromEmail,
-        to: [payload.toEmail],
-        subject: payload.subject,
-        text: payload.text,
-        html: payload.html,
-        ...(payload.attachments && payload.attachments.length > 0
-          ? {
-              attachments: payload.attachments.map((att) => ({
-                filename: att.filename,
-                content: att.contentBase64,
-              })),
-            }
-          : {}),
-        headers: {
-          'Message-ID': payload.rfcMessageId,
-        },
-      }),
+      body: JSON.stringify(resendPayload),
     });
 
     if (!res.ok) {
@@ -356,18 +375,16 @@ async function dispatchOutboundEmail(
         name: payload.fromName,
         email: payload.fromEmail,
       },
-      replyTo: {
-        name: payload.fromName,
-        email: payload.fromEmail,
-      },
       to: [{ email: payload.toEmail }],
       subject: payload.subject,
       textContent: payload.text,
-      htmlContent: payload.html,
       headers: {
         'Message-ID': payload.rfcMessageId,
       },
     };
+    if (payload.html) {
+      brevoBody.htmlContent = payload.html;
+    }
     if (payload.attachments && payload.attachments.length > 0) {
       brevoBody.attachment = payload.attachments.map((att) => ({
         name: att.filename,
@@ -411,6 +428,13 @@ async function dispatchOutboundEmail(
   }
 
   if (provider === 'cloudflare' && env.SEND_EMAIL) {
+    if (payload.attachments && payload.attachments.length > 0) {
+      return {
+        ok: false,
+        error:
+          'Provider Cloudflare SEND_EMAIL tidak mendukung pengiriman lampiran biner secara langsung. Gunakan Brevo, Resend, cPanel Relay, atau tautan VZ Files untuk mengirim file.',
+      };
+    }
     await env.SEND_EMAIL.send({
       from: {
         email: payload.fromEmail,
@@ -419,10 +443,9 @@ async function dispatchOutboundEmail(
       to: payload.toEmail,
       subject: payload.subject,
       text: payload.text,
-      html: payload.html,
+      ...(payload.html ? { html: payload.html } : {}),
       headers: {
         'Message-ID': payload.rfcMessageId,
-        'X-VZ-Zero-Retention': 'true',
       },
     });
     return {
@@ -553,7 +576,7 @@ function applyHtmlSecurityHeaders(
   headers.set('X-Frame-Options', 'SAMEORIGIN');
   headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
-  headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+  headers.set('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
 
   if (options.isHttps) {
     headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
@@ -695,45 +718,26 @@ function rewriteHtmlSeo(response: Response, meta: SeoMetadataPayload): Response 
     .transform(withHeaders);
 }
 
-/**
- * Constant-time token verification using SHA-256 + crypto.subtle.timingSafeEqual
- * (avoids length leakage and timing side-channels).
- */
-async function verifyRelayAuth(request: Request, env: WorkerEnv): Promise<boolean> {
-  const expected = env.RELAY_AUTH_TOKEN?.trim();
-  if (!expected) {
-    return true; // Open preview mode until RELAY_AUTH_TOKEN secret is configured
+const UNSAFE_INLINE_ATTACHMENT_MIMES = new Set([
+  'text/html',
+  'application/xhtml+xml',
+  'image/svg+xml',
+  'text/javascript',
+  'application/javascript',
+  'application/x-javascript',
+  'text/xml',
+  'application/xml',
+]);
+
+function getSafeAttachmentDownloadMime(rawMime: string | undefined): string {
+  const clean = (rawMime || 'application/octet-stream').split(';')[0].trim().toLowerCase();
+  if (!clean || UNSAFE_INLINE_ATTACHMENT_MIMES.has(clean)) {
+    return 'application/octet-stream';
   }
-
-  const authHeader = request.headers.get('Authorization') || '';
-  const bearerToken = authHeader.startsWith('Bearer ')
-    ? authHeader.slice(7).trim()
-    : (request.headers.get('X-VZ-Relay-Token') || '').trim();
-
-  if (!bearerToken) return false;
-
-  const encoder = new TextEncoder();
-  const [providedHash, expectedHash] = await Promise.all([
-    crypto.subtle.digest('SHA-256', encoder.encode(bearerToken)),
-    crypto.subtle.digest('SHA-256', encoder.encode(expected)),
-  ]);
-
-  const subtle = crypto.subtle as SubtleCrypto & {
-    timingSafeEqual?: (a: ArrayBuffer | ArrayBufferView, b: ArrayBuffer | ArrayBufferView) => boolean;
-  };
-  if (typeof subtle.timingSafeEqual === 'function') {
-    return subtle.timingSafeEqual(providedHash, expectedHash);
-  }
-
-  // Constant-time byte loop fallback for non-Workers test runtimes
-  const a = new Uint8Array(providedHash);
-  const b = new Uint8Array(expectedHash);
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a[i] ^ b[i];
-  }
-  return diff === 0;
+  return clean;
 }
+
+
 
 /**
  * Reads and parses a bounded JSON request body to prevent memory DoS.
@@ -835,6 +839,66 @@ async function readBoundedStreamText(
   };
 }
 
+function decodeQuotedPrintableText(raw: string): string {
+  const unfolded = raw.replace(/=\r?\n/g, '');
+  const bytes: number[] = [];
+  for (let i = 0; i < unfolded.length; i += 1) {
+    if (
+      unfolded[i] === '=' &&
+      i + 2 < unfolded.length &&
+      /^[0-9a-fA-F]{2}$/.test(unfolded.slice(i + 1, i + 3))
+    ) {
+      bytes.push(Number.parseInt(unfolded.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      const code = unfolded.charCodeAt(i);
+      if (code < 128) {
+        bytes.push(code);
+      } else {
+        const utf8 = new TextEncoder().encode(unfolded[i]);
+        for (const b of utf8) bytes.push(b);
+      }
+    }
+  }
+  return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(bytes));
+}
+
+function stripHtmlToPlainText(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<head[\s\S]*?<\/head>/gi, ' ')
+    .replace(/<(?:br|hr)\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|li|tr|h[1-6]|blockquote)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&#x27;/gi, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function decodeMimeTextPart(headers: string, body: string): string {
+  const isBase64 = /content-transfer-encoding:\s*base64/i.test(headers);
+  const isQp = /content-transfer-encoding:\s*quoted-printable/i.test(headers);
+  if (isBase64) {
+    try {
+      return new TextDecoder('utf-8', { fatal: false }).decode(
+        base64ToUint8(body.replace(/\s+/g, ''))
+      );
+    } catch {
+      return body;
+    }
+  }
+  if (isQp) {
+    return decodeQuotedPrintableText(body);
+  }
+  return body;
+}
+
 /**
  * Extracts a clean plain-text body and any base64-encoded MIME attachments from raw RFC 5322 email text.
  */
@@ -855,6 +919,7 @@ function extractBodyAndAttachmentsFromRawMime(rawMime: string): {
   const headersPart = normalized.slice(0, headerBodySplit);
   const bodyPart = normalized.slice(headerBodySplit + 2);
   let extractedText = '';
+  let extractedHtml = '';
   const attachments: Array<{ filename: string; mimeType: string; bytes: Uint8Array }> = [];
   let totalAttBytes = 0;
 
@@ -905,26 +970,25 @@ function extractBodyAndAttachmentsFromRawMime(rawMime: string): {
       }
 
       if (!extractedText && /content-type:\s*text\/plain/i.test(secHeaders)) {
-        const isBase64 = /content-transfer-encoding:\s*base64/i.test(secHeaders);
-        try {
-          extractedText = isBase64
-            ? new TextDecoder('utf-8', { fatal: false }).decode(
-                base64ToUint8(secBody.replace(/\s+/g, ''))
-              )
-            : secBody;
-        } catch {
-          extractedText = secBody;
-        }
+        extractedText = decodeMimeTextPart(secHeaders, secBody);
+      } else if (!extractedHtml && /content-type:\s*text\/html/i.test(secHeaders)) {
+        extractedHtml = decodeMimeTextPart(secHeaders, secBody);
       }
     }
   };
 
   if (/content-type:\s*multipart\//i.test(headersPart)) {
     parseMultipart(headersPart, bodyPart, 0);
+  } else if (/content-type:\s*text\/html/i.test(headersPart)) {
+    extractedHtml = decodeMimeTextPart(headersPart, bodyPart);
+  } else {
+    extractedText = decodeMimeTextPart(headersPart, bodyPart);
   }
 
+  const finalText = extractedText || (extractedHtml ? stripHtmlToPlainText(extractedHtml) : bodyPart);
+
   return {
-    bodyText: (extractedText || bodyPart).trim().slice(0, MAX_EMAIL_BODY_CHARS),
+    bodyText: finalText.trim().slice(0, MAX_EMAIL_BODY_CHARS),
     attachments,
   };
 }
@@ -1355,7 +1419,7 @@ async function deleteShortlinkRecord(
   if (!existing) {
     return { deleted: false };
   }
-  if (existing.ownerUser && ownerUser && existing.ownerUser !== ownerUser) {
+  if (existing.ownerUser && (!ownerUser || existing.ownerUser !== ownerUser)) {
     return { deleted: false, forbidden: true };
   }
   if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
@@ -2338,28 +2402,21 @@ async function handleApiRequest(
     });
   }
 
-  // Optional constant-time auth gate for /api/mail/* and bio/delete endpoints.
-  // Public shortlink creation (POST /api/links/shortlinks) and click tracking (POST /api/links/bio-click)
-  // stay publicly accessible for both guest visitors and logged-in SSO users.
-  const isPublicLinksWrite =
-    (url.pathname === '/api/links/shortlinks' && request.method === 'POST') ||
-    (url.pathname === '/api/links/bio-click' && request.method === 'POST');
-
-  if (
-    url.pathname.startsWith('/api/mail/') ||
-    (url.pathname.startsWith('/api/links/') &&
-      request.method !== 'GET' &&
-      !isPublicLinksWrite)
-  ) {
-    const authorized = await verifyRelayAuth(request, env);
-    if (!authorized) {
-      return jsonResponse({ ok: false, error: 'Unauthorized relay token.' }, 401);
-    }
+  // Dedicated Auth0 RS256 OIDC ID Token JWT + Relay Token Verification Middleware
+  const authMiddleware = await runWorkerAuthMiddleware(request, url, env, jsonResponse);
+  if (!authMiddleware.ok) {
+    return authMiddleware.response;
   }
+  const { requireOwnership, requireAuthenticatedUser } = authMiddleware.context;
 
-  // 1. GET /api/mail/queue?username=fadhil
+  // 1. GET /api/mail/queue?username=fadhil[&metaOnly=1]
   if (url.pathname === '/api/mail/queue' && request.method === 'GET') {
     const user = sanitizeHandle(url.searchParams.get('username') || 'fadhil');
+    const ownershipDenied = requireOwnership(user);
+    if (ownershipDenied) return ownershipDenied;
+    const metaOnly =
+      url.searchParams.get('metaOnly') === '1' ||
+      url.searchParams.get('metaOnly') === 'true';
     const quota = await getDailyQuotaUsage(env, user);
 
     if (!env.MAIL_TRANSIT_KV) {
@@ -2371,6 +2428,7 @@ async function handleApiRequest(
         primaryEmail: `${user}@${primaryDomain}`,
         pairedBioDomain: `${user}.${primaryDomain}`,
         pendingCount: 0,
+        packetIds: [],
         packets: [],
         zeroRetentionStatus: {
           retentionPolicy: 'EPHEMERAL_POP_AND_PURGE',
@@ -2383,16 +2441,49 @@ async function handleApiRequest(
       });
     }
 
-    const list = await env.MAIL_TRANSIT_KV.list({
-      prefix: `q:${user}:`,
-      limit: MAX_PACKETS_PER_PULL,
+    const [list, ackList] = await Promise.all([
+      env.MAIL_TRANSIT_KV.list({
+        prefix: `q:${user}:`,
+        limit: MAX_PACKETS_PER_PULL,
+      }),
+      env.MAIL_TRANSIT_KV.list({
+        prefix: `ack:${user}:`,
+        limit: MAX_PACKETS_PER_PULL * 2,
+      }),
+    ]);
+
+    const ackedIdSet = new Set(
+      ackList.keys.map((k) => k.name.slice(`ack:${user}:`.length))
+    );
+    const activeKeys = list.keys.filter((k) => {
+      const pktId = k.name.slice(`q:${user}:`.length);
+      return pktId && !ackedIdSet.has(pktId);
     });
+    const activePacketIds = activeKeys.map((k) => k.name.slice(`q:${user}:`.length));
+
+    if (metaOnly) {
+      return jsonResponse({
+        ok: true,
+        kvBound: true,
+        metaOnly: true,
+        mode: 'cloudflare-kv-ephemeral',
+        canonicalUser: user,
+        primaryEmail: `${user}@${primaryDomain}`,
+        pairedBioDomain: `${user}.${primaryDomain}`,
+        pendingCount: activePacketIds.length,
+        packetIds: activePacketIds,
+        outboundQuota: {
+          usedToday: quota.usedToday,
+          dailyLimit: quota.dailyLimit,
+        },
+      });
+    }
 
     const fetched = await Promise.all(
-      list.keys.map((k) => env.MAIL_TRANSIT_KV!.get<EphemeralMailPacket>(k.name, 'json'))
+      activeKeys.map((k) => env.MAIL_TRANSIT_KV!.get<EphemeralMailPacket>(k.name, 'json'))
     );
     const packets = fetched
-      .filter((pkt): pkt is EphemeralMailPacket => Boolean(pkt && pkt.id))
+      .filter((pkt): pkt is EphemeralMailPacket => Boolean(pkt && pkt.id && !ackedIdSet.has(pkt.id)))
       .sort(
         (a, b) =>
           new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime()
@@ -2406,6 +2497,7 @@ async function handleApiRequest(
       primaryEmail: `${user}@${primaryDomain}`,
       pairedBioDomain: `${user}.${primaryDomain}`,
       pendingCount: packets.length,
+      packetIds: packets.map((p) => p.id),
       packets,
       zeroRetentionStatus: {
         retentionPolicy: 'EPHEMERAL_POP_AND_PURGE',
@@ -2418,7 +2510,63 @@ async function handleApiRequest(
     });
   }
 
-  // 2. POST /api/mail/ack — Immediately purge acknowledged packets from KV
+  // 1.5 GET /api/mail/diagnostics?username=fadhil — Lightweight inbound queue, binding & quota diagnostics
+  if (url.pathname === '/api/mail/diagnostics' && request.method === 'GET') {
+    const user = sanitizeHandle(url.searchParams.get('username') || 'fadhil');
+    const ownershipDenied = requireOwnership(user);
+    if (ownershipDenied) return ownershipDenied;
+
+    const caps = getOutboundCapabilities(env);
+    const activeProvider = resolveOutboundProvider(env);
+    const quota = await getDailyQuotaUsage(env, user);
+
+    let pendingQueueCount = 0;
+    let seededOnce = false;
+    let lastInbound: { receivedAt?: string; fromDomain?: string; plusTag?: string | null } | null = null;
+
+    if (env.MAIL_TRANSIT_KV) {
+      const [list, ackList, seededVal, lastInVal] = await Promise.all([
+        env.MAIL_TRANSIT_KV.list({ prefix: `q:${user}:`, limit: MAX_PACKETS_PER_PULL }),
+        env.MAIL_TRANSIT_KV.list({ prefix: `ack:${user}:`, limit: MAX_PACKETS_PER_PULL * 2 }),
+        env.MAIL_TRANSIT_KV.get(`meta:seeded:${user}`),
+        env.MAIL_TRANSIT_KV.get<{ receivedAt?: string; fromDomain?: string; plusTag?: string | null }>(
+          `meta:last_inbound:${user}`,
+          'json'
+        ),
+      ]);
+      const acked = new Set(ackList.keys.map((k) => k.name.slice(`ack:${user}:`.length)));
+      pendingQueueCount = list.keys.filter(
+        (k) => !acked.has(k.name.slice(`q:${user}:`.length))
+      ).length;
+      seededOnce = seededVal === '1';
+      lastInbound = lastInVal;
+    }
+
+    return jsonResponse({
+      ok: true,
+      canonicalUser: user,
+      primaryEmail: `${user}@${primaryDomain}`,
+      primaryDomain,
+      kvBound: Boolean(env.MAIL_TRANSIT_KV),
+      r2Bound: Boolean(env.LINKS_MEDIA_R2),
+      failClosedInboundReject: true,
+      activeOutboundProvider: activeProvider,
+      outboundProviderMode: (env.OUTBOUND_PROVIDER || 'auto').toLowerCase(),
+      brevoKeyFormat: caps.brevoKeyFormat,
+      pendingQueueCount,
+      seededOnce,
+      lastInboundAt: lastInbound?.receivedAt || null,
+      lastInboundFromDomain: lastInbound?.fromDomain || null,
+      outboundQuota: {
+        usedToday: quota.usedToday,
+        dailyLimit: quota.dailyLimit,
+      },
+      authSource: authMiddleware.context.auth?.mode || 'unknown',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  // 2. POST /api/mail/ack — Immediately purge acknowledged packets from KV + 90s eventual-consistency tombstone
   if (url.pathname === '/api/mail/ack' && request.method === 'POST') {
     const parsed = await readBoundedJson<{ username?: string; packetIds?: unknown }>(request);
     if (!parsed.ok) {
@@ -2426,6 +2574,8 @@ async function handleApiRequest(
     }
 
     const user = sanitizeHandle(String(parsed.data.username || 'fadhil'));
+    const ownershipDenied = requireOwnership(user);
+    if (ownershipDenied) return ownershipDenied;
     const rawIds = Array.isArray(parsed.data.packetIds) ? parsed.data.packetIds : [];
     const safeIds = rawIds
       .filter((id): id is string => typeof id === 'string')
@@ -2434,9 +2584,18 @@ async function handleApiRequest(
       .slice(0, MAX_PACKETS_PER_PULL);
 
     if (env.MAIL_TRANSIT_KV && safeIds.length > 0) {
-      await Promise.all(
-        safeIds.map((id) => env.MAIL_TRANSIT_KV!.delete(`q:${user}:${id}`))
-      );
+      const ops: Promise<unknown>[] = [];
+      for (const id of safeIds) {
+        ops.push(env.MAIL_TRANSIT_KV.delete(`q:${user}:${id}`));
+        // 90-second tombstone prevents Cloudflare KV list() eventual consistency from showing ghost (1)
+        ops.push(
+          env.MAIL_TRANSIT_KV.put(`ack:${user}:${id}`, '1', { expirationTtl: 90 })
+        );
+      }
+      if (safeIds.includes(`cf-q-${user}-init`)) {
+        ops.push(env.MAIL_TRANSIT_KV.put(`meta:seeded:${user}`, '1'));
+      }
+      await Promise.all(ops);
     }
 
     const receiptCode = `PURGED-CF-${Date.now().toString(36).toUpperCase()}-${safeIds.length}`;
@@ -2508,6 +2667,8 @@ async function handleApiRequest(
       primaryDomain,
       ...DEFAULT_SUPPORTED_DOMAINS,
     ]);
+    const ownershipDenied = requireOwnership(resolved.canonicalUsername);
+    if (ownershipDenied) return ownershipDenied;
 
     const now = new Date();
     const packetId = generateSecureId('cf-pkt');
@@ -2542,7 +2703,7 @@ async function handleApiRequest(
     });
   }
 
-  // 4. POST /api/mail/seed-transit — Seed onboarding edge packet
+  // 4. POST /api/mail/seed-transit — One-time onboarding edge packet (never re-seeds after purge!)
   if (url.pathname === '/api/mail/seed-transit' && request.method === 'POST') {
     const parsed = await readBoundedJson<{ username?: string }>(request);
     if (!parsed.ok) {
@@ -2550,19 +2711,29 @@ async function handleApiRequest(
     }
 
     const user = sanitizeHandle(String(parsed.data.username || 'fadhil'));
+    const ownershipDenied = requireOwnership(user);
+    if (ownershipDenied) return ownershipDenied;
     const seedPacket = buildSeedPacket(user, primaryDomain);
+    let seeded = false;
+    let alreadySeeded = false;
 
     if (env.MAIL_TRANSIT_KV) {
-      const existing = await env.MAIL_TRANSIT_KV.list({
-        prefix: `q:${user}:`,
-        limit: 1,
-      });
-      if (existing.keys.length === 0) {
-        await env.MAIL_TRANSIT_KV.put(
-          `q:${user}:${seedPacket.id}`,
-          JSON.stringify(seedPacket),
-          { expirationTtl: TRANSIT_TTL_SECONDS }
-        );
+      const [seededMarker, existing] = await Promise.all([
+        env.MAIL_TRANSIT_KV.get(`meta:seeded:${user}`),
+        env.MAIL_TRANSIT_KV.list({ prefix: `q:${user}:`, limit: 1 }),
+      ]);
+      if (seededMarker === '1') {
+        alreadySeeded = true;
+      } else {
+        if (existing.keys.length === 0) {
+          await env.MAIL_TRANSIT_KV.put(
+            `q:${user}:${seedPacket.id}`,
+            JSON.stringify(seedPacket),
+            { expirationTtl: TRANSIT_TTL_SECONDS }
+          );
+          seeded = true;
+        }
+        await env.MAIL_TRANSIT_KV.put(`meta:seeded:${user}`, '1');
       }
     }
 
@@ -2570,6 +2741,8 @@ async function handleApiRequest(
       ok: true,
       kvBound: Boolean(env.MAIL_TRANSIT_KV),
       username: user,
+      seeded,
+      alreadySeeded,
       seedPacket: env.MAIL_TRANSIT_KV ? null : seedPacket,
     });
   }
@@ -2577,6 +2750,8 @@ async function handleApiRequest(
   // 4.5 POST /api/mail/attachments/upload — Store temporary attachment in R2 (max 10 MB, 7-day TTL, purged on download/send)
   if (url.pathname === '/api/mail/attachments/upload' && request.method === 'POST') {
     const ownerUser = sanitizeHandle(url.searchParams.get('ownerUser') || 'fadhil');
+    const ownershipDenied = requireOwnership(ownerUser);
+    if (ownershipDenied) return ownershipDenied;
     const filename = sanitizeAttachmentFilename(url.searchParams.get('filename') || 'attachment.bin');
     const mimeType = stripHeaderInjection(
       request.headers.get('content-type') || 'application/octet-stream',
@@ -2650,6 +2825,8 @@ async function handleApiRequest(
       return jsonResponse({ ok: false, error: 'Parameter lampiran tidak valid.' }, 400);
     }
     const ownerUser = sanitizeHandle(decodeURIComponent(parts[0]));
+    const ownershipDenied = requireOwnership(ownerUser);
+    if (ownershipDenied) return ownershipDenied;
     const attId = decodeURIComponent(parts[1]).replace(/[^a-zA-Z0-9_-]/g, '');
     if (!attId) {
       return jsonResponse({ ok: false, error: 'ID lampiran tidak valid.' }, 400);
@@ -2695,7 +2872,7 @@ async function handleApiRequest(
 
     const bytes = await obj.arrayBuffer();
     const filename = sanitizeAttachmentFilename(obj.customMetadata?.filename || 'attachment.bin');
-    const contentType = obj.httpMetadata?.contentType || 'application/octet-stream';
+    const contentType = getSafeAttachmentDownloadMime(obj.httpMetadata?.contentType);
 
     // WhatsApp-style Zero Retention: purge object from R2 immediately after serving to recipient
     ctx.waitUntil(env.LINKS_MEDIA_R2.delete(key));
@@ -2705,6 +2882,7 @@ async function handleApiRequest(
       headers: {
         'Content-Type': contentType,
         'Content-Disposition': `attachment; filename="${filename}"`,
+        'Content-Security-Policy': 'sandbox',
         'Cache-Control': 'private, no-store',
         'X-Content-Type-Options': 'nosniff',
         'X-VZ-R2-Purged': 'true',
@@ -2834,6 +3012,18 @@ async function handleApiRequest(
       }
 
       if (action === 'legacy-upload' && request.method === 'POST') {
+        const LEGACY_MAX_BYTES = 20 * 1024 * 1024; // Keep well under Cloudflare Worker 128 MB RAM limit
+        const declaredLen = Number(request.headers.get('content-length') || '0');
+        if (Number.isFinite(declaredLen) && declaredLen > LEGACY_MAX_BYTES) {
+          return jsonResponse(
+            {
+              ok: false,
+              error:
+                'File >20 MB harus diunggah lewat mode multipart VZ Files agar aman dari batas memori Edge Worker.',
+            },
+            413
+          );
+        }
         const filenameHeader = request.headers.get('x-file-name') || 'upload.bin';
         let filename = 'upload.bin';
         try {
@@ -2843,16 +3033,24 @@ async function handleApiRequest(
         }
         const contentType =
           request.headers.get('content-type') || 'application/octet-stream';
-        const serverUrl = await fetchVikingServer();
-        const buf = await request.arrayBuffer();
-        if (buf.byteLength <= 0 || buf.byteLength > 95 * 1024 * 1024) {
+        const bin = await readBoundedBinary(request, LEGACY_MAX_BYTES);
+        if (!bin.ok) {
           return jsonResponse(
-            { ok: false, error: 'Ukuran file tidak valid untuk legacy upload.' },
-            413
+            {
+              ok: false,
+              error:
+                'File >20 MB harus diunggah lewat mode multipart VZ Files agar aman dari batas memori Edge Worker.',
+            },
+            bin.status
           );
         }
+        if (bin.bytes.byteLength <= 0) {
+          return jsonResponse({ ok: false, error: 'Ukuran file tidak valid untuk legacy upload.' }, 400);
+        }
+        const serverUrl = await fetchVikingServer();
+        const buf = bin.bytes;
         const form = new FormData();
-        form.append('file', new Blob([buf], { type: contentType }), filename);
+        form.append('file', new Blob([buf.slice()], { type: contentType }), filename);
         form.append('user', '');
         const upstream = await fetch(serverUrl, { method: 'POST', body: form });
         const text = await upstream.text();
@@ -2885,10 +3083,12 @@ async function handleApiRequest(
   if (url.pathname === '/api/mail/send' && request.method === 'POST') {
     const parsed = await readBoundedJson<{
       senderUser?: string;
+      senderName?: string;
       fromAddress?: string;
       toAddress?: string;
       subject?: string;
       bodyText?: string;
+      format?: OutboundEmailFormat;
       attachments?: Array<{
         id?: string;
         ephemeralId?: string;
@@ -2903,6 +3103,8 @@ async function handleApiRequest(
     }
 
     const senderUser = sanitizeHandle(String(parsed.data.senderUser || 'fadhil'));
+    const ownershipDenied = requireOwnership(senderUser);
+    if (ownershipDenied) return ownershipDenied;
     const senderReserved = checkReservedUsername(senderUser);
     if (senderReserved.isReserved) {
       return jsonResponse(
@@ -3021,8 +3223,17 @@ async function handleApiRequest(
     }
 
     const safeExternalLinks = sanitizeExternalLinksArray(parsed.data.externalLinks);
-    const renderedOutbound = buildOutboundEmailPayload(bodyText, safeExternalLinks);
+    const outboundFormat = normalizeOutboundEmailFormat(parsed.data.format);
+    const renderedOutbound = buildOutboundEmailPayload(
+      bodyText,
+      safeExternalLinks,
+      outboundFormat
+    );
 
+    const safeFromDisplayName = sanitizeDisplayName(
+      String(parsed.data.senderName || senderUser),
+      senderUser
+    );
     const messageIdToken = generateSecureId('out');
     const rfcMessageId = `<${messageIdToken}@${primaryDomain}>`;
     const activeProvider = resolveOutboundProvider(env);
@@ -3034,11 +3245,12 @@ async function handleApiRequest(
       try {
         const result = await dispatchOutboundEmail(activeProvider, env, {
           fromEmail: safeFromAddress,
-          fromName: sanitizeDisplayName(senderUser, senderUser),
+          fromName: safeFromDisplayName,
           toEmail: toAddress,
           subject,
           text: renderedOutbound.textContent,
           html: renderedOutbound.htmlContent,
+          format: renderedOutbound.format,
           rfcMessageId,
           attachments: loadedAttachments.map((a) => ({
             filename: a.filename,
@@ -3184,6 +3396,8 @@ async function handleApiRequest(
       liveEmailDispatched,
       providerUsed: activeProvider,
       dispatchedVia,
+      formatUsed: renderedOutbound.format,
+      htmlLength: renderedOutbound.htmlContent?.length ?? 0,
       rfcMessageId,
       sentAt: new Date().toISOString(),
       serverStoredCopy: false,
@@ -3206,6 +3420,8 @@ async function handleApiRequest(
 
     if (ownerParam) {
       const owner = sanitizeHandle(ownerParam);
+      const ownershipDenied = requireOwnership(owner);
+      if (ownershipDenied) return ownershipDenied;
       const items = await listShortlinksByOwner(env, owner);
       return jsonResponse({ ok: true, storageEngine, items });
     }
@@ -3298,6 +3514,10 @@ async function handleApiRequest(
       typeof parsed.data.ownerUser === 'string' && parsed.data.ownerUser.trim()
         ? sanitizeHandle(parsed.data.ownerUser)
         : null;
+    if (ownerUser) {
+      const authCheck = await requireAuthenticatedUser(ownerUser);
+      if (!authCheck.ok) return authCheck.response;
+    }
     const title = stripHeaderInjection(String(parsed.data.title || ''), 120);
 
     const record: ShortlinkRecord = {
@@ -3330,9 +3550,24 @@ async function handleApiRequest(
       return jsonResponse({ ok: false, error: 'Slug tidak valid.' }, 400);
     }
     const ownerParam = url.searchParams.get('owner')?.trim();
-    const ownerUser = ownerParam ? sanitizeHandle(ownerParam) : null;
+    const requestedOwner = ownerParam ? sanitizeHandle(ownerParam) : null;
     const mode = url.searchParams.get('mode') === 'recycle' ? 'recycle' : 'permanent';
-    const result = await deleteShortlinkRecord(env, slug, ownerUser);
+    const existingRecord = await getShortlinkRecord(env, slug);
+    let effectiveOwner: string | null = requestedOwner;
+
+    if (existingRecord?.ownerUser) {
+      const authCheck = await requireAuthenticatedUser(existingRecord.ownerUser);
+      if (!authCheck.ok) return authCheck.response;
+      effectiveOwner = authCheck.auth.user
+        ? authCheck.auth.user.canonicalUsername
+        : requestedOwner || existingRecord.ownerUser;
+    } else if (requestedOwner) {
+      const authCheck = await requireAuthenticatedUser(requestedOwner);
+      if (!authCheck.ok) return authCheck.response;
+    }
+
+    const result = await deleteShortlinkRecord(env, slug, effectiveOwner);
+    const ownerUser = effectiveOwner;
     if (result.forbidden) {
       return jsonResponse(
         { ok: false, error: 'Anda tidak memiliki izin menghapus shortlink milik akun lain.' },
@@ -3368,6 +3603,8 @@ async function handleApiRequest(
       return jsonResponse({ ok: false, error: 'Parameter owner diperlukan.' }, 400);
     }
     const ownerUser = sanitizeHandle(ownerParam);
+    const ownershipDenied = requireOwnership(ownerUser);
+    if (ownershipDenied) return ownershipDenied;
     const items = await listRecycleBinItems(env, ownerUser);
     return jsonResponse({
       ok: true,
@@ -3389,6 +3626,8 @@ async function handleApiRequest(
       return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
     }
     const ownerUser = sanitizeHandle(String(parsed.data.ownerUser || ''));
+    const ownershipDenied = requireOwnership(ownerUser);
+    if (ownershipDenied) return ownershipDenied;
     const itemType = parsed.data.itemType;
     if (itemType !== 'bio_link' && itemType !== 'bio_page' && itemType !== 'shortlink') {
       return jsonResponse({ ok: false, error: 'Tipe item Recycle Bin tidak valid.' }, 400);
@@ -3410,6 +3649,8 @@ async function handleApiRequest(
       return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
     }
     const ownerUser = sanitizeHandle(String(parsed.data.ownerUser || ''));
+    const ownershipDenied = requireOwnership(ownerUser);
+    if (ownershipDenied) return ownershipDenied;
     const itemId = String(parsed.data.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
     if (!itemId) {
       return jsonResponse({ ok: false, error: 'ID item tidak valid.' }, 400);
@@ -3545,6 +3786,8 @@ async function handleApiRequest(
       return jsonResponse({ ok: false, error: 'Parameter owner diperlukan.' }, 400);
     }
     const ownerUser = sanitizeHandle(ownerParam);
+    const ownershipDenied = requireOwnership(ownerUser);
+    if (ownershipDenied) return ownershipDenied;
     const purgedCount = await emptyRecycleBinForOwner(env, ownerUser);
     return jsonResponse({ ok: true, purgedCount });
   }
@@ -3555,6 +3798,8 @@ async function handleApiRequest(
       return jsonResponse({ ok: false, error: 'Parameter owner diperlukan.' }, 400);
     }
     const ownerUser = sanitizeHandle(ownerParam);
+    const ownershipDenied = requireOwnership(ownerUser);
+    if (ownershipDenied) return ownershipDenied;
     const itemId = url.pathname
       .replace('/api/links/recycle-bin/', '')
       .replace(/[^a-zA-Z0-9_-]/g, '')
@@ -3576,6 +3821,8 @@ async function handleApiRequest(
       .replace('/api/links/bio/', '')
       .replace(/\/status$/, '');
     const username = sanitizeHandle(decodeURIComponent(trimmed || ''));
+    const ownershipDenied = requireOwnership(username);
+    if (ownershipDenied) return ownershipDenied;
     const reserved = checkReservedUsername(username);
     if (reserved.isReserved) {
       return jsonResponse(
@@ -3629,6 +3876,8 @@ async function handleApiRequest(
   if (url.pathname.startsWith('/api/links/bio/') && request.method === 'PUT') {
     const rawUser = decodeURIComponent(url.pathname.replace('/api/links/bio/', '').split('/')[0] || '');
     const username = sanitizeHandle(rawUser);
+    const ownershipDenied = requireOwnership(username);
+    if (ownershipDenied) return ownershipDenied;
     const reserved = checkReservedUsername(username);
     if (reserved.isReserved) {
       return jsonResponse(
@@ -3668,6 +3917,8 @@ async function handleApiRequest(
   if (url.pathname.startsWith('/api/links/bio/') && request.method === 'DELETE') {
     const rawUser = decodeURIComponent(url.pathname.replace('/api/links/bio/', '').split('/')[0] || '');
     const username = sanitizeHandle(rawUser);
+    const ownershipDenied = requireOwnership(username);
+    if (ownershipDenied) return ownershipDenied;
     const cooldown = await hardDeleteBioProfileAndSetCooldown(env, username);
     return jsonResponse({
       ok: true,
@@ -3741,6 +3992,8 @@ async function handleApiRequest(
     }
 
     if (request.method === 'PUT') {
+      const ownershipDenied = requireOwnership(username);
+      if (ownershipDenied) return ownershipDenied;
       const reserved = checkReservedUsername(username);
       if (reserved.isReserved) {
         return jsonResponse(
@@ -3776,7 +4029,7 @@ async function handleApiRequest(
           {
             ok: false,
             error:
-              'Format berkas tidak dikenali sebagai gambar yang aman (mendukung JPG, PNG, WebP, GIF, AVIF, HEIC, BMP, TIFF, SVG).',
+              'Format berkas tidak dikenali sebagai gambar raster yang aman (mendukung JPG, PNG, WebP, GIF, AVIF, HEIC, BMP, TIFF).',
           },
           400
         );
@@ -3871,6 +4124,8 @@ async function handleApiRequest(
     }
 
     if (request.method === 'DELETE') {
+      const ownershipDenied = requireOwnership(username);
+      if (ownershipDenied) return ownershipDenied;
       await deleteAvatarFromStorage(env, username, pageSlug);
       return jsonResponse({
         ok: true,
@@ -4306,13 +4561,41 @@ export default {
         attachments: inboundAttachments,
       };
 
-      if (env.MAIL_TRANSIT_KV) {
-        await env.MAIL_TRANSIT_KV.put(
+      if (!env.MAIL_TRANSIT_KV) {
+        logError(
+          'inbound_email_kv_unbound',
+          new Error('MAIL_TRANSIT_KV binding is missing on Worker'),
+          {
+            to: message.to,
+            from: message.from,
+            canonicalUser: resolved.canonicalUser,
+          }
+        );
+        // Fail-closed: reject with temporary SMTP 451 so Gmail/Yandex retries or sends a bounce instead of silent drop
+        message.setReject(
+          '451 4.3.0 Temporary mailbox transit storage unavailable. Please retry.'
+        );
+        return;
+      }
+
+      const fromDomain = (packet.fromAddress.split('@')[1] || '').slice(0, 120);
+      await Promise.all([
+        env.MAIL_TRANSIT_KV.put(
           `q:${resolved.canonicalUser}:${packetId}`,
           JSON.stringify(packet),
           { expirationTtl: TRANSIT_TTL_SECONDS }
-        );
-      }
+        ),
+        // Non-sensitive inbound telemetry so Diagnostics can verify Email Routing Worker is receiving mail
+        env.MAIL_TRANSIT_KV.put(
+          `meta:last_inbound:${resolved.canonicalUser}`,
+          JSON.stringify({
+            receivedAt: now.toISOString(),
+            fromDomain,
+            plusTag: resolved.plusTag,
+          }),
+          { expirationTtl: 30 * 24 * 3600 }
+        ),
+      ]);
 
       logInfo('inbound_email_queued', {
         canonicalUser: resolved.canonicalUser,
@@ -4320,7 +4603,7 @@ export default {
         dotNormalized: resolved.dotNormalized,
         rawSize: message.rawSize,
         attachmentCount: inboundAttachments.length,
-        kvStored: Boolean(env.MAIL_TRANSIT_KV),
+        kvStored: true,
       });
     } catch (error) {
       logError('inbound_email_failed', error, {

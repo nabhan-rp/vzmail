@@ -23,6 +23,14 @@ export function detectOperatingSystem(): OperatingSystem {
   const ua = window.navigator.userAgent.toLowerCase();
 
   if (/iphone|ipad|ipod/.test(ua)) return 'ios';
+  // iPadOS 13+ reports Macintosh desktop UA with multi-touch support
+  if (
+    window.navigator.platform === 'MacIntel' &&
+    typeof window.navigator.maxTouchPoints === 'number' &&
+    window.navigator.maxTouchPoints > 1
+  ) {
+    return 'ios';
+  }
   if (/android/.test(ua)) return 'android';
   if (/cros/.test(ua)) return 'chromeos';
   if (/win/.test(ua)) return 'windows';
@@ -73,8 +81,10 @@ export function usePwaInstall() {
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
     window.addEventListener('appinstalled', handleAppInstalled);
-    if (mediaQuery.addEventListener) {
+    if (typeof mediaQuery.addEventListener === 'function') {
       mediaQuery.addEventListener('change', handleDisplayModeChange);
+    } else if (typeof mediaQuery.addListener === 'function') {
+      mediaQuery.addListener(handleDisplayModeChange);
     }
 
     return () => {
@@ -83,8 +93,10 @@ export function usePwaInstall() {
         handleBeforeInstallPrompt
       );
       window.removeEventListener('appinstalled', handleAppInstalled);
-      if (mediaQuery.removeEventListener) {
+      if (typeof mediaQuery.removeEventListener === 'function') {
         mediaQuery.removeEventListener('change', handleDisplayModeChange);
+      } else if (typeof mediaQuery.removeListener === 'function') {
+        mediaQuery.removeListener(handleDisplayModeChange);
       }
     };
   }, []);

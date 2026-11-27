@@ -272,8 +272,37 @@ export async function saveMnemonicToPinVault(
   globalThis.localStorage.setItem(PIN_VAULT_STORAGE_PREFIX, record);
 }
 
+const PIN_VAULT_MAX_FAILED_ATTEMPTS = 5;
+
+function getPinAttemptsKey(username?: string): string {
+  return `${getPinVaultStorageKey(username)}_attempts`;
+}
+
+function readPinFailedAttempts(username?: string): number {
+  try {
+    const raw = globalThis.localStorage.getItem(getPinAttemptsKey(username));
+    const n = Number.parseInt(raw || '0', 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writePinFailedAttempts(count: number, username?: string): void {
+  try {
+    if (count <= 0) {
+      globalThis.localStorage.removeItem(getPinAttemptsKey(username));
+    } else {
+      globalThis.localStorage.setItem(getPinAttemptsKey(username), String(count));
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 /**
  * Unlocks a stored 12-word mnemonic phrase from the local PIN vault using the user's 4-6 digit PIN.
+ * Automatically wipes the local PIN ciphertext after 5 consecutive failed attempts.
  */
 export async function unlockMnemonicFromPinVault(
   pin: string,
@@ -321,11 +350,417 @@ export async function unlockMnemonicFromPinVault(
       key,
       cipher as unknown as BufferSource
     );
+    writePinFailedAttempts(0, username);
     return new TextDecoder().decode(plainBuffer);
   } catch {
-    throw new Error('PIN salah. Gagal membuka brankas frasa 12-kata.');
+    const nextFailed = readPinFailedAttempts(username) + 1;
+    if (nextFailed >= PIN_VAULT_MAX_FAILED_ATTEMPTS) {
+      try {
+        globalThis.localStorage.removeItem(getPinVaultStorageKey(username));
+        globalThis.localStorage.removeItem(PIN_VAULT_STORAGE_PREFIX);
+      } catch {
+        // Ignore storage errors
+      }
+      writePinFailedAttempts(0, username);
+      throw new Error(
+        'PIN salah 5 kali berturut-turut. Demi keamanan perangkat, brankas PIN lokal telah dihapus otomatis. Gunakan frasa 12-kata cadangan Anda.'
+      );
+    }
+    writePinFailedAttempts(nextFailed, username);
+    const remaining = PIN_VAULT_MAX_FAILED_ATTEMPTS - nextFailed;
+    throw new Error(
+      `PIN salah. Gagal membuka brankas frasa 12-kata (sisa ${remaining} percobaan sebelum brankas PIN lokal dihapus otomatis).`
+    );
   }
 }
+
+// ============================================================================
+// VZ VAULT MODULE PIN LOCK (OPT-IN 3-MODE PROTECTION)
+// Mode 1: Full Vault PIN Lock Screen + Idle/Visibility Auto-Lock
+// Mode 2: Sensitive Actions PIN Gate (Export / Import / 12-Word Phrase)
+// Mode 3: First-Open Opt-In PIN Setup Prompt
+// ============================================================================
+
+export type VaultPinLockMode = 'off' | 'full_vault_autolock' | 'sensitive_actions';
+export type VaultAutoLockMinutes = 1 | 5 | 15;
+
+export interface VaultPinLockConfig {
+  enabled: boolean;
+  mode: VaultPinLockMode;
+  requireFirstSetup: boolean;
+  firstSetupDismissed: boolean;
+  autoLockMinutes: VaultAutoLockMinutes;
+  lockOnTabHidden: boolean;
+  salt: string;
+  verifierHash: string;
+  iterations: number;
+  updatedAt: string;
+}
+
+const VAULT_PIN_LOCK_PREFIX = 'vz_vault_pin_lock_v1';
+const VAULT_PIN_LOCK_ATTEMPTS_PREFIX = 'vz_vault_pin_lock_attempts_v1';
+const VAULT_PIN_LOCK_ITERATIONS = 150_000;
+export const VAULT_PIN_LOCK_MAX_ATTEMPTS = 5;
+
+function getVaultPinLockKey(username?: string): string {
+  const safeUser = username ? sanitizeHandle(username) : 'default';
+  return `${VAULT_PIN_LOCK_PREFIX}:${safeUser}`;
+}
+
+function getVaultPinLockAttemptsKey(username?: string): string {
+  const safeUser = username ? sanitizeHandle(username) : 'default';
+  return `${VAULT_PIN_LOCK_ATTEMPTS_PREFIX}:${safeUser}`;
+}
+
+function buildDefaultVaultPinLockConfig(): VaultPinLockConfig {
+  return {
+    enabled: false,
+    mode: 'off',
+    requireFirstSetup: true,
+    firstSetupDismissed: false,
+    autoLockMinutes: 5,
+    lockOnTabHidden: true,
+    salt: '',
+    verifierHash: '',
+    iterations: VAULT_PIN_LOCK_ITERATIONS,
+    updatedAt: '',
+  };
+}
+
+function normalizeAutoLockMinutes(raw: unknown): VaultAutoLockMinutes {
+  if (raw === 1 || raw === 5 || raw === 15) return raw;
+  return 5;
+}
+
+function saveVaultPinLockConfigRaw(
+  username: string | undefined,
+  config: VaultPinLockConfig
+): VaultPinLockConfig {
+  try {
+    globalThis.localStorage.setItem(
+      getVaultPinLockKey(username),
+      JSON.stringify(config)
+    );
+  } catch {
+    // Ignore storage quota / WebView restrictions
+  }
+  return config;
+}
+
+export function getVaultPinLockConfig(username?: string): VaultPinLockConfig {
+  const fallback = buildDefaultVaultPinLockConfig();
+  try {
+    const raw = globalThis.localStorage.getItem(getVaultPinLockKey(username));
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<VaultPinLockConfig>;
+    if (!isSafePlainObject(parsed)) return fallback;
+
+    const validHash =
+      typeof parsed.salt === 'string' &&
+      parsed.salt.length > 0 &&
+      typeof parsed.verifierHash === 'string' &&
+      parsed.verifierHash.length > 0;
+
+    const enabled = Boolean(parsed.enabled) && validHash;
+    const mode: VaultPinLockMode = !enabled
+      ? 'off'
+      : parsed.mode === 'sensitive_actions'
+        ? 'sensitive_actions'
+        : 'full_vault_autolock';
+
+    return {
+      enabled,
+      mode,
+      requireFirstSetup: parsed.requireFirstSetup !== false,
+      firstSetupDismissed: Boolean(parsed.firstSetupDismissed),
+      autoLockMinutes: normalizeAutoLockMinutes(parsed.autoLockMinutes),
+      lockOnTabHidden: parsed.lockOnTabHidden !== false,
+      salt: validHash ? parsed.salt! : '',
+      verifierHash: validHash ? parsed.verifierHash! : '',
+      iterations:
+        typeof parsed.iterations === 'number' &&
+        parsed.iterations >= MIN_PBKDF2_ITERATIONS &&
+        parsed.iterations <= MAX_PBKDF2_ITERATIONS
+          ? parsed.iterations
+          : VAULT_PIN_LOCK_ITERATIONS,
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : '',
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+export function getVaultPinLockFailedAttempts(username?: string): number {
+  try {
+    const raw = globalThis.localStorage.getItem(getVaultPinLockAttemptsKey(username));
+    const n = Number.parseInt(raw || '0', 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeVaultPinLockFailedAttempts(count: number, username?: string): void {
+  try {
+    if (count <= 0) {
+      globalThis.localStorage.removeItem(getVaultPinLockAttemptsKey(username));
+    } else {
+      globalThis.localStorage.setItem(getVaultPinLockAttemptsKey(username), String(count));
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function constantTimeBytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  let diff = 0;
+  for (let i = 0; i < a.byteLength; i += 1) {
+    diff |= a[i] ^ b[i];
+  }
+  return diff === 0;
+}
+
+async function deriveVaultPinVerifier(
+  pin: string,
+  salt: Uint8Array,
+  iterations: number
+): Promise<Uint8Array> {
+  assertWebCryptoAvailable();
+  const enc = new TextEncoder();
+  const baseKey = await globalThis.crypto.subtle.importKey(
+    'raw',
+    enc.encode(`vz-vault-pin-lock-v1:${pin}`),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const bits = await globalThis.crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: salt as unknown as BufferSource,
+      iterations,
+      hash: 'SHA-256',
+    },
+    baseKey,
+    256
+  );
+  return new Uint8Array(bits);
+}
+
+export function setVaultFirstSetupPreference(
+  username: string | undefined,
+  patch: { requireFirstSetup?: boolean; firstSetupDismissed?: boolean }
+): VaultPinLockConfig {
+  const current = getVaultPinLockConfig(username);
+  return saveVaultPinLockConfigRaw(username, {
+    ...current,
+    requireFirstSetup:
+      typeof patch.requireFirstSetup === 'boolean'
+        ? patch.requireFirstSetup
+        : current.requireFirstSetup,
+    firstSetupDismissed:
+      typeof patch.firstSetupDismissed === 'boolean'
+        ? patch.firstSetupDismissed
+        : current.firstSetupDismissed,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export async function setupVaultPinLock(
+  username: string | undefined,
+  pin: string,
+  options: {
+    mode: Exclude<VaultPinLockMode, 'off'>;
+    autoLockMinutes?: VaultAutoLockMinutes;
+    lockOnTabHidden?: boolean;
+    requireFirstSetup?: boolean;
+  }
+): Promise<VaultPinLockConfig> {
+  const cleanPin = pin.trim();
+  if (!isValidPinCode(cleanPin)) {
+    throw new Error('PIN harus terdiri dari 4 hingga 6 digit angka.');
+  }
+  const current = getVaultPinLockConfig(username);
+  const salt = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  const verifier = await deriveVaultPinVerifier(
+    cleanPin,
+    salt,
+    VAULT_PIN_LOCK_ITERATIONS
+  );
+
+  writeVaultPinLockFailedAttempts(0, username);
+  return saveVaultPinLockConfigRaw(username, {
+    enabled: true,
+    mode: options.mode,
+    requireFirstSetup:
+      typeof options.requireFirstSetup === 'boolean'
+        ? options.requireFirstSetup
+        : current.requireFirstSetup,
+    firstSetupDismissed: true,
+    autoLockMinutes: normalizeAutoLockMinutes(
+      options.autoLockMinutes ?? current.autoLockMinutes
+    ),
+    lockOnTabHidden:
+      typeof options.lockOnTabHidden === 'boolean'
+        ? options.lockOnTabHidden
+        : current.lockOnTabHidden,
+    salt: bytesToBase64(salt),
+    verifierHash: bytesToBase64(verifier),
+    iterations: VAULT_PIN_LOCK_ITERATIONS,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export async function verifyVaultPinLock(
+  username: string | undefined,
+  pin: string
+): Promise<
+  | { ok: true }
+  | { ok: false; remainingAttempts: number; wiped: boolean; error: string }
+> {
+  const cleanPin = pin.trim();
+  if (!isValidPinCode(cleanPin)) {
+    const failed = getVaultPinLockFailedAttempts(username);
+    return {
+      ok: false,
+      remainingAttempts: Math.max(1, VAULT_PIN_LOCK_MAX_ATTEMPTS - failed),
+      wiped: false,
+      error: 'Masukkan PIN 4 hingga 6 digit angka.',
+    };
+  }
+
+  const config = getVaultPinLockConfig(username);
+  if (!config.enabled || !config.salt || !config.verifierHash) {
+    return { ok: true };
+  }
+
+  try {
+    const salt = base64ToBytes(config.salt);
+    const expected = base64ToBytes(config.verifierHash);
+    const actual = await deriveVaultPinVerifier(cleanPin, salt, config.iterations);
+
+    if (constantTimeBytesEqual(actual, expected)) {
+      writeVaultPinLockFailedAttempts(0, username);
+      return { ok: true };
+    }
+  } catch {
+    return {
+      ok: false,
+      remainingAttempts: Math.max(
+        1,
+        VAULT_PIN_LOCK_MAX_ATTEMPTS - getVaultPinLockFailedAttempts(username)
+      ),
+      wiped: false,
+      error: 'Gagal memverifikasi PIN di browser ini.',
+    };
+  }
+
+  const nextFailed = getVaultPinLockFailedAttempts(username) + 1;
+  if (nextFailed >= VAULT_PIN_LOCK_MAX_ATTEMPTS) {
+    clearMnemonicPinVault(username);
+    writeVaultPinLockFailedAttempts(0, username);
+    saveVaultPinLockConfigRaw(username, {
+      ...buildDefaultVaultPinLockConfig(),
+      requireFirstSetup: config.requireFirstSetup,
+      firstSetupDismissed: !config.requireFirstSetup,
+      updatedAt: new Date().toISOString(),
+    });
+    return {
+      ok: false,
+      remainingAttempts: 0,
+      wiped: true,
+      error:
+        'PIN salah 5 kali berturut-turut. Demi keamanan perangkat, kunci PIN lokal & brankas frasa PIN telah direset otomatis. Gunakan frasa 12-kata cadangan Anda atau buat PIN baru.',
+    };
+  }
+
+  writeVaultPinLockFailedAttempts(nextFailed, username);
+  const remaining = VAULT_PIN_LOCK_MAX_ATTEMPTS - nextFailed;
+  return {
+    ok: false,
+    remainingAttempts: remaining,
+    wiped: false,
+    error: `PIN salah. Sisa ${remaining} percobaan sebelum kunci PIN lokal direset otomatis.`,
+  };
+}
+
+export function updateVaultPinLockSettings(
+  username: string | undefined,
+  patch: Partial<
+    Pick<
+      VaultPinLockConfig,
+      'mode' | 'autoLockMinutes' | 'lockOnTabHidden' | 'requireFirstSetup' | 'firstSetupDismissed'
+    >
+  >
+): VaultPinLockConfig {
+  const current = getVaultPinLockConfig(username);
+  const nextMode: VaultPinLockMode = !current.enabled
+    ? 'off'
+    : patch.mode === 'sensitive_actions' || patch.mode === 'full_vault_autolock'
+      ? patch.mode
+      : current.mode;
+
+  return saveVaultPinLockConfigRaw(username, {
+    ...current,
+    mode: nextMode,
+    autoLockMinutes: normalizeAutoLockMinutes(
+      patch.autoLockMinutes ?? current.autoLockMinutes
+    ),
+    lockOnTabHidden:
+      typeof patch.lockOnTabHidden === 'boolean'
+        ? patch.lockOnTabHidden
+        : current.lockOnTabHidden,
+    requireFirstSetup:
+      typeof patch.requireFirstSetup === 'boolean'
+        ? patch.requireFirstSetup
+        : current.requireFirstSetup,
+    firstSetupDismissed:
+      typeof patch.firstSetupDismissed === 'boolean'
+        ? patch.firstSetupDismissed
+        : current.firstSetupDismissed,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export async function changeVaultPinLock(
+  username: string | undefined,
+  currentPin: string,
+  nextPin: string
+): Promise<VaultPinLockConfig> {
+  const verified = await verifyVaultPinLock(username, currentPin);
+  if (!verified.ok) {
+    throw new Error(verified.error);
+  }
+  const current = getVaultPinLockConfig(username);
+  const activeMode: Exclude<VaultPinLockMode, 'off'> =
+    current.mode === 'sensitive_actions' ? 'sensitive_actions' : 'full_vault_autolock';
+  return setupVaultPinLock(username, nextPin, {
+    mode: activeMode,
+    autoLockMinutes: current.autoLockMinutes,
+    lockOnTabHidden: current.lockOnTabHidden,
+    requireFirstSetup: current.requireFirstSetup,
+  });
+}
+
+export async function disableVaultPinLock(
+  username: string | undefined,
+  currentPin: string
+): Promise<VaultPinLockConfig> {
+  const verified = await verifyVaultPinLock(username, currentPin);
+  if (!verified.ok) {
+    throw new Error(verified.error);
+  }
+  const current = getVaultPinLockConfig(username);
+  writeVaultPinLockFailedAttempts(0, username);
+  return saveVaultPinLockConfigRaw(username, {
+    ...buildDefaultVaultPinLockConfig(),
+    requireFirstSetup: current.requireFirstSetup,
+    firstSetupDismissed: true,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
 
 /**
  * Chunked O(n) base64 encoding — avoids O(n^2) string concatenation freezes on large mailboxes.
@@ -350,11 +785,24 @@ function base64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+function assertWebCryptoAvailable(): void {
+  if (
+    typeof globalThis.crypto === 'undefined' ||
+    !globalThis.crypto.subtle ||
+    typeof globalThis.crypto.subtle.importKey !== 'function'
+  ) {
+    throw new Error(
+      'Web Crypto API tidak tersedia di koneksi ini. Buka aplikasi melalui HTTPS atau localhost agar enkripsi AES-256-GCM dapat berjalan.'
+    );
+  }
+}
+
 async function deriveAesGcmKey(
   passphrase: string,
   salt: Uint8Array,
   iterations = DEFAULT_PBKDF2_ITERATIONS
 ): Promise<CryptoKey> {
+  assertWebCryptoAvailable();
   const enc = new TextEncoder();
   const baseKey = await globalThis.crypto.subtle.importKey(
     'raw',
@@ -1382,8 +1830,11 @@ export function triggerBrowserDownload(
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = safeFilename;
+  anchor.rel = 'noopener';
+  anchor.style.display = 'none';
   document.body.appendChild(anchor);
   anchor.click();
   document.body.removeChild(anchor);
-  URL.revokeObjectURL(url);
+  // Delay revocation so Firefox and iOS/macOS Safari finish starting the file download
+  window.setTimeout(() => URL.revokeObjectURL(url), 1500);
 }

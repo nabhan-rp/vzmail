@@ -7,6 +7,7 @@ import {
   resolveCanonicalEmail,
   sanitizeHandle,
 } from './src/utils/mailIdentity.ts';
+import { createExpressAuthMiddleware } from './src/utils/expressAuthMiddleware.ts';
 import {
   generateSecureId,
   isValidEmailAddress,
@@ -19,6 +20,7 @@ import {
   buildOutboundEmailPayload,
   isAllowedVikingPartUrl,
   isAllowedVikingServerUrl,
+  normalizeOutboundEmailFormat,
   sanitizeExternalLinksArray,
   type MailExternalLink,
 } from './src/utils/mailExternalLinks.ts';
@@ -102,6 +104,9 @@ const DAILY_OUTBOUND_LIMIT = 25;
 
 // Ephemeral in-memory local dev buffer (Zero permanent retention: purged immediately upon client ACK)
 const ephemeralQueue: Map<string, EphemeralMailPacket> = new Map();
+const seededLocalUsers: Set<string> = new Set();
+const recentlyAckedLocal: Map<string, number> = new Map(); // key: `${user}:${packetId}` -> expiresAt ms
+const lastLocalInboundMeta: Map<string, { receivedAt: string; fromDomain: string }> = new Map();
 const localEphemeralAttachments: Map<string, StoredEphemeralAttachment> = new Map();
 const outboundQuotaCounter: Map<string, { date: string; count: number }> = new Map();
 const localShortlinks: Map<string, ShortlinkRecord> = new Map();
@@ -185,13 +190,31 @@ function pruneStaleQuotas(today: string): void {
   }
 }
 
-function seedInitialEphemeralPacketForUser(rawUser: string): void {
+function pruneExpiredLocalAcks(): void {
+  const now = Date.now();
+  for (const [key, expiresAt] of recentlyAckedLocal.entries()) {
+    if (expiresAt <= now) {
+      recentlyAckedLocal.delete(key);
+    }
+  }
+}
+
+function seedInitialEphemeralPacketForUser(rawUser: string): {
+  seeded: boolean;
+  alreadySeeded: boolean;
+} {
   pruneExpiredAndBoundQueue();
   const user = sanitizeHandle(rawUser);
+  if (seededLocalUsers.has(user)) {
+    return { seeded: false, alreadySeeded: true };
+  }
   const existingForUser = Array.from(ephemeralQueue.values()).some(
     (p) => p.canonicalUser === user
   );
-  if (existingForUser) return;
+  seededLocalUsers.add(user);
+  if (existingForUser) {
+    return { seeded: false, alreadySeeded: false };
+  }
 
   const packetId = `cf-q-${user}-init`;
   if (!ephemeralQueue.has(packetId)) {
@@ -209,7 +232,9 @@ function seedInitialEphemeralPacketForUser(rawUser: string): void {
       receivedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
     });
+    return { seeded: true, alreadySeeded: false };
   }
+  return { seeded: false, alreadySeeded: false };
 }
 
 async function startServer() {
@@ -219,9 +244,46 @@ async function startServer() {
   app.disable('x-powered-by');
   app.use(express.json({ limit: '512kb' }));
 
+  const SAFE_STORED_AVATAR_MIMES = new Set([
+    'image/avif',
+    'image/webp',
+    'image/png',
+    'image/jpeg',
+    'image/gif',
+  ]);
+
+  const UNSAFE_INLINE_ATTACHMENT_MIMES = new Set([
+    'text/html',
+    'application/xhtml+xml',
+    'image/svg+xml',
+    'text/javascript',
+    'application/javascript',
+    'application/x-javascript',
+    'text/xml',
+    'application/xml',
+  ]);
+
+  const getSafeAttachmentDownloadMime = (rawMime: string | undefined): string => {
+    const clean = (rawMime || 'application/octet-stream').split(';')[0].trim().toLowerCase();
+    if (!clean || UNSAFE_INLINE_ATTACHMENT_MIMES.has(clean)) {
+      return 'application/octet-stream';
+    }
+    return clean;
+  };
+
+  const { apiGuardMiddleware, requireAuthenticatedUser } = createExpressAuthMiddleware({
+    auth0Domain: process.env.AUTH0_DOMAIN || process.env.VITE_AUTH0_DOMAIN || 'accounts.vz.gay',
+    mailClientId: process.env.AUTH0_MAIL_CLIENT_ID || process.env.VITE_AUTH0_MAIL_CLIENT_ID,
+    linksClientId: process.env.AUTH0_LINKS_CLIENT_ID || process.env.VITE_AUTH0_LINKS_CLIENT_ID,
+    relayAuthToken: process.env.RELAY_AUTH_TOKEN,
+    allowLocalDevAuthEnv: process.env.ALLOW_LOCAL_DEV_AUTH === 'true',
+  });
+
   // Baseline security headers for local dev & Cloud Run preview
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader(
       'Permissions-Policy',
@@ -235,6 +297,9 @@ async function startServer() {
     res.setHeader('X-VZ-Zero-Retention', 'EPHEMERAL_POP_AND_PURGE');
     next();
   });
+
+  // Dedicated Express Auth0 RS256 JWT + Relay Token Verification Middleware
+  app.use('/api', apiGuardMiddleware);
 
   // 0. GET /api/health
   app.get('/api/health', (_req, res) => {
@@ -282,14 +347,22 @@ async function startServer() {
     });
   });
 
-  // 1. GET /api/mail/queue?username=fadhil
-  app.get('/api/mail/queue', (req, res) => {
+  // 1. GET /api/mail/queue?username=fadhil[&metaOnly=1]
+  app.get('/api/mail/queue', async (req, res) => {
     pruneExpiredAndBoundQueue();
+    pruneExpiredLocalAcks();
     const rawUser = String(req.query.username || 'fadhil');
     const user = sanitizeHandle(rawUser);
+    if (!(await requireAuthenticatedUser(req, res, user))) return;
+    const metaOnly =
+      req.query.metaOnly === '1' || req.query.metaOnly === 'true';
 
     const pending = Array.from(ephemeralQueue.values())
-      .filter((pkt) => pkt.canonicalUser === user)
+      .filter(
+        (pkt) =>
+          pkt.canonicalUser === user &&
+          !recentlyAckedLocal.has(`${user}:${pkt.id}`)
+      )
       .sort(
         (a, b) =>
           new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime()
@@ -300,6 +373,25 @@ async function startServer() {
     const quotaRec = outboundQuotaCounter.get(user);
     const usedToday = quotaRec && quotaRec.date === today ? quotaRec.count : 0;
 
+    if (metaOnly) {
+      res.json({
+        ok: true,
+        kvBound: true,
+        metaOnly: true,
+        mode: 'local-dev-ephemeral',
+        canonicalUser: user,
+        primaryEmail: `${user}@imy.li`,
+        pairedBioDomain: `${user}.imy.li`,
+        pendingCount: pending.length,
+        packetIds: pending.map((p) => p.id),
+        outboundQuota: {
+          usedToday,
+          dailyLimit: DAILY_OUTBOUND_LIMIT,
+        },
+      });
+      return;
+    }
+
     res.json({
       ok: true,
       kvBound: true,
@@ -308,6 +400,7 @@ async function startServer() {
       primaryEmail: `${user}@imy.li`,
       pairedBioDomain: `${user}.imy.li`,
       pendingCount: pending.length,
+      packetIds: pending.map((p) => p.id),
       packets: pending,
       zeroRetentionStatus: {
         retentionPolicy: 'EPHEMERAL_POP_AND_PURGE',
@@ -321,13 +414,73 @@ async function startServer() {
     });
   });
 
-  // 2. POST /api/mail/ack — Immediately purges pulled packet IDs owned by the requesting user
-  app.post('/api/mail/ack', (req, res) => {
+  // 1.5 GET /api/mail/diagnostics?username=fadhil — Lightweight inbound queue, binding & quota diagnostics
+  app.get('/api/mail/diagnostics', async (req, res) => {
+    pruneExpiredAndBoundQueue();
+    pruneExpiredLocalAcks();
+    const user = sanitizeHandle(String(req.query.username || 'fadhil'));
+    if (!(await requireAuthenticatedUser(req, res, user))) return;
+
+    const pendingQueueCount = Array.from(ephemeralQueue.values()).filter(
+      (pkt) =>
+        pkt.canonicalUser === user &&
+        !recentlyAckedLocal.has(`${user}:${pkt.id}`)
+    ).length;
+
+    const today = new Date().toISOString().slice(0, 10);
+    pruneStaleQuotas(today);
+    const quotaRec = outboundQuotaCounter.get(user);
+    const usedToday = quotaRec && quotaRec.date === today ? quotaRec.count : 0;
+
+    const hasCpanel = Boolean(process.env.CPANEL_RELAY_URL && process.env.CPANEL_RELAY_SECRET);
+    const hasResend = Boolean(process.env.RESEND_API_KEY);
+    const hasBrevo = Boolean(process.env.BREVO_API_KEY);
+    const activeOutboundProvider = hasCpanel
+      ? 'cpanel_relay'
+      : hasResend
+        ? 'resend'
+        : hasBrevo
+          ? 'brevo'
+          : 'none';
+    const lastIn = lastLocalInboundMeta.get(user);
+
+    res.json({
+      ok: true,
+      canonicalUser: user,
+      primaryEmail: `${user}@imy.li`,
+      primaryDomain: 'imy.li',
+      kvBound: true,
+      r2Bound: true,
+      failClosedInboundReject: true,
+      activeOutboundProvider,
+      outboundProviderMode: (process.env.OUTBOUND_PROVIDER || 'auto').toLowerCase(),
+      brevoKeyFormat: !process.env.BREVO_API_KEY
+        ? 'missing'
+        : process.env.BREVO_API_KEY.trim().startsWith('xkeysib-')
+          ? 'v3_ready'
+          : 'mcp_token_warning',
+      pendingQueueCount,
+      seededOnce: seededLocalUsers.has(user),
+      lastInboundAt: lastIn?.receivedAt || null,
+      lastInboundFromDomain: lastIn?.fromDomain || null,
+      outboundQuota: {
+        usedToday,
+        dailyLimit: DAILY_OUTBOUND_LIMIT,
+      },
+      authSource: 'local_dev_fallback',
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // 2. POST /api/mail/ack — Immediately purges pulled packet IDs owned by the requesting user + 90s tombstone
+  app.post('/api/mail/ack', async (req, res) => {
     const user = sanitizeHandle(String(req.body?.username || 'fadhil'));
+    if (!(await requireAuthenticatedUser(req, res, user))) return;
     const packetIds: string[] = Array.isArray(req.body?.packetIds)
       ? req.body.packetIds.filter((id: unknown): id is string => typeof id === 'string')
       : [];
     const purgedIds: string[] = [];
+    const tombstoneExpiry = Date.now() + 90_000;
 
     for (const id of packetIds.slice(0, 100)) {
       const existing = ephemeralQueue.get(id);
@@ -335,6 +488,10 @@ async function startServer() {
         ephemeralQueue.delete(id);
         purgedIds.push(id);
         totalPurgedSinceBoot += 1;
+      }
+      recentlyAckedLocal.set(`${user}:${id}`, tombstoneExpiry);
+      if (id === `cf-q-${user}-init`) {
+        seededLocalUsers.add(user);
       }
     }
 
@@ -351,7 +508,7 @@ async function startServer() {
   });
 
   // 3. POST /api/mail/simulate-inbound — Simulate an incoming email via Cloudflare Email Routing
-  app.post('/api/mail/simulate-inbound', (req, res) => {
+  app.post('/api/mail/simulate-inbound', async (req, res) => {
     pruneExpiredAndBoundQueue();
 
     const toAddress = stripHeaderInjection(
@@ -391,6 +548,7 @@ async function startServer() {
       .slice(0, MAX_EMAIL_BODY_CHARS);
 
     const resolved = resolveCanonicalEmail(toAddress, DEFAULT_SUPPORTED_DOMAINS);
+    if (!(await requireAuthenticatedUser(req, res, resolved.canonicalUsername))) return;
 
     const packetId = generateSecureId('cf-pkt');
     const packet: EphemeralMailPacket = {
@@ -409,6 +567,10 @@ async function startServer() {
     };
 
     ephemeralQueue.set(packetId, packet);
+    lastLocalInboundMeta.set(resolved.canonicalUsername, {
+      receivedAt: packet.receivedAt,
+      fromDomain: fromAddress.split('@')[1] || '',
+    });
 
     res.json({
       ok: true,
@@ -424,9 +586,10 @@ async function startServer() {
     limit: '10mb',
   });
 
-  app.post('/api/mail/attachments/upload', attachmentRawParser, (req, res) => {
+  app.post('/api/mail/attachments/upload', attachmentRawParser, async (req, res) => {
     pruneExpiredLocalAttachments();
     const ownerUser = sanitizeHandle(String(req.query.ownerUser || 'fadhil'));
+    if (!(await requireAuthenticatedUser(req, res, ownerUser))) return;
     const filename = sanitizeLocalFilename(String(req.query.filename || 'attachment.bin'));
     const mimeType = stripHeaderInjection(
       String(req.headers['content-type'] || 'application/octet-stream'),
@@ -475,9 +638,10 @@ async function startServer() {
     });
   });
 
-  app.get('/api/mail/attachments/:ownerUser/:attId', (req, res) => {
+  app.get('/api/mail/attachments/:ownerUser/:attId', async (req, res) => {
     pruneExpiredLocalAttachments();
     const ownerUser = sanitizeHandle(String(req.params.ownerUser || ''));
+    if (!(await requireAuthenticatedUser(req, res, ownerUser))) return;
     const attId = String(req.params.attId || '').replace(/[^a-zA-Z0-9_-]/g, '');
     const key = buildLocalAttachmentKey(ownerUser, attId);
     const stored = localEphemeralAttachments.get(key);
@@ -492,8 +656,9 @@ async function startServer() {
     }
     // WhatsApp-style one-time download: purge immediately on serve
     localEphemeralAttachments.delete(key);
-    res.setHeader('Content-Type', stored.mimeType);
+    res.setHeader('Content-Type', getSafeAttachmentDownloadMime(stored.mimeType));
     res.setHeader('Content-Disposition', `attachment; filename="${stored.filename}"`);
+    res.setHeader('Content-Security-Policy', 'sandbox');
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-VZ-R2-Purged', 'true');
@@ -508,7 +673,7 @@ async function startServer() {
   });
   const vzFilesLegacyRawParser = express.raw({
     type: () => true,
-    limit: '95mb',
+    limit: '20mb',
   });
 
   async function fetchLocalVikingServer(): Promise<string> {
@@ -525,7 +690,8 @@ async function startServer() {
     return srvData.server.replace(/\/+$/, '');
   }
 
-  app.get('/api/vzfiles/get-server', async (_req, res) => {
+  app.get('/api/vzfiles/get-server', async (req, res) => {
+    if (!(await requireAuthenticatedUser(req, res))) return;
     try {
       const server = await fetchLocalVikingServer();
       res.json({ ok: true, server });
@@ -538,6 +704,7 @@ async function startServer() {
   });
 
   app.post('/api/vzfiles/get-upload-url', async (req, res) => {
+    if (!(await requireAuthenticatedUser(req, res))) return;
     try {
       const size = Number(req.body?.size);
       if (!Number.isFinite(size) || size <= 0) {
@@ -569,6 +736,7 @@ async function startServer() {
   });
 
   app.put('/api/vzfiles/upload-part', vzFilesPartRawParser, async (req, res) => {
+    if (!(await requireAuthenticatedUser(req, res))) return;
     try {
       const targetUrl = String(req.headers['x-target-url'] || '').trim();
       if (!targetUrl || !isAllowedVikingPartUrl(targetUrl)) {
@@ -605,6 +773,7 @@ async function startServer() {
   });
 
   app.post('/api/vzfiles/complete-upload', async (req, res) => {
+    if (!(await requireAuthenticatedUser(req, res))) return;
     try {
       const { key, uploadId, name, user = '', parts } = req.body || {};
       if (!key || !uploadId || !name || !Array.isArray(parts) || parts.length === 0) {
@@ -646,6 +815,7 @@ async function startServer() {
   });
 
   app.post('/api/vzfiles/legacy-upload', vzFilesLegacyRawParser, async (req, res) => {
+    if (!(await requireAuthenticatedUser(req, res))) return;
     try {
       const filenameHeader = String(req.headers['x-file-name'] || 'upload.bin');
       let filename = 'upload.bin';
@@ -680,11 +850,12 @@ async function startServer() {
   });
 
   // 4. POST /api/mail/send — Dispatch outbound email via Cloudflare Email Sending relay (dev simulation)
-  app.post('/api/mail/send', (req, res) => {
+  app.post('/api/mail/send', async (req, res) => {
     pruneExpiredAndBoundQueue();
     pruneExpiredLocalAttachments();
 
     const senderUser = sanitizeHandle(String(req.body?.senderUser || 'fadhil'));
+    if (!(await requireAuthenticatedUser(req, res, senderUser))) return;
     const senderReserved = checkReservedUsername(senderUser);
     if (senderReserved.isReserved) {
       res.status(403).json({
@@ -784,7 +955,12 @@ async function startServer() {
     });
 
     const safeExternalLinks = sanitizeExternalLinksArray(req.body?.externalLinks);
-    const renderedOutbound = buildOutboundEmailPayload(bodyText, safeExternalLinks);
+    const outboundFormat = normalizeOutboundEmailFormat(req.body?.format);
+    const renderedOutbound = buildOutboundEmailPayload(
+      bodyText,
+      safeExternalLinks,
+      outboundFormat
+    );
 
     const rfcMessageId = `<${generateSecureId('out')}@imy.li>`;
     const resolvedRecipient = resolveCanonicalEmail(toAddress, DEFAULT_SUPPORTED_DOMAINS);
@@ -834,6 +1010,10 @@ async function startServer() {
         externalLinks: safeExternalLinks,
       };
       ephemeralQueue.set(pktId, routedLoopbackPacket);
+      lastLocalInboundMeta.set(resolvedRecipient.canonicalUsername, {
+        receivedAt: now.toISOString(),
+        fromDomain: safeFromAddress.split('@')[1] || 'imy.li',
+      });
     }
 
     // Purge sender's temporary uploads immediately after dispatch
@@ -847,12 +1027,13 @@ async function startServer() {
       liveEmailDispatched: false,
       providerUsed: 'none',
       dispatchedVia: 'Local Dev Relay (simulasi pengiriman email & lampiran sementara)',
+      formatUsed: renderedOutbound.format,
       rfcMessageId,
       sentAt: new Date().toISOString(),
       serverStoredCopy: false,
       r2AttachmentsPurged: loadedLocalAttachments.length,
       externalLinksCount: safeExternalLinks.length,
-      htmlLength: renderedOutbound.htmlContent.length,
+      htmlLength: renderedOutbound.htmlContent?.length ?? 0,
       quota: {
         usedToday: currentCount + 1,
         dailyLimit: DAILY_OUTBOUND_LIMIT,
@@ -862,20 +1043,22 @@ async function startServer() {
     });
   });
 
-  // 5. POST /api/mail/seed-transit — Seeds a sample transit packet when a user activates their mailbox
-  app.post('/api/mail/seed-transit', (req, res) => {
+  // 5. POST /api/mail/seed-transit — One-time onboarding packet (never re-seeds after purge!)
+  app.post('/api/mail/seed-transit', async (req, res) => {
     const user = sanitizeHandle(String(req.body?.username || 'fadhil'));
-    seedInitialEphemeralPacketForUser(user);
-    res.json({ ok: true, kvBound: true, username: user });
+    if (!(await requireAuthenticatedUser(req, res, user))) return;
+    const { seeded, alreadySeeded } = seedInitialEphemeralPacketForUser(user);
+    res.json({ ok: true, kvBound: true, username: user, seeded, alreadySeeded });
   });
 
   // 6. Standalone Shortlinks & Multi-Page Bio APIs (parity with Cloudflare Worker)
-  app.get('/api/links/shortlinks', (req, res) => {
+  app.get('/api/links/shortlinks', async (req, res) => {
     const ownerParam = String(req.query.owner || '').trim();
     const slugsParam = String(req.query.slugs || '').trim();
 
     if (ownerParam) {
       const owner = sanitizeHandle(ownerParam);
+      if (!(await requireAuthenticatedUser(req, res, owner))) return;
       const items = Array.from(localShortlinks.values())
         .filter((r) => r.ownerUser === owner)
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -899,7 +1082,7 @@ async function startServer() {
     res.json({ ok: true, storageEngine: 'local-dev-memory', items: [] });
   });
 
-  app.post('/api/links/shortlinks', (req, res) => {
+  app.post('/api/links/shortlinks', async (req, res) => {
     const rawTarget = String(req.body?.targetUrl || '').trim();
     const withProtocol = /^https?:\/\//i.test(rawTarget) ? rawTarget : `https://${rawTarget}`;
     const safeTarget = sanitizeExternalUrl(withProtocol, {
@@ -952,6 +1135,9 @@ async function startServer() {
       typeof req.body?.ownerUser === 'string' && req.body.ownerUser.trim()
         ? sanitizeHandle(req.body.ownerUser)
         : null;
+    if (ownerUser) {
+      if (!(await requireAuthenticatedUser(req, res, ownerUser))) return;
+    }
     const title = stripHeaderInjection(String(req.body?.title || ''), 120);
 
     const record: ShortlinkRecord = {
@@ -973,13 +1159,20 @@ async function startServer() {
     });
   });
 
-  app.delete('/api/links/shortlinks/:slug', (req, res) => {
+  app.delete('/api/links/shortlinks/:slug', async (req, res) => {
     const slug = sanitizeSlug(String(req.params.slug || ''));
     const existing = localShortlinks.get(slug);
     const ownerParam = String(req.query.owner || '').trim();
-    const ownerUser = ownerParam ? sanitizeHandle(ownerParam) : null;
+    let ownerUser = ownerParam ? sanitizeHandle(ownerParam) : null;
     const mode = req.query.mode === 'recycle' ? 'recycle' : 'permanent';
-    if (existing && existing.ownerUser && ownerUser && existing.ownerUser !== ownerUser) {
+    if (existing && existing.ownerUser) {
+      const auth = await requireAuthenticatedUser(req, res, existing.ownerUser);
+      if (!auth) return;
+      ownerUser = auth.user ? auth.user.canonicalUsername : ownerUser || existing.ownerUser;
+    } else if (ownerUser) {
+      if (!(await requireAuthenticatedUser(req, res, ownerUser))) return;
+    }
+    if (existing && existing.ownerUser && (!ownerUser || existing.ownerUser !== ownerUser)) {
       res.status(403).json({
         ok: false,
         error: 'Anda tidak memiliki izin menghapus shortlink milik akun lain.',
@@ -1016,7 +1209,7 @@ async function startServer() {
   });
 
   // Recycle Bin API (14-Day Auto-Purge)
-  app.get('/api/links/recycle-bin', (req, res) => {
+  app.get('/api/links/recycle-bin', async (req, res) => {
     pruneExpiredLocalRecycleBin();
     const ownerParam = String(req.query.owner || '').trim();
     if (!ownerParam) {
@@ -1024,6 +1217,7 @@ async function startServer() {
       return;
     }
     const ownerUser = sanitizeHandle(ownerParam);
+    if (!(await requireAuthenticatedUser(req, res, ownerUser))) return;
     const items = Array.from(localRecycleBin.values())
       .filter((r) => r.ownerUser === ownerUser)
       .sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
@@ -1035,9 +1229,10 @@ async function startServer() {
     });
   });
 
-  app.post('/api/links/recycle-bin', (req, res) => {
+  app.post('/api/links/recycle-bin', async (req, res) => {
     pruneExpiredLocalRecycleBin();
     const ownerUser = sanitizeHandle(String(req.body?.ownerUser || ''));
+    if (!(await requireAuthenticatedUser(req, res, ownerUser))) return;
     const itemType = req.body?.itemType as RecycleBinItemType;
     if (itemType !== 'bio_link' && itemType !== 'bio_page' && itemType !== 'shortlink') {
       res.status(400).json({ ok: false, error: 'Tipe item Recycle Bin tidak valid.' });
@@ -1059,9 +1254,10 @@ async function startServer() {
     res.status(201).json({ ok: true, record });
   });
 
-  app.post('/api/links/recycle-bin/restore', (req, res) => {
+  app.post('/api/links/recycle-bin/restore', async (req, res) => {
     pruneExpiredLocalRecycleBin();
     const ownerUser = sanitizeHandle(String(req.body?.ownerUser || ''));
+    if (!(await requireAuthenticatedUser(req, res, ownerUser))) return;
     const id = String(req.body?.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
     const item = localRecycleBin.get(id);
     if (!item || item.ownerUser !== ownerUser) {
@@ -1183,13 +1379,14 @@ async function startServer() {
     res.json({ ok: true, itemType: 'bio_link', data: updated });
   });
 
-  app.delete('/api/links/recycle-bin', (req, res) => {
+  app.delete('/api/links/recycle-bin', async (req, res) => {
     const ownerParam = String(req.query.owner || '').trim();
     if (!ownerParam) {
       res.status(400).json({ ok: false, error: 'Parameter owner diperlukan.' });
       return;
     }
     const ownerUser = sanitizeHandle(ownerParam);
+    if (!(await requireAuthenticatedUser(req, res, ownerUser))) return;
     let purgedCount = 0;
     for (const [id, rec] of localRecycleBin.entries()) {
       if (rec.ownerUser === ownerUser) {
@@ -1200,13 +1397,14 @@ async function startServer() {
     res.json({ ok: true, purgedCount });
   });
 
-  app.delete('/api/links/recycle-bin/:id', (req, res) => {
+  app.delete('/api/links/recycle-bin/:id', async (req, res) => {
     const ownerParam = String(req.query.owner || '').trim();
     if (!ownerParam) {
       res.status(400).json({ ok: false, error: 'Parameter owner diperlukan.' });
       return;
     }
     const ownerUser = sanitizeHandle(ownerParam);
+    if (!(await requireAuthenticatedUser(req, res, ownerUser))) return;
     const id = String(req.params.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
     const existing = localRecycleBin.get(id);
     if (existing && existing.ownerUser === ownerUser) {
@@ -1215,8 +1413,9 @@ async function startServer() {
     res.json({ ok: true, deletedId: id });
   });
 
-  app.patch('/api/links/bio/:username/status', (req, res) => {
+  app.patch('/api/links/bio/:username/status', async (req, res) => {
     const username = sanitizeHandle(String(req.params.username || ''));
+    if (!(await requireAuthenticatedUser(req, res, username))) return;
     const reserved = checkReservedUsername(username);
     if (reserved.isReserved) {
       res.status(403).json({
@@ -1257,8 +1456,9 @@ async function startServer() {
     });
   });
 
-  app.put('/api/links/bio/:username', (req, res) => {
+  app.put('/api/links/bio/:username', async (req, res) => {
     const username = sanitizeHandle(String(req.params.username || ''));
+    if (!(await requireAuthenticatedUser(req, res, username))) return;
     const reserved = checkReservedUsername(username);
     if (reserved.isReserved) {
       res.status(403).json({
@@ -1297,8 +1497,9 @@ async function startServer() {
     });
   });
 
-  app.delete('/api/links/bio/:username', (req, res) => {
+  app.delete('/api/links/bio/:username', async (req, res) => {
     const username = sanitizeHandle(String(req.params.username || ''));
+    if (!(await requireAuthenticatedUser(req, res, username))) return;
     localBioWorkspaces.delete(username);
     for (const key of Array.from(localBioAvatars.keys())) {
       if (key.startsWith(`avatars/${username}/`)) {
@@ -1387,12 +1588,13 @@ async function startServer() {
     res.status(200).send(stored.bytes);
   };
 
-  const handlePutAvatar: express.RequestHandler = (req, res) => {
+  const handlePutAvatar: express.RequestHandler = async (req, res) => {
     const resolved = resolveAvatarKey(String(req.params.username || ''), req.params.pageSlug);
     if (!resolved) {
       res.status(400).json({ ok: false, error: 'Parameter avatar tidak valid.' });
       return;
     }
+    if (!(await requireAuthenticatedUser(req, res, resolved.username))) return;
     const reserved = checkReservedUsername(resolved.username);
     if (reserved.isReserved) {
       res.status(403).json({
@@ -1423,12 +1625,19 @@ async function startServer() {
     if (!sourceMime) {
       res.status(400).json({
         ok: false,
-        error: 'Format berkas tidak dikenali sebagai gambar yang aman.',
+        error: 'Format berkas tidak dikenali sebagai gambar raster yang aman.',
       });
       return;
     }
     const compactMime = detectValidatedAvatarMime(u8);
     const finalMime = compactMime || sourceMime;
+    if (!SAFE_STORED_AVATAR_MIMES.has(finalMime)) {
+      res.status(422).json({
+        ok: false,
+        error: 'Gunakan format AVIF, WebP, PNG, JPEG, atau GIF (SVG tidak diizinkan).',
+      });
+      return;
+    }
     const convertedBy =
       compactMime === 'image/avif'
         ? 'client-avif'
@@ -1458,12 +1667,13 @@ async function startServer() {
     });
   };
 
-  const handleDeleteAvatar: express.RequestHandler = (req, res) => {
+  const handleDeleteAvatar: express.RequestHandler = async (req, res) => {
     const resolved = resolveAvatarKey(String(req.params.username || ''), req.params.pageSlug);
     if (!resolved) {
       res.status(400).json({ ok: false, error: 'Parameter avatar tidak valid.' });
       return;
     }
+    if (!(await requireAuthenticatedUser(req, res, resolved.username))) return;
     localBioAvatars.delete(resolved.key);
     res.json({
       ok: true,
@@ -1482,6 +1692,7 @@ async function startServer() {
 
   // Same-Origin Domain Verification Proxy (`GET /api/mail/verify-domain?domain=...`)
   app.get('/api/mail/verify-domain', async (req, res) => {
+    if (!(await requireAuthenticatedUser(req, res))) return;
     const rawDomain = String(req.query.domain || '').trim().slice(0, 253);
     if (!rawDomain) {
       res.status(400).json({ ok: false, error: 'Parameter domain diperlukan.' });
@@ -1498,6 +1709,7 @@ async function startServer() {
 
   // Non-AI VZ Search Grounding Proxy (`GET /api/mail/vz-search?q=...&page=...`)
   app.get('/api/mail/vz-search', async (req, res) => {
+    if (!(await requireAuthenticatedUser(req, res))) return;
     const rawQ = String(req.query.q || '').trim().slice(0, 240);
     const rawPage = parseInt(String(req.query.page || '1'), 10);
     const page = Number.isFinite(rawPage) ? Math.min(20, Math.max(1, rawPage)) : 1;

@@ -22,6 +22,7 @@ import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import type { ThemePreference } from '../hooks/useTheme';
 import { BrandMark } from './BrandMark';
+import { InAppSsoNotice } from './InAppSsoNotice';
 
 export type ActiveHostView =
   | 'mail.vz.gay'
@@ -224,17 +225,22 @@ export function MailLinksTopBar({
 
   return (
     <>
-      <header className="sticky top-0 z-30 bg-white/95 dark:bg-[#0B0D11]/95 backdrop-blur-md border-b border-slate-200 dark:border-[#232732]">
+      <header className="sticky top-0 z-30 bg-white/95 dark:bg-[#0B0D11]/95 backdrop-blur-md border-b border-slate-200 dark:border-[#232732] pt-[env(safe-area-inset-top)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
         <div className="max-w-[1440px] mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-3 md:gap-8">
           {/* Zone 1: Mobile Hamburger Trigger + Single-Line Brand Wordmark */}
           <div className="flex items-center gap-1.5 min-w-0 shrink-0">
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
+              title={
+                lang === 'id'
+                  ? 'Menu Global (Links, Mail & Profil)'
+                  : 'Global Menu (Links, Mail & Profile)'
+              }
               aria-label={
                 lang === 'id'
-                  ? 'Buka menu navigasi'
-                  : 'Open navigation menu'
+                  ? 'Buka menu global platform (Links, Mail, Profil)'
+                  : 'Open global platform menu (Links, Mail, Profile)'
               }
               aria-expanded={mobileMenuOpen}
               aria-controls="mobile-nav-drawer"
@@ -648,7 +654,7 @@ export function MailLinksTopBar({
           />
 
           {/* Drawer Panel */}
-          <div className="relative z-10 w-[300px] max-w-[86vw] h-full bg-white dark:bg-[#11141B] border-r border-slate-200 dark:border-[#232732] flex flex-col overflow-hidden shadow-xl">
+          <div className="relative z-10 w-[300px] max-w-[86vw] h-full bg-white dark:bg-[#11141B] border-r border-slate-200 dark:border-[#232732] flex flex-col overflow-hidden shadow-xl pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]">
             {/* Drawer Header */}
             <div className="px-4 h-14 border-b border-slate-200 dark:border-[#232732] flex items-center justify-between gap-3 shrink-0">
               <div className="flex items-center gap-2.5 min-w-0">
@@ -658,10 +664,12 @@ export function MailLinksTopBar({
                 />
                 <div className="min-w-0">
                   <div className="text-base font-bold text-slate-900 dark:text-white font-display truncate">
-                    {brandWordmark}
+                    {lang === 'id' ? 'Menu Global VZ' : 'VZ Global Menu'}
                   </div>
                   <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate">
-                    mail.vz.gay · links.vz.gay
+                    {lang === 'id'
+                      ? 'Links · Mail · Profil Akun'
+                      : 'Links · Mail · Account Profile'}
                   </div>
                 </div>
               </div>
@@ -783,6 +791,7 @@ export function MailLinksTopBar({
                         <span>{lang === 'id' ? 'Daftar' : 'Sign Up'}</span>
                       </button>
                     </div>
+                    <InAppSsoNotice lang={lang} compact />
                   </div>
                 )}
               </div>

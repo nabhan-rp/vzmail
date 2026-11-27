@@ -24,8 +24,8 @@ export interface ChangelogServiceRelease {
   highlights: ChangelogItem[];
 }
 
-export const CHANGELOG_VERSION = 'v1.1.0';
-export const CHANGELOG_RELEASE_DATE = '2026-11-26';
+export const CHANGELOG_VERSION = 'v1.1.3';
+export const CHANGELOG_RELEASE_DATE = '2026-11-27';
 
 export const CHANGELOG_CATEGORY_LABELS: Record<ChangelogCategoryId, BilingualText> = {
   core: {
@@ -47,6 +47,230 @@ export const CHANGELOG_CATEGORY_LABELS: Record<ChangelogCategoryId, BilingualTex
 };
 
 export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
+  {
+    serviceId: 'vz-mail',
+    serviceName: 'VZ Mail & VZ Links',
+    domains: ['mail.vz.gay', 'links.vz.gay', '*.imy.li'],
+    version: '1.1.3',
+    releaseDate: '2026-11-27',
+    codename: {
+      id: 'Deliverability Anti-Spam, Diagnostik Inbound, Navigasi 2 Hamburger Mobile & Background Sync Hemat RAM',
+      en: 'Anti-Spam Deliverability, Inbound Diagnostics, Dual-Hamburger Mobile Nav & Low-RAM Background Sync',
+    },
+    summary: {
+      id: 'Pembaruan besar untuk kualitas pengiriman email (format HTML Minimalis / Plain-Text / Kartu + cek SPF/DKIM/DMARC), perbaikan fail-closed email masuk Cloudflare, penghapusan bug hantu (1) pada Pull & Purge, navigasi mobile 2 hamburger yang intuitif, penguncian overflow toast alamat panjang, serta Background Sync hemat RAM & Notifikasi opt-in.',
+      en: 'Major upgrade for outbound email deliverability (Minimal HTML / Plain-Text / Rich Card selector + live SPF/DKIM/DMARC check), fail-closed Cloudflare inbound routing, elimination of ghost (1) Pull & Purge badges, dual-hamburger mobile navigation, mobile overflow clamping for long email toasts, and opt-in Low-RAM Background Sync + Notifications.',
+    },
+    highlights: [
+      {
+        id: 'outbound-deliverability-formats-v113',
+        category: 'core',
+        title: {
+          id: 'Pilihan Format Kirim Anti-Spam + Header Bersih & Cek DNS SPF/DKIM/DMARC',
+          en: 'Anti-Spam Outbound Format Selector + Clean Headers & SPF/DKIM/DMARC Check',
+        },
+        description: {
+          id: 'Komposer kini menyediakan 3 mode pengiriman (HTML Minimalis default ramah Gmail/Yandex, Plain-Text murni tanpa HTML, dan HTML Kartu) dengan pembersihan header kustom serta tombol cek cepat SPF/DKIM/DMARC.',
+          en: 'Composer now offers 3 selectable formats (Gmail/Yandex-friendly Minimal HTML default, pure Plain-Text without HTML, and Rich Card HTML), stripped non-standard headers, and a 1-click SPF/DKIM/DMARC checker.',
+        },
+      },
+      {
+        id: 'inbound-fail-closed-and-diagnostics-v113',
+        category: 'seo_infra',
+        title: {
+          id: 'Inbound Fail-Closed SMTP 451 & Panel Diagnostik Mail',
+          en: 'Inbound Fail-Closed SMTP 451 & Mail Diagnostics Panel',
+        },
+        description: {
+          id: 'Worker email() kini menolak sementara dengan SMTP 451 jika binding KV tidak tersedia (mencegah email hilang diam-diam tanpa bounce), menormalisasi alamat bertanda kurung sudut, menampilkan error sinkronisasi secara jelas, dan dilengkapi panel Diagnostik Inbound + DNS.',
+          en: 'Worker email() now fails closed with SMTP 451 when KV transit storage is unbound (preventing silent drops without bounces), normalizes angle-bracket recipients, surfaces sync errors clearly, and adds a live Inbound + DNS Diagnostics modal.',
+        },
+      },
+      {
+        id: 'pull-purge-ghost-one-fix-v113',
+        category: 'privacy_security',
+        title: {
+          id: 'Perbaikan Bug Hantu (1) Pull & Purge dengan Tombstone 90 Detik',
+          en: 'Pull & Purge Ghost (1) Bug Fix with 90-Second ACK Tombstones',
+        },
+        description: {
+          id: 'Menghilangkan re-seeding berulang paket sambutan dan menambahkan tombstone ACK 90 detik pada KV & klien untuk mengatasi eventual consistency Cloudflare KV list() sehingga lencana (1) tidak muncul kembali setelah di-purge.',
+          en: 'Eliminates repeated welcome-packet re-seeding and adds 90-second ACK tombstones across KV and client storage to defeat Cloudflare KV list() eventual consistency so ghost (1) badges never reappear after purging.',
+        },
+      },
+      {
+        id: 'dual-hamburger-and-mobile-clamp-v113',
+        category: 'ux_tools',
+        title: {
+          id: 'Navigasi Mobile 2 Hamburger & Anti-Overflow Toast Alamat Panjang',
+          en: 'Dual-Hamburger Mobile Navigation & Long-Email Toast Overflow Protection',
+        },
+        description: {
+          id: 'Memisahkan Hamburger Global (header kiri: Links, Mail, Profil) dan Hamburger Menu Mail (toolbar inbox: Kotak Masuk, Terkirim, Draf, Spam, Sampah, Alias) serta mengunci lebar viewport 100vw + overflow-wrap: anywhere agar notifikasi alamat email panjang tidak membuat layar HP zoom atau navbar bawah berantakan.',
+          en: 'Separates the Global Hamburger (top-left header: Links, Mail, Profile) from the dedicated Mail Menu Hamburger (inbox toolbar: Inbox, Sent, Drafts, Spam, Trash, Aliases) and clamps viewport width to 100vw with overflow-wrap: anywhere so long email toasts never zoom mobile screens or break the bottom navbar.',
+        },
+      },
+      {
+        id: 'low-ram-bg-sync-and-notifications-v113',
+        category: 'ux_tools',
+        title: {
+          id: 'Background Sync Hemat RAM (Opt-In) & Notifikasi Terkendali',
+          en: 'Opt-In Low-RAM Background Sync & Dependent Push Notifications',
+        },
+        description: {
+          id: 'Fitur opt-in (default mati) dengan 3 mode: Adaptif Hemat RAM (default, otomatis melambat pada HP RAM <= 4 GB atau Mode Hemat Data), Interval Manual (30 dtk / 60 dtk / 3 mnt / 5 mnt), dan Tab-Resume + Periodic Sync PWA. Menggunakan cek metadata ?metaOnly=1 ringan tanpa WebSocket, serta tombol Notifikasi opsional yang mensyaratkan Background Sync aktif.',
+          en: 'Strictly opt-in (default OFF) with 3 selectable modes: Adaptive Low-RAM (default, auto-throttles on <= 4 GB RAM or Save-Data devices), Manual Interval (30s / 60s / 3m / 5m), and Tab-Resume + PWA Periodic Sync. Uses tiny ?metaOnly=1 metadata checks without persistent WebSockets, plus optional Notifications requiring Background Sync.',
+        },
+      },
+    ],
+  },
+  {
+    serviceId: 'vz-mail',
+    serviceName: 'VZ Mail & VZ Links',
+    domains: ['mail.vz.gay', 'links.vz.gay', '*.imy.li'],
+    version: '1.1.2',
+    releaseDate: '2026-11-27',
+    codename: {
+      id: 'Optimasi Safe-Area Multi-UA, Panduan SSO In-App Browser, Middleware Auth0 JWT & Kunci PIN VZ Vault',
+      en: 'Multi-UA Safe-Area Optimization, Inline In-App SSO Guidance, Auth0 JWT Middleware & VZ Vault PIN Lock',
+    },
+    summary: {
+      id: 'Menyempurnakan responsivitas & safe-area di perangkat mobile (notch, Dynamic Island, home indicator, orientasi lanskap), menambahkan panduan SSO kontekstual langsung di dekat tombol Login untuk In-App Browser, memusatkan middleware verifikasi Auth0 JWT di Worker & Express, serta menghadirkan 3 mode opt-in Kunci PIN VZ Vault.',
+      en: 'Refines mobile safe-area responsiveness (notch, Dynamic Island, home indicator, landscape), adds inline SSO guidance next to Sign-In buttons for In-App WebViews, centralizes Auth0 JWT verification middleware in Cloudflare Worker & Express, and introduces 3 opt-in VZ Vault PIN Lock modes.',
+    },
+    highlights: [
+      {
+        id: 'vault-pin-lock-3-modes',
+        category: 'privacy_security',
+        title: {
+          id: 'Kunci PIN VZ Vault dengan 3 Opsi Opt-In (Penuh + Auto-Lock, Aksi Sensitif, & Panduan Pertama)',
+          en: 'VZ Vault PIN Lock with 3 Opt-In Modes (Full + Auto-Lock, Sensitive Actions, & First-Open Setup)',
+        },
+        description: {
+          id: 'Pengguna dapat mengaktifkan Kunci PIN 4–6 digit lokal (PBKDF2-SHA256 150.000 iterasi, auto-reset setelah 5x salah) dalam mode Layar Kunci Penuh + Auto-Lock (1/5/15 menit & pindah tab), mode PIN Khusus Aksi Sensitif (Ekspor/Impor/Frasa 12-Kata), maupun panduan opt-in saat pertama kali membuka VZ Vault.',
+          en: 'Users can enable a local 4–6 digit PIN (PBKDF2-SHA256 150,000 iterations, 5-attempt auto-wipe) in Full Lock Screen + Auto-Lock mode (1/5/15m & tab switch), Sensitive Actions Gate mode (Export/Import/12-Word Phrase), plus an opt-in first-open setup prompt.',
+        },
+      },
+      {
+        id: 'worker-express-jwt-middleware',
+        category: 'privacy_security',
+        title: {
+          id: 'Middleware Terpusat Verifikasi Auth0 JWT di Cloudflare Worker & Express',
+          en: 'Centralized Auth0 JWT Verification Middleware in Cloudflare Worker & Express',
+        },
+        description: {
+          id: 'Memisahkan lapisan middleware verifikasi Auth0 RS256 JWKS (termasuk validasi klaim azp multi-audiens dan header WWW-Authenticate Bearer pada respons 401) yang ketat di produksi dengan fallback dev lokal otomatis untuk localhost & preview.',
+          en: 'Separates centralized Auth0 RS256 JWKS verification middleware (including multi-audience azp validation and WWW-Authenticate Bearer 401 challenges) enforcing strict verification in production with automatic local-dev fallback on localhost and preview hosts.',
+        },
+      },
+      {
+        id: 'safe-area-multi-ua-inapp-sso',
+        category: 'ux_tools',
+        title: {
+          id: 'Safe-Area Mobile Menyeluruh & Panduan SSO In-App Browser (Banner Atas + Tombol Login)',
+          en: 'Full Mobile Safe-Area Polish & In-App Browser SSO Guidance (Top Banner + Login Buttons)',
+        },
+        description: {
+          id: 'Menambahkan inset env(safe-area-inset-*) pada header sticky, banner atas, bottom navigation, komposer email, tombol pratinjau bio mengambang, drawer, dan toast, serta memperluas deteksi WebView (WhatsApp, Instagram, TikTok, Threads, Discord, LINE, Telegram, Shopee, Gojek, Grab) dengan panduan langsung di sebelah tombol Login SSO.',
+          en: 'Applies env(safe-area-inset-*) across sticky header, top banner, bottom navigation, email composer, floating bio preview trigger, drawers, and toasts, and expands WebView detection (WhatsApp, Instagram, TikTok, Threads, Discord, LINE, Telegram, Shopee, Gojek, Grab) with inline guidance beside Auth0 SSO Login buttons.',
+        },
+      },
+    ],
+  },
+  {
+    serviceId: 'vz-mail',
+    serviceName: 'VZ Mail',
+    domains: ['mail.vz.gay', '@imy.li', 'files.vz.gay'],
+    version: '1.1.1',
+    releaseDate: '2026-11-27',
+    codename: {
+      id: 'Pengerasan Keamanan API Auth0 JWT, Stabilitas Edge & Kompatibilitas Multi-Browser/OS',
+      en: 'Auth0 JWT API Hardening, Edge Stability & Cross-Browser/OS Compatibility',
+    },
+    summary: {
+      id: 'Peningkatan keamanan menyeluruh pada Cloudflare Worker dan server Express dengan verifikasi token RS256 Auth0 OIDC per akun, proteksi sandbox lampiran, perbaikan parser email Quoted-Printable/HTML, serta optimasi lintas browser & OS (iOS Safari, iPadOS, Brave, Firefox, Windows/Linux, dan deteksi In-App Browser).',
+      en: 'Comprehensive security hardening across Cloudflare Worker and Express with per-account RS256 Auth0 OIDC JWT verification, sandboxed attachment downloads, Quoted-Printable/HTML email decoding fixes, and cross-browser/OS polish (iOS Safari, iPadOS, Brave, Firefox, Windows/Linux, and In-App Browser detection).',
+    },
+    highlights: [
+      {
+        id: 'mail-jwt-ownership-hardening',
+        category: 'privacy_security',
+        title: {
+          id: 'Verifikasi Auth0 RS256 JWT & Isolasi Kepemilikan Akun pada Seluruh API',
+          en: 'Auth0 RS256 JWT Verification & Per-Account Ownership Isolation Across APIs',
+        },
+        description: {
+          id: 'Seluruh endpoint privat /api/mail/* dan /api/vzfiles/* kini memverifikasi tanda tangan RS256 ID Token Auth0 melalui JWKS di Edge Worker maupun Express, memastikan pengguna hanya dapat menarik antrean, mengunduh lampiran, atau mengirim email atas nama handle miliknya sendiri.',
+          en: 'All private /api/mail/* and /api/vzfiles/* endpoints now verify RS256 Auth0 ID Token signatures against JWKS in both Edge Worker and Express, ensuring users can only access queues, download attachments, or send mail for their own canonical handle.',
+        },
+      },
+      {
+        id: 'mail-ssrf-attachment-pin-hardening',
+        category: 'privacy_security',
+        title: {
+          id: 'Allowlist Ketat VZ Files, Sandbox Lampiran & Proteksi Brute-Force PIN Vault',
+          en: 'Strict VZ Files Allowlist, Sandboxed Attachments & PIN Vault Brute-Force Lockout',
+        },
+        description: {
+          id: 'Memperketat validasi URL unggahan part VZ Files serta pemblokiran IP privat/IPv6/CGNAT, menambahkan header Content-Security-Policy: sandbox pada unduhan lampiran, membatasi legacy-upload maksimal 20 MB agar aman dari batas memori Worker, serta menghapus otomatis brankas PIN lokal setelah 5 kali salah memasukkan PIN.',
+          en: 'Tightened VZ Files multipart upload host allowlists and private/IPv6/CGNAT IP blocking, added Content-Security-Policy: sandbox on attachment downloads, capped legacy-upload at 20 MB to protect Worker memory, and added automatic local PIN vault wipe after 5 failed attempts.',
+        },
+      },
+      {
+        id: 'mail-mime-decoder-and-cross-browser',
+        category: 'ux_tools',
+        title: {
+          id: 'Perbaikan Decoder Email Quoted-Printable/HTML & Kompatibilitas Multi-Browser/In-App WebView',
+          en: 'Quoted-Printable/HTML Email Decoding Fix & Multi-Browser / In-App WebView Support',
+        },
+        description: {
+          id: 'Menambahkan decoder Quoted-Printable dan fallback ekstraksi teks dari email HTML-only, memperbaiki konsistensi lampiran provider outbound, menghadirkan banner panduan untuk In-App Browser (WhatsApp, Instagram, TikTok, LINE), fallback clipboard lintas browser, serta dukungan refresh token untuk Safari ITP & Brave Shields.',
+          en: 'Added Quoted-Printable decoding and clean text extraction for HTML-only emails, aligned outbound attachment handling across providers, added an In-App Browser guidance banner (WhatsApp, Instagram, TikTok, LINE), cross-browser clipboard fallbacks, and refresh-token resilience for Safari ITP & Brave Shields.',
+        },
+      },
+    ],
+  },
+  {
+    serviceId: 'vz-links',
+    serviceName: 'VZ Links',
+    domains: ['links.vz.gay', '*.imy.li', 'imy.li/s/'],
+    version: '1.1.1',
+    releaseDate: '2026-11-27',
+    codename: {
+      id: 'Proteksi Kepemilikan Shortlink/Bio, Pemblokiran SVG Berbahaya & Optimasi Mobile Multi-OS',
+      en: 'Shortlink/Bio Ownership Protection, Unsafe SVG Blocking & Multi-OS Mobile Polish',
+    },
+    summary: {
+      id: 'Menutup celah penghapusan shortlink milik akun lain, memblokir unggahan avatar SVG untuk mencegah XSS, menambahkan fallback kompresi JPEG bagi browser lama, serta menyempurnakan tampilan iOS/iPadOS/Android (anti auto-zoom input, safe-area notch, dan fallback tinggi layar).',
+      en: 'Closes owned shortlink deletion bypasses, blocks SVG avatar uploads to prevent stored XSS, adds JPEG compression fallback for older browsers, and polishes iOS/iPadOS/Android layout behavior (anti-zoom inputs, safe-area notch support, and viewport fallbacks).',
+    },
+    highlights: [
+      {
+        id: 'links-auth-shortlink-svg-fix',
+        category: 'privacy_security',
+        title: {
+          id: 'Otorisasi Mutasi Bio/Recycle Bin, Perbaikan Hapus Shortlink & Blokir Avatar SVG',
+          en: 'Authenticated Bio/Recycle Bin Mutations, Shortlink Deletion Fix & SVG Avatar Block',
+        },
+        description: {
+          id: 'Seluruh mutasi Bio, Avatar, Recycle Bin, serta penghapusan shortlink berpemilik kini mewajibkan verifikasi Auth0 JWT yang cocok dengan pemilik akun. Unggahan avatar dibatasi khusus gambar raster aman (AVIF, WebP, PNG, JPEG, GIF) tanpa SVG.',
+          en: 'All Bio, Avatar, Recycle Bin mutations and owned shortlink deletions now enforce Auth0 JWT ownership checks. Avatar uploads are restricted to safe raster image formats (AVIF, WebP, PNG, JPEG, GIF) with SVG blocked.',
+        },
+      },
+      {
+        id: 'links-mobile-browser-compat',
+        category: 'ux_tools',
+        title: {
+          id: 'Kompatibilitas iOS/iPadOS Safari, Fallback Avatar JPEG & Anti Auto-Zoom Input',
+          en: 'iOS/iPadOS Safari Compatibility, JPEG Avatar Fallback & Anti-Zoom Mobile Inputs',
+        },
+        description: {
+          id: 'Menambahkan deteksi PWA iPadOS 13+, fallback encoder avatar JPEG untuk browser tanpa encoder AVIF/WebP, pencegahan zoom otomatis iOS pada kolom input, viewport-fit=cover untuk layar ber-notch, serta pengecualian cache Service Worker untuk callback OAuth.',
+          en: 'Added iPadOS 13+ PWA detection, adaptive JPEG fallback in the avatar cropper for browsers without AVIF/WebP encoding, iOS input auto-zoom prevention, viewport-fit=cover notch support, and Service Worker OAuth callback exclusions.',
+        },
+      },
+    ],
+  },
   {
     serviceId: 'vz-mail',
     serviceName: 'VZ Mail',

@@ -14,8 +14,11 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
+import { apiFetch } from '../utils/apiAuthClient';
+import { copyTextSafely } from '../utils/clipboard';
 import type { ShortlinkRecord } from '../utils/linksModel';
 import { ConfirmActionModal } from './ConfirmActionModal';
+import { InAppSsoNotice } from './InAppSsoNotice';
 import type { ActiveHostView } from './MailLinksTopBar';
 import { QrCodeModal } from './QrCodeModal';
 
@@ -105,7 +108,7 @@ export function ShortlinkStudio({
         endpoint = `/api/links/shortlinks?slugs=${encodeURIComponent(guestSlugs.join(','))}`;
       }
 
-      const res = await fetch(endpoint, { cache: 'no-store' });
+      const res = await apiFetch(endpoint, { cache: 'no-store' });
       const data = (await res.json().catch(() => null)) as {
         ok?: boolean;
         storageEngine?: string;
@@ -134,7 +137,7 @@ export function ShortlinkStudio({
 
   const handleCopy = (slug: string) => {
     const shortUrl = `https://${domain}/s/${slug}`;
-    navigator.clipboard?.writeText(shortUrl).catch(() => {});
+    void copyTextSafely(shortUrl);
     setCopiedSlug(slug);
     if (copyTimerRef.current !== null) {
       window.clearTimeout(copyTimerRef.current);
@@ -159,7 +162,7 @@ export function ShortlinkStudio({
 
     setSubmitting(true);
     try {
-      const res = await fetch('/api/links/shortlinks', {
+      const res = await apiFetch('/api/links/shortlinks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -217,7 +220,7 @@ export function ShortlinkStudio({
     setDeletingSlug(item.slug);
     try {
       if (session.isAuthenticated && session.username) {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/links/shortlinks/${encodeURIComponent(item.slug)}?owner=${encodeURIComponent(
             session.username
           )}&mode=${mode}`,
@@ -245,7 +248,7 @@ export function ShortlinkStudio({
         }
       } else {
         // Guest deletes anonymous shortlink permanently from DB
-        await fetch(
+        await apiFetch(
           `/api/links/shortlinks/${encodeURIComponent(item.slug)}?mode=permanent`,
           { method: 'DELETE' }
         );
@@ -486,20 +489,23 @@ export function ShortlinkStudio({
 
         {/* Guest vs SSO Persistence Info Bar */}
         {!session.isAuthenticated && (
-          <div className="pt-3 border-t border-slate-200 dark:border-[#232732] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-            <span>
-              {lang === 'id'
-                ? 'Mode Tamu aktif: tautan tetap berfungsi selamanya, riwayat tersimpan di browser ini. Masuk SSO untuk menyinkronkan daftar tautan lintas perangkat.'
-                : 'Guest mode active: links work permanently, history is saved in this browser. Sign in with SSO to sync your link history across devices.'}
-            </span>
-            <button
-              type="button"
-              onClick={onLoginWithAuth0}
-              className="self-start sm:self-auto inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <LogIn className="w-3.5 h-3.5" />
-              <span>{lang === 'id' ? 'Masuk SSO' : 'Sign In SSO'}</span>
-            </button>
+          <div className="pt-3 border-t border-slate-200 dark:border-[#232732] space-y-2.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
+              <span>
+                {lang === 'id'
+                  ? 'Mode Tamu aktif: tautan tetap berfungsi selamanya, riwayat tersimpan di browser ini. Masuk SSO untuk menyinkronkan daftar tautan lintas perangkat.'
+                  : 'Guest mode active: links work permanently, history is saved in this browser. Sign in with SSO to sync your link history across devices.'}
+              </span>
+              <button
+                type="button"
+                onClick={onLoginWithAuth0}
+                className="self-start sm:self-auto inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span>{lang === 'id' ? 'Masuk SSO' : 'Sign In SSO'}</span>
+              </button>
+            </div>
+            <InAppSsoNotice lang={lang} compact />
           </div>
         )}
       </section>

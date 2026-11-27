@@ -5,7 +5,12 @@
  * Runs identically in Browser SPA, Cloudflare Worker, and Express dev server.
  */
 
-import { escapeHtml, generateSecureId, sanitizeExternalUrl } from './mailSecurity.ts';
+import {
+  escapeHtml,
+  generateSecureId,
+  isPrivateOrLocalHostname,
+  sanitizeExternalUrl,
+} from './mailSecurity.ts';
 
 export type MailExternalLinkProvider =
   | 'vzfiles'
@@ -333,15 +338,32 @@ function linkifyEscapedTextSegment(segment: string): string {
   return parts.join('');
 }
 
+export type OutboundEmailFormat = 'minimal_html' | 'plain_text' | 'rich_card';
+
+export function normalizeOutboundEmailFormat(raw?: unknown): OutboundEmailFormat {
+  const value = String(raw || '').trim().toLowerCase();
+  if (value === 'plain_text' || value === 'plain' || value === 'text') {
+    return 'plain_text';
+  }
+  if (value === 'rich_card' || value === 'rich' || value === 'card') {
+    return 'rich_card';
+  }
+  return 'minimal_html';
+}
+
 /**
- * Builds clean, deliverability-friendly `textContent` and `htmlContent` for outbound email
- * (Brevo / Resend / cPanel / Cloudflare SEND_EMAIL), embedding direct image links inline
- * and rendering crisp clickable cards for VZ Files, Google Drive, Dropbox, and other links.
+ * Builds clean, deliverability-friendly outbound email payloads for Brevo, Resend, cPanel, and Cloudflare SEND_EMAIL.
+ * Supports 3 selectable formats:
+ * - `plain_text`: Pure text/plain without any HTML part (lowest spam risk for personal emails).
+ * - `minimal_html` (default): Lightweight Gmail-webmail-style HTML paragraphs with near 1:1 text-to-HTML ratio.
+ * - `rich_card`: Styled card layout for VZ Files, Google Drive, Dropbox, and inline media links.
  */
 export function buildOutboundEmailPayload(
   bodyText: string,
-  rawExternalLinks: readonly MailExternalLink[] = []
-): { textContent: string; htmlContent: string } {
+  rawExternalLinks: readonly MailExternalLink[] = [],
+  rawFormat: OutboundEmailFormat = 'minimal_html'
+): { textContent: string; htmlContent?: string; format: OutboundEmailFormat } {
+  const format = normalizeOutboundEmailFormat(rawFormat);
   const externalLinks = sanitizeExternalLinksArray(rawExternalLinks);
   const autoInlineMedia = extractInlineMediaLinksFromText(bodyText, externalLinks);
 
@@ -357,8 +379,68 @@ export function buildOutboundEmailPayload(
     textContent = `${textContent}\n\n---\nLampiran Tautan / File Eksternal:\n${lines.join('\n')}`;
   }
 
-  // 2. Clean HTML paragraphs with auto-linked URLs
+  if (format === 'plain_text') {
+    return {
+      textContent,
+      htmlContent: undefined,
+      format: 'plain_text',
+    };
+  }
+
   const normalizedBody = bodyText.replace(/\r\n/g, '\n').trim();
+  const inlineImages = [
+    ...externalLinks.filter((l) => l.renderInline && l.directMediaUrl),
+    ...autoInlineMedia,
+  ];
+  const cardLinks = externalLinks.filter((l) => !(l.renderInline && l.directMediaUrl));
+
+  // 2. Minimal HTML (default): ultra-clean personal webmail HTML (no marketing card boxes or CTA buttons)
+  if (format === 'minimal_html') {
+    const minimalParagraphs = normalizedBody
+      .split(/\n{2,}/)
+      .map((para) => {
+        const linesHtml = para
+          .split('\n')
+          .map((line) => linkifyEscapedTextSegment(line))
+          .join('<br>');
+        return `<p style="margin:0 0 12px 0;">${linesHtml}</p>`;
+      })
+      .join('');
+
+    const minimalImages =
+      inlineImages.length > 0
+        ? `<div style="margin:12px 0;">${inlineImages
+            .map((img) => {
+              const safeSrc = escapeHtml(img.directMediaUrl || img.url);
+              const safeHref = escapeHtml(img.url);
+              const safeLabel = escapeHtml(img.label);
+              return `<p style="margin:0 0 10px 0;"><a href="${safeHref}" target="_blank" rel="noopener noreferrer"><img src="${safeSrc}" alt="${safeLabel}" style="max-width:100%;height:auto;max-height:420px;display:block;"></a></p>`;
+            })
+            .join('')}</div>`
+        : '';
+
+    const minimalLinks =
+      missingLinksInBody.length > 0
+        ? `<p style="margin:14px 0 6px 0;color:#475569;font-size:13px;">Tautan Lampiran:</p><ul style="margin:0 0 12px 0;padding-left:18px;">${missingLinksInBody
+            .map((link) => {
+              const safeHref = escapeHtml(link.url);
+              const safeLabel = escapeHtml(link.label);
+              const sizePart = link.sizeLabel ? ` (${escapeHtml(link.sizeLabel)})` : '';
+              return `<li style="margin:0 0 4px 0;"><a href="${safeHref}" target="_blank" rel="noopener noreferrer" style="color:#2563eb;">${safeLabel}</a>${sizePart}</li>`;
+            })
+            .join('')}</ul>`
+        : '';
+
+    const htmlContent = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:#111827;">${minimalParagraphs}${minimalImages}${minimalLinks}</div>`;
+
+    return {
+      textContent,
+      htmlContent,
+      format: 'minimal_html',
+    };
+  }
+
+  // 3. Rich Card HTML (opt-in): crisp clickable cards for VZ Files, Google Drive, Dropbox, and direct images
   const paragraphsHtml = normalizedBody
     .split(/\n{2,}/)
     .map((para) => {
@@ -369,13 +451,6 @@ export function buildOutboundEmailPayload(
       return `<p style="margin:0 0 14px 0;line-height:1.65;color:#0f172a;">${linesHtml}</p>`;
     })
     .join('');
-
-  // 3. Inline Direct Images (from attached externalLinks + direct image URLs found in bodyText)
-  const inlineImages = [
-    ...externalLinks.filter((l) => l.renderInline && l.directMediaUrl),
-    ...autoInlineMedia,
-  ];
-  const cardLinks = externalLinks.filter((l) => !(l.renderInline && l.directMediaUrl));
 
   const inlineImagesHtml =
     inlineImages.length > 0
@@ -400,7 +475,7 @@ export function buildOutboundEmailPayload(
   const cardsHtml =
     cardLinks.length > 0
       ? `<div style="margin:18px 0 8px 0;padding-top:14px;border-top:1px solid #e2e8f0;">
-  <div style="font-size:12px;font-weight:700;color:#475569;margin-bottom:10px;text-transform:uppercase;letter-spacing:0.04em;">Tautan File &amp; Cloud</div>
+  <div style="font-size:12px;font-weight:700;color:#475569;margin-bottom:10px;">Tautan File &amp; Cloud</div>
   ${cardLinks
     .map((link) => {
       const safeHref = escapeHtml(link.url);
@@ -440,7 +515,7 @@ export function buildOutboundEmailPayload(
 </body>
 </html>`;
 
-  return { textContent, htmlContent };
+  return { textContent, htmlContent, format: 'rich_card' };
 }
 
 /**
@@ -464,31 +539,19 @@ export function isAllowedVikingPartUrl(rawUrl: string): boolean {
   try {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== 'https:') return false;
+    if (parsed.username || parsed.password) return false;
     const host = parsed.hostname.toLowerCase();
-    if (
-      host === 'localhost' ||
-      host.startsWith('127.') ||
-      host.startsWith('10.') ||
-      host.startsWith('192.168.') ||
-      host.startsWith('169.254.') ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-      host === '[::1]' ||
-      host.endsWith('.local') ||
-      host.endsWith('.internal')
-    ) {
+    if (isPrivateOrLocalHostname(host)) {
       return false;
     }
-    if (
+    // Strict allowlist of VikingFile & its S3-compatible object storage providers only
+    return (
       host === 'vikingfile.com' ||
       host.endsWith('.vikingfile.com') ||
-      host.endsWith('.io.cloud.ovh.net')
-    ) {
-      return true;
-    }
-    return (
-      parsed.searchParams.has('X-Amz-Signature') &&
-      parsed.searchParams.has('uploadId') &&
-      parsed.searchParams.has('partNumber')
+      host.endsWith('.io.cloud.ovh.net') ||
+      host.endsWith('.r2.cloudflarestorage.com') ||
+      host.endsWith('.backblazeb2.com') ||
+      host.endsWith('.wasabisys.com')
     );
   } catch {
     return false;

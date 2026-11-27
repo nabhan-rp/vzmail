@@ -78,11 +78,15 @@ const KNOWN_RDAP_ENDPOINTS: Record<string, string> = {
 const COMMON_DKIM_SELECTORS = [
   'brevo1',
   'brevo2',
-  'google',
+  'resend',
   'default',
+  'mail',
+  'google',
   'selector1',
   's1',
-  'mail',
+  'dkim',
+  'cf2024-1',
+  'sib',
 ] as const;
 
 export function sanitizeDomainForVerification(raw: string): {
