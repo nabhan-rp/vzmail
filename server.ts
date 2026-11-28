@@ -60,6 +60,7 @@ import {
 import { isLocalDevHostname } from './src/utils/auth0JwtVerify.ts';
 import {
   buildVzEcosystemCorsHeaders,
+  resolveTurnstileSecretKey,
   verifyShortlinkAntiBotGuard,
 } from './src/utils/turnstileVerify.ts';
 
@@ -385,7 +386,15 @@ async function startServer() {
         brevoApi: hasBrevo,
         assets: true,
         relayAuthProtected: Boolean(process.env.RELAY_AUTH_TOKEN),
-        turnstileProtected: Boolean(process.env.TURNSTILE_SECRET_KEY),
+        turnstileProtected: Boolean(
+          resolveTurnstileSecretKey(
+            process.env.TURNSTILE_SECRET_KEY,
+            process.env.TURNSTILE_SECRET
+          )
+        ),
+        turnstileHostnamesConfigured: Boolean(
+          (process.env.TURNSTILE_HOSTNAMES || '').trim()
+        ),
         vzEcosystemApiKeyConfigured: Boolean(process.env.VZ_ECOSYSTEM_API_KEY),
       },
       pendingInMemoryPackets: ephemeralQueue.size,
@@ -1167,6 +1176,8 @@ async function startServer() {
         req.body?.turnstileToken ?? req.body?.['cf-turnstile-response'] ?? ''
       ).trim(),
       turnstileSecretKey: process.env.TURNSTILE_SECRET_KEY,
+      turnstileSecretAlias: process.env.TURNSTILE_SECRET,
+      expectedHostnamesCsv: process.env.TURNSTILE_HOSTNAMES,
       clientIp,
       requestHostname: reqHost,
       allowLocalDevFallback:

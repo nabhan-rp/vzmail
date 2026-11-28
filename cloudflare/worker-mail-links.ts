@@ -95,6 +95,7 @@ import {
 import { isLocalDevHostname } from '../src/utils/auth0JwtVerify.ts';
 import {
   buildVzEcosystemCorsHeaders,
+  resolveTurnstileSecretKey,
   verifyShortlinkAntiBotGuard,
 } from '../src/utils/turnstileVerify.ts';
 
@@ -157,6 +158,8 @@ export interface WorkerEnv {
   RESEND_API_KEY?: string;
   BREVO_API_KEY?: string;
   TURNSTILE_SECRET_KEY?: string;
+  TURNSTILE_SECRET?: string;
+  TURNSTILE_HOSTNAMES?: string;
   VZ_ECOSYSTEM_API_KEY?: string;
   VZ_ECOSYSTEM_ALLOWED_ORIGINS?: string;
 }
@@ -2461,7 +2464,10 @@ async function handleApiRequest(
         brevoApi: caps.brevo,
         assets: Boolean(env.ASSETS),
         relayAuthProtected: Boolean(env.RELAY_AUTH_TOKEN),
-        turnstileProtected: Boolean(env.TURNSTILE_SECRET_KEY),
+        turnstileProtected: Boolean(
+          resolveTurnstileSecretKey(env.TURNSTILE_SECRET_KEY, env.TURNSTILE_SECRET)
+        ),
+        turnstileHostnamesConfigured: Boolean((env.TURNSTILE_HOSTNAMES || '').trim()),
         vzEcosystemApiKeyConfigured: Boolean(env.VZ_ECOSYSTEM_API_KEY),
       },
       timestamp: new Date().toISOString(),
@@ -3564,6 +3570,8 @@ async function handleApiRequest(
         parsed.data.turnstileToken ?? parsed.data['cf-turnstile-response'] ?? ''
       ).trim(),
       turnstileSecretKey: env.TURNSTILE_SECRET_KEY,
+      turnstileSecretAlias: env.TURNSTILE_SECRET,
+      expectedHostnamesCsv: env.TURNSTILE_HOSTNAMES,
       clientIp,
       requestHostname: url.hostname,
       allowLocalDevFallback:
@@ -3586,6 +3594,14 @@ async function handleApiRequest(
         antiBot.status,
         shortlinkCorsHeaders
       );
+    }
+
+    if (antiBot.mode === 'turnstile_verified') {
+      logInfo('shortlink_antibot_verified', {
+        mode: antiBot.mode,
+        turnstileHostname: antiBot.turnstileHostname || null,
+        host: url.hostname,
+      });
     }
 
     if (antiBot.mode === 'vz_ecosystem_origin' && clientIp) {

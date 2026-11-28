@@ -25,6 +25,10 @@ import {
   TurnstileWidget,
   type TurnstileWidgetStatus,
 } from './TurnstileWidget';
+import {
+  isLikelyValidShortlinkUrl,
+  type ShortlinkAntiBotMode,
+} from '../utils/turnstileVerify';
 
 interface ShortlinkStudioProps {
   lang: Language;
@@ -79,12 +83,41 @@ export function ShortlinkStudio({
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [createdRecord, setCreatedRecord] = useState<ShortlinkRecord | null>(null);
+  const [createdAntiBotMode, setCreatedAntiBotMode] =
+    useState<ShortlinkAntiBotMode | null>(null);
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [turnstileStatus, setTurnstileStatus] =
     useState<TurnstileWidgetStatus>('loading');
   const [turnstileResetCounter, setTurnstileResetCounter] = useState(0);
+  const [turnstileUrlReady, setTurnstileUrlReady] = useState(false);
 
-  const shouldShowTurnstile = !session.isAuthenticated && targetUrl.trim().length > 0;
+  useEffect(() => {
+    if (session.isAuthenticated) {
+      setTurnstileUrlReady(false);
+      return;
+    }
+    const trimmed = targetUrl.trim();
+    if (!trimmed) {
+      setTurnstileUrlReady(false);
+      return;
+    }
+    const validNow = isLikelyValidShortlinkUrl(trimmed);
+    if (!validNow) {
+      setTurnstileUrlReady(false);
+      return;
+    }
+    // Immediate activation when user pastes a complete http(s):// URL; debounce while typing
+    if (/^https?:\/\//i.test(trimmed)) {
+      setTurnstileUrlReady(true);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setTurnstileUrlReady(true);
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [session.isAuthenticated, targetUrl]);
+
+  const shouldShowTurnstile = !session.isAuthenticated && turnstileUrlReady;
   const requiresTurnstileToken =
     shouldShowTurnstile && turnstileStatus !== 'local_preview';
 
@@ -172,6 +205,16 @@ export function ShortlinkStudio({
       return;
     }
 
+    if (!session.isAuthenticated && !isLikelyValidShortlinkUrl(trimmedUrl)) {
+      setFormError(
+        lang === 'id'
+          ? 'Masukkan URL tujuan yang valid (contoh: https://contoh.com/halaman).'
+          : 'Please enter a valid destination URL (e.g. https://example.com/page).'
+      );
+      urlInputRef.current?.focus();
+      return;
+    }
+
     if (requiresTurnstileToken && !turnstileToken) {
       setFormError(
         lang === 'id'
@@ -198,6 +241,7 @@ export function ShortlinkStudio({
         ok?: boolean;
         error?: string;
         storageEngine?: string;
+        antiBotMode?: ShortlinkAntiBotMode;
         record?: ShortlinkRecord;
       } | null;
 
@@ -218,6 +262,7 @@ export function ShortlinkStudio({
       const rec = data.record;
       if (data.storageEngine) setStorageEngine(data.storageEngine);
       setCreatedRecord(rec);
+      setCreatedAntiBotMode(data.antiBotMode ?? null);
       setTargetUrl('');
       setCustomSlug('');
       setTitle('');
@@ -473,13 +518,18 @@ export function ShortlinkStudio({
         {createdRecord && (
           <div className="p-4 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/25 border border-emerald-200 dark:border-emerald-900/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="min-w-0 space-y-0.5">
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+              <div className="flex flex-wrap items-center gap-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
                 <CheckCircle2 className="w-4 h-4 shrink-0" />
                 <span>
                   {lang === 'id'
                     ? 'Shortlink berhasil dibuat dan aktif'
                     : 'Shortlink created and live'}
                 </span>
+                {createdAntiBotMode === 'turnstile_verified' && (
+                  <span className="font-normal text-emerald-700/80 dark:text-emerald-300/80">
+                    · {lang === 'id' ? 'Terverifikasi Turnstile' : 'Turnstile verified'}
+                  </span>
+                )}
               </div>
               <div className="font-mono text-sm sm:text-base font-bold text-slate-900 dark:text-white truncate">
                 https://{domain}/s/{createdRecord.slug}

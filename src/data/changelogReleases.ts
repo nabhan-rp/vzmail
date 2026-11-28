@@ -24,7 +24,7 @@ export interface ChangelogServiceRelease {
   highlights: ChangelogItem[];
 }
 
-export const CHANGELOG_VERSION = 'v1.1.5';
+export const CHANGELOG_VERSION = 'v1.1.6';
 export const CHANGELOG_RELEASE_DATE = '2026-11-28';
 
 export const CHANGELOG_CATEGORY_LABELS: Record<ChangelogCategoryId, BilingualText> = {
@@ -47,6 +47,59 @@ export const CHANGELOG_CATEGORY_LABELS: Record<ChangelogCategoryId, BilingualTex
 };
 
 export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
+  {
+    serviceId: 'vz-links',
+    serviceName: 'VZ Links & VZ Ecosystem API',
+    domains: ['imy.li', 'www.imy.li', 'links.vz.gay', 'mail.vz.gay', '*.vz.gay'],
+    version: '1.1.6',
+    releaseDate: '2026-11-28',
+    codename: {
+      id: 'Pengerasan Verifikasi Cloudflare Turnstile (siteverify) & Standar Spin',
+      en: 'Cloudflare Turnstile siteverify Hardening & Spin Compliance',
+    },
+    summary: {
+      id: 'Menyempurnakan pemuatan widget Turnstile agar hanya aktif saat input sudah berupa URL valid, mewajibkan validasi siteverify setiap kali token dikirim klien, mengeluarkan mail.vz.gay dari bypass Origin tamu anonim, serta mendukung penuh variabel standar Cloudflare Spin (TURNSTILE_SECRET & TURNSTILE_HOSTNAMES).',
+      en: 'Refines Turnstile widget loading to trigger only on valid URL input, enforces mandatory siteverify whenever a client supplies a token, removes mail.vz.gay from anonymous Origin bypass, and adds full Cloudflare Spin env compatibility (TURNSTILE_SECRET & TURNSTILE_HOSTNAMES).',
+    },
+    highlights: [
+      {
+        id: 'v116-valid-url-debounce',
+        category: 'ux_tools',
+        title: {
+          id: 'Pemicu Widget Berbasis URL Valid (Debounce 450 ms)',
+          en: 'Valid-URL Turnstile Trigger (450 ms Debounce)',
+        },
+        description: {
+          id: 'Widget Turnstile tidak lagi membakar tantangan saat pengguna baru mengetik beberapa huruf; hanya aktif otomatis saat input membentuk domain/URL sah (atau seketika saat menempel URL http/https lengkap), serta menampilkan status Terverifikasi Turnstile di banner hasil.',
+          en: 'Turnstile no longer burns unused challenges on partial keystrokes; activates only when input resembles a valid URL (instantly on full http/https paste), and displays a clean Turnstile verified confirmation on the result banner.',
+        },
+      },
+      {
+        id: 'v116-mandatory-siteverify-mail-exclusion',
+        category: 'privacy_security',
+        title: {
+          id: 'Wajib siteverify untuk Token Klien & Penutupan Bypass Anonim mail.vz.gay',
+          en: 'Mandatory siteverify on Supplied Tokens & mail.vz.gay Anonymous Bypass Removal',
+        },
+        description: {
+          id: 'Setiap permintaan yang menyertakan token Turnstile selalu divalidasi ke challenges.cloudflare.com/turnstile/v0/siteverify dengan idempotency_key UUID v4. Pengunjung non-login di mail.vz.gay kini wajib Turnstile, sementara pengguna login Auth0 SSO dan layanan saudara VZ tetap bebas hambatan.',
+          en: 'Any request submitting a Turnstile token is always validated against siteverify with a UUID v4 idempotency_key. Anonymous guests on mail.vz.gay now pass Turnstile, while Auth0 SSO users and trusted VZ sibling services stay uninterrupted.',
+        },
+      },
+      {
+        id: 'v116-spin-env-observability',
+        category: 'seo_infra',
+        title: {
+          id: 'Standar Cloudflare Spin (TURNSTILE_SECRET, TURNSTILE_HOSTNAMES & Log Terstruktur)',
+          en: 'Cloudflare Spin Standards (TURNSTILE_SECRET, TURNSTILE_HOSTNAMES & Structured Logs)',
+        },
+        description: {
+          id: 'Mendukung fallback TURNSTILE_SECRET selain TURNSTILE_SECRET_KEY, allowlist hostname produksi ketat via TURNSTILE_HOSTNAMES (menolak localhost di produksi), serta log shortlink_antibot_verified pada Cloudflare Workers Logs.',
+          en: 'Supports TURNSTILE_SECRET alongside TURNSTILE_SECRET_KEY, strict production hostname allowlisting via TURNSTILE_HOSTNAMES (forbidding localhost in production), and structured shortlink_antibot_verified events in Cloudflare Workers Logs.',
+        },
+      },
+    ],
+  },
   {
     serviceId: 'vz-links',
     serviceName: 'VZ Links & VZ Ecosystem API',

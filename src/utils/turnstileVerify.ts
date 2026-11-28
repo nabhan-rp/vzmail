@@ -6,13 +6,13 @@
  * Security model for POST /api/links/shortlinks:
  *   1. Verified Auth0 SSO JWT (`auth0_jwt`) or Relay Token (`relay_token`) -> bypass Turnstile.
  *   2. Trusted VZ Ecosystem API Key (`X-VZ-Ecosystem-Key` or `X-VZ-Relay-Token`, constant-time) -> bypass Turnstile.
- *   3. Scoped Trusted VZ Ecosystem Browser Origin (HTTPS allowlist for active sibling services:
- *      `builder.vz.gay` + `*.builder.vz.gay`, `desk.vz.gay` + `*.desk.vz.gay`,
- *      `files.vz.gay` + `*.files.vz.gay`, `mail.vz.gay`, plus optional `VZ_ECOSYSTEM_ALLOWED_ORIGINS`) -> bypass Turnstile.
- *      NOTE: `links.vz.gay`, `imy.li`, `www.imy.li`, and `*.imy.li` are ALWAYS excluded from Origin bypass
- *      so anonymous public users on the shortener page MUST pass Cloudflare Turnstile.
- *   4. Public anonymous requests -> strict Cloudflare Turnstile `siteverify` in production (fail-closed if secret missing);
- *      automatic dev/preview bypass strictly on local/preview hosts when `TURNSTILE_SECRET_KEY` is unset.
+ *   3. If client explicitly supplies a Turnstile token and server secret is configured -> ALWAYS verify via `siteverify`.
+ *   4. Scoped Trusted VZ Ecosystem Browser Origin (HTTPS allowlist for active sibling services + optional
+ *      `VZ_ECOSYSTEM_ALLOWED_ORIGINS`) -> bypass Turnstile.
+ *      NOTE: `links.vz.gay`, `mail.vz.gay`, `imy.li`, `www.imy.li`, and `*.imy.li` are ALWAYS excluded from Origin bypass
+ *      so anonymous public users on the shortener UI MUST pass Cloudflare Turnstile.
+ *   5. Public anonymous requests -> strict Cloudflare Turnstile `siteverify` in production (fail-closed if secret missing);
+ *      automatic dev/preview bypass strictly on local/preview hosts when Turnstile secret is unset.
  */
 
 import { isLocalDevHostname } from './auth0JwtVerify.ts';
@@ -26,17 +26,14 @@ const TURNSTILE_FETCH_TIMEOUT_MS = 8000;
 const MAX_TURNSTILE_TOKEN_LENGTH = 2048;
 
 /**
- * Built-in active VZ ecosystem services that integrate imy.li / links.vz.gay shortlinks:
- * - builder.vz.gay + subdomains (go-blog.builder.vz.gay, business.builder.vz.gay, etc.)
- * - desk.vz.gay + subdomains (20+ VZ Desk sub-applications)
- * - files.vz.gay + subdomains
- * - mail.vz.gay
+ * Built-in active VZ ecosystem services that integrate imy.li / links.vz.gay shortlinks.
+ * Note: `mail.vz.gay` is intentionally excluded from anonymous Origin bypass because it hosts
+ * the same public SPA shortener UI; logged-in Mail users already bypass via Auth0 SSO JWT.
  */
 const BUILTIN_TRUSTED_EXACT_HOSTS = new Set<string>([
   'builder.vz.gay',
   'desk.vz.gay',
   'files.vz.gay',
-  'mail.vz.gay',
   'cite.vz.gay',
   'docs.vz.gay',
   'sheets.vz.gay',
@@ -58,7 +55,7 @@ const BUILTIN_TRUSTED_EXACT_HOSTS = new Set<string>([
   'view.vz.gay',
   'pub.vz.gay',
   'go-blog.vz.gay',
-  'business.vz.gay'
+  'business.vz.gay',
 ]);
 
 const BUILTIN_TRUSTED_WILDCARD_BASES = [
@@ -74,10 +71,44 @@ function isPublicShortlinkSurfaceHost(hostname: string): boolean {
   const h = hostname.toLowerCase();
   return (
     h === 'links.vz.gay' ||
+    h === 'mail.vz.gay' ||
     h === 'imy.li' ||
     h === 'www.imy.li' ||
     h.endsWith('.imy.li')
   );
+}
+
+/**
+ * Resolves the Turnstile server secret from either `TURNSTILE_SECRET_KEY` (primary)
+ * or `TURNSTILE_SECRET` (Cloudflare Turnstile Spin canonical env var name).
+ */
+export function resolveTurnstileSecretKey(
+  primarySecret?: string | null,
+  spinSecretAlias?: string | null
+): string {
+  return (primarySecret || '').trim() || (spinSecretAlias || '').trim();
+}
+
+/**
+ * Lightweight client-side heuristic to detect when user input resembles a real public URL
+ * so the on-demand Turnstile widget does not burn unused challenges on partial keystrokes.
+ */
+export function isLikelyValidShortlinkUrl(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (trimmed.length < 4 || /\s/.test(trimmed)) return false;
+  const candidate = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (!host.includes('.')) return false;
+    const labels = host.split('.');
+    if (labels.some((label) => !label || label.length > 63)) return false;
+    const tld = labels[labels.length - 1];
+    return /^[a-z]{2,24}$/.test(tld);
+  } catch {
+    return false;
+  }
 }
 
 const VALID_HOSTNAME_REGEX =
@@ -282,6 +313,10 @@ export interface VerifyShortlinkAntiBotOptions {
   extraAllowedOriginsCsv?: string | null;
   turnstileToken?: string | null;
   turnstileSecretKey?: string | null;
+  /** Optional Cloudflare Spin canonical alias (`TURNSTILE_SECRET`) if `TURNSTILE_SECRET_KEY` is unset. */
+  turnstileSecretAlias?: string | null;
+  /** Optional CSV of deployment-specific expected Turnstile widget hostnames (`TURNSTILE_HOSTNAMES`). */
+  expectedHostnamesCsv?: string | null;
   clientIp?: string | null;
   requestHostname: string;
   allowLocalDevFallback?: boolean;
@@ -297,15 +332,44 @@ interface CloudflareTurnstileSiteverifyResponse {
   cdata?: string;
 }
 
+function isLocalhostLike(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+}
+
 function isAllowedTurnstileResponseHostname(
   returnedHostname: string,
-  requestHostname: string
+  requestHostname: string,
+  expectedHostnamesCsv?: string | null
 ): boolean {
   const h = returnedHostname.trim().toLowerCase();
   const reqHost = requestHostname.trim().toLowerCase();
+  const reqIsLocal = isLocalDevHostname(reqHost);
+
   if (!h) return true;
-  // Allow official Cloudflare Turnstile testing hostname in dev/preview only
-  if (h === 'example.com' && isLocalDevHostname(reqHost)) return true;
+
+  // Cloudflare Spin rule: production backends must NEVER accept localhost / 127.0.0.1 tokens
+  if (!reqIsLocal && isLocalhostLike(h)) {
+    return false;
+  }
+
+  // Allow official Cloudflare Turnstile testing hostname strictly on local/preview hosts
+  if (h === 'example.com' && reqIsLocal) return true;
+
+  // If deployment explicitly sets TURNSTILE_HOSTNAMES, enforce exact match against that set
+  const rawExpected = (expectedHostnamesCsv || '').trim();
+  if (rawExpected) {
+    const allowedSet = new Set(
+      rawExpected
+        .split(',')
+        .map((item) => item.trim().toLowerCase())
+        .filter((item) => Boolean(item) && (reqIsLocal || !isLocalhostLike(item)))
+    );
+    if (allowedSet.size > 0) {
+      return allowedSet.has(h);
+    }
+  }
+
   if (h === reqHost) return true;
   if (
     h === 'imy.li' ||
@@ -358,21 +422,32 @@ export async function verifyShortlinkAntiBotGuard(
     return { ok: true, mode: 'vz_ecosystem_api_key' };
   }
 
-  // Path 3: Scoped Trusted VZ Ecosystem Browser Origin (builder, desk, files, mail + sub-apps)
-  const trustedOrigin = resolveTrustedVzEcosystemOrigin(
-    options.originHeader,
-    options.extraAllowedOriginsCsv
+  const secretKey = resolveTurnstileSecretKey(
+    options.turnstileSecretKey,
+    options.turnstileSecretAlias
   );
-  if (trustedOrigin) {
-    return {
-      ok: true,
-      mode: 'vz_ecosystem_origin',
-      trustedOrigin,
-    };
+  const token = (options.turnstileToken || '').trim();
+
+  // Path 3: If client explicitly supplied a Turnstile token and server secret is configured,
+  // ALWAYS validate via Cloudflare siteverify so no issued widget token goes unverified.
+  const shouldForceSiteverifyForSuppliedToken = Boolean(token && secretKey);
+
+  // Path 4: Scoped Trusted VZ Ecosystem Browser Origin (only when no Turnstile token was submitted)
+  if (!shouldForceSiteverifyForSuppliedToken) {
+    const trustedOrigin = resolveTrustedVzEcosystemOrigin(
+      options.originHeader,
+      options.extraAllowedOriginsCsv
+    );
+    if (trustedOrigin) {
+      return {
+        ok: true,
+        mode: 'vz_ecosystem_origin',
+        trustedOrigin,
+      };
+    }
   }
 
-  // Path 4: Public anonymous request -> Turnstile verification
-  const secretKey = (options.turnstileSecretKey || '').trim();
+  // Path 5: Public anonymous request (or forced token verification) -> Turnstile siteverify
   const isLocalHost =
     Boolean(options.allowLocalDevFallback) || isLocalDevHostname(options.requestHostname);
 
@@ -385,12 +460,11 @@ export async function verifyShortlinkAntiBotGuard(
       ok: false,
       status: 503,
       error:
-        'Perlindungan anti-bot Cloudflare Turnstile belum dikonfigurasi di server produksi (TURNSTILE_SECRET_KEY belum terpasang).',
+        'Perlindungan anti-bot Cloudflare Turnstile belum dikonfigurasi di server produksi (TURNSTILE_SECRET_KEY / TURNSTILE_SECRET belum terpasang).',
       errorCodes: ['missing-input-secret'],
     };
   }
 
-  const token = (options.turnstileToken || '').trim();
   if (!token) {
     return {
       ok: false,
@@ -416,6 +490,9 @@ export async function verifyShortlinkAntiBotGuard(
   const ip = (options.clientIp || '').trim();
   if (ip) {
     formBody.set('remoteip', ip);
+  }
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    formBody.set('idempotency_key', crypto.randomUUID());
   }
 
   const controller = new AbortController();
@@ -463,7 +540,11 @@ export async function verifyShortlinkAntiBotGuard(
 
     if (
       outcome.hostname &&
-      !isAllowedTurnstileResponseHostname(outcome.hostname, options.requestHostname)
+      !isAllowedTurnstileResponseHostname(
+        outcome.hostname,
+        options.requestHostname,
+        options.expectedHostnamesCsv
+      )
     ) {
       return {
         ok: false,

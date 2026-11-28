@@ -6,6 +6,18 @@ Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.
 
 ---
 
+## VZ Links & VZ Ecosystem API — `v1.1.6` (2026-11-28)
+
+**Domain:** `imy.li` · `www.imy.li` · `links.vz.gay` · `mail.vz.gay` · `*.vz.gay`  
+**Rilis:** Pengerasan Verifikasi Cloudflare Turnstile (`siteverify`) & Standar Spin
+
+### Improved & Security
+- **Pemicu Widget Turnstile Berbasis URL Valid (Debounce 450 ms):** Widget hanya dimuat saat tamu non-login mengetik URL berformat domain valid (atau langsung saat menempel `http(s)://...`), mencegah tantangan terbuang percuma yang menurunkan rasio *Token Validation* di Cloudflare Analytics, serta menambahkan status `Terverifikasi Turnstile` pada banner hasil.
+- **Wajib `siteverify` Bila Token Dikirim & Keluarkan `mail.vz.gay` dari Bypass Origin Anonim:** Setiap permintaan yang membawa `turnstileToken` kini selalu memanggil `challenges.cloudflare.com/turnstile/v0/siteverify` (dengan `idempotency_key` UUID v4). Tamu anonim di `mail.vz.gay` kini melewati Turnstile, sementara pengguna login Auth0 SSO dan seluruh layanan saudara ekosistem VZ tetap berjalan tanpa hambatan.
+- **Kompatibilitas Penuh Cloudflare Spin & Observabilitas:** Mendukung `TURNSTILE_SECRET` selain `TURNSTILE_SECRET_KEY`, allowlist hostname produksi ketat lewat `TURNSTILE_HOSTNAMES` (menolak `localhost`/`127.0.0.1` di produksi), serta log `shortlink_antibot_verified` pada Cloudflare Workers Logs.
+
+---
+
 ## VZ Links & VZ Ecosystem API — `v1.1.5` (2026-11-28)
 
 **Domain:** `links.vz.gay` · `imy.li` · `builder.vz.gay` · `desk.vz.gay` · `files.vz.gay`  
