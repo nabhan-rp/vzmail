@@ -1,15 +1,30 @@
-# Changelog
+# Changelog (Pengembangan Prarilis)
 
-Seluruh perubahan rilis resmi untuk layanan **VZ Mail** (`mail.vz.gay`) dan **VZ Links** (`links.vz.gay`, `*.imy.li`, `imy.li/s/`) oleh **PT Galeri Langkah Bahagia Yuwana (galbay)**.
+Seluruh catatan perubahan prarilis bertahap (`v0.1.0-alpha` → `v0.9.0-dev`) untuk layanan **VZ Mail** (`mail.vz.gay`) dan **VZ Links** (`links.vz.gay`, `*.imy.li`, `imy.li/s/`) oleh **PT Galeri Langkah Bahagia Yuwana (galbay)**.
 
-Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) dan [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Versi web publik tersedia di [`/changelog`](https://mail.vz.gay/changelog) dan [`https://links.vz.gay/changelog`](https://links.vz.gay/changelog).
+Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) dan [Semantic Versioning](https://semver.org/spec/v2.0.0.html) prarilis. Versi web publik tersedia di [`/changelog`](https://mail.vz.gay/changelog) dan [`https://links.vz.gay/changelog`](https://links.vz.gay/changelog).
 
 ---
 
-## VZ Links & VZ Ecosystem API — `v1.1.6` (2026-11-28)
+## VZ Links & VZ Mail — `v0.9.0-dev` (2026-11-28)
 
+**Tahap:** Pengembangan (`dev`)  
+**Domain:** `links.vz.gay` · `imy.li` · `www.imy.li` · `mail.vz.gay`  
+**Tonggak:** Edit Shortlink Khusus SSO (Slug, URL & Label) & Timeline Changelog Prarilis
+
+### Added & Security
+- **Modal Edit Shortlink Khusus Login SSO:** Pengguna yang masuk via Auth0 SSO kini memiliki tombol **Edit** pada daftar shortlink akun dan banner hasil untuk mengubah **slug** (2–48 karakter), **URL tujuan**, serta **label/catatan** sekaligus lengkap dengan pratinjau langsung `https://imy.li/s/<slug-baru>` tanpa kehilangan riwayat klik nyata.
+- **Pilihan Nasib Slug Lama Per Pengeditan:** Saat slug diubah, pengguna dapat memilih **(1) Nonaktifkan slug lama** (dihapus langsung dari backend D1 & KV sehingga berhenti redirect seketika) atau **(2) Pertahankan slug lama sebagai alias redirect** menuju URL tujuan terbaru.
+- **Endpoint Backend `PATCH /api/links/shortlinks/:slug` (Atomik D1 + KV & Express Parity):** Dilindungi penuh oleh verifikasi JWT Auth0 RS256 dan pemeriksaan kepemilikan akun kanonis (menolak edit tautan tamu atau milik akun lain dengan `403`, serta bentrok slug dengan `409`).
+- **Timeline Changelog Prarilis (`v0.1.0-alpha` → `v0.9.0-dev`) & Akses Drawer/Footer Dinamis:** Seluruh riwayat fitur disusun ulang dalam lini masa kronologis prarilis dengan filter ganda layanan & kategori, dilengkapi tautan Changelog langsung di menu drawer HP dan footer global dinamis tanpa menambah kepadatan bilah header desktop.
+
+---
+
+## VZ Links & VZ Ecosystem API — `v0.8.0-dev` (2026-11-28)
+
+**Tahap:** Pengembangan (`dev`)  
 **Domain:** `imy.li` · `www.imy.li` · `links.vz.gay` · `mail.vz.gay` · `*.vz.gay`  
-**Rilis:** Pengerasan Verifikasi Cloudflare Turnstile (`siteverify`) & Standar Spin
+**Tonggak:** Pengerasan Verifikasi Cloudflare Turnstile (`siteverify`) & Standar Spin
 
 ### Improved & Security
 - **Pemicu Widget Turnstile Berbasis URL Valid (Debounce 450 ms):** Widget hanya dimuat saat tamu non-login mengetik URL berformat domain valid (atau langsung saat menempel `http(s)://...`), mencegah tantangan terbuang percuma yang menurunkan rasio *Token Validation* di Cloudflare Analytics, serta menambahkan status `Terverifikasi Turnstile` pada banner hasil.
@@ -18,22 +33,24 @@ Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.
 
 ---
 
-## VZ Links & VZ Ecosystem API — `v1.1.5` (2026-11-28)
+## VZ Links & VZ Ecosystem API — `v0.7.0-dev` (2026-11-28)
 
+**Tahap:** Pengembangan (`dev`)  
 **Domain:** `links.vz.gay` · `imy.li` · `builder.vz.gay` · `desk.vz.gay` · `files.vz.gay`  
-**Rilis:** Proteksi Anti-Bot Cloudflare Turnstile & Bypass Hibrida Ekosistem VZ
+**Tonggak:** Proteksi Anti-Bot Cloudflare Turnstile & Bypass Hibrida Ekosistem VZ
 
 ### Added & Security
 - **Cloudflare Turnstile On-Demand untuk Shortlink Publik (`imy.li/s/`):** Widget Cloudflare Turnstile Managed otomatis dimuat hanya ketika tamu (non-login SSO) mulai mengetik URL tujuan pada form pemendek URL, dengan verifikasi server-side `siteverify` ketat (*fail-closed*) di produksi serta bypass otomatis di lingkungan `localhost`/preview lokal.
-- **Bypass Hibrida & CORS Terverifikasi untuk Sub-Aplikasi Ekosistem VZ:** Mendukung 3 jalur resmi agar seluruh layanan saudara tidak terblokir perlindungan anti-bot: (1) JWT Auth0 SSO terverifikasi, (2) header API Key konstan-waktu `X-VZ-Ecosystem-Key` / `X-VZ-Relay-Token`, serta (3) allowlist `Origin` HTTPS spesifik dan CORS non-wildcard untuk `builder.vz.gay` (`*.builder.vz.gay` termasuk `go-blog` & `business`), `desk.vz.gay` (`*.desk.vz.gay` untuk 20+ sub-aplikasi), `files.vz.gay` (`*.files.vz.gay`), dan `mail.vz.gay` (dengan pengecualian keras terhadap `links.vz.gay` dan `*.imy.li`).
+- **Bypass Hibrida & CORS Terverifikasi untuk Sub-Aplikasi Ekosistem VZ:** Mendukung 3 jalur resmi agar seluruh layanan saudara tidak terblokir perlindungan anti-bot: (1) JWT Auth0 SSO terverifikasi, (2) header API Key konstan-waktu `X-VZ-Ecosystem-Key` / `X-VZ-Relay-Token`, serta (3) allowlist `Origin` HTTPS spesifik dan CORS non-wildcard untuk `builder.vz.gay` (`*.builder.vz.gay` termasuk `go-blog` & `business`), `desk.vz.gay` (`*.desk.vz.gay` untuk 20+ sub-aplikasi), `files.vz.gay` (`*.files.vz.gay`), dan domain saudara ekosistem VZ (dengan pengecualian keras terhadap `links.vz.gay` dan `*.imy.li`).
 - **Pengerasan CSP Edge & Batas Burst Origin:** Menambahkan `https://challenges.cloudflare.com` pada CSP Cloudflare Worker (`script-src`, `frame-src`, `connect-src`) serta menerapkan batas burst 60 permintaan/menit per IP pada jalur bypass Origin.
 
 ---
 
-## VZ Mail & VZ Links — `v1.1.4` (2026-11-27)
+## VZ Mail & VZ Links — `v0.6.0-dev` (2026-11-27)
 
+**Tahap:** Pengembangan (`dev`)  
 **Domain:** `mail.vz.gay` · `links.vz.gay` · `*.imy.li`  
-**Rilis:** Biometrik & Passkey VZ Vault (Standar CipherVault Pro · WebAuthn + PRF)
+**Tonggak:** Biometrik & Passkey VZ Vault (Standar CipherVault Pro · WebAuthn + PRF)
 
 ### Added & Security
 - **Biometrik & Passkey Multi-Perangkat pada VZ Vault (100% Client-Side):** Menambahkan pendaftaran, pengujian, pengubahan nama, dan pencabutan hingga 8 Passkey (Face ID, Touch ID, Biometrik Android, Windows Hello, serta Security Key FIDO2/YubiKey lintas perangkat) dengan validasi ketat `clientDataJSON` (`type`, `challenge`, `origin`) dan `authenticatorData` (`rpIdHash` SHA-256 + flag `UP` & `UV`).
@@ -42,10 +59,11 @@ Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.
 
 ---
 
-## VZ Mail & VZ Links — `v1.1.3` (2026-11-27)
+## VZ Mail & VZ Links — `v0.5.0-beta` (2026-11-27)
 
+**Tahap:** Beta (`beta`)  
 **Domain:** `mail.vz.gay` · `links.vz.gay` · `*.imy.li`  
-**Rilis:** Deliverability Anti-Spam, Diagnostik Inbound, Navigasi 2 Hamburger Mobile & Background Sync Hemat RAM
+**Tonggak:** Deliverability Anti-Spam, Diagnostik Inbound, Navigasi 2 Hamburger Mobile & Background Sync Hemat RAM
 
 ### Fixed
 - **Deliverability Outbound Anti-Spam:** Mengganti format default email keluar menjadi **HTML Minimalis** bersih (dengan opsi pilihan **Plain-Text murni** dan **HTML Kartu** di komposer), menghapus header kustom `X-VZ-Zero-Retention` dan `reply_to` redundan, serta menambahkan tombol cek cepat SPF/DKIM/DMARC langsung di komposer.
@@ -60,10 +78,11 @@ Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.
 
 ---
 
-## VZ Mail & VZ Links — `v1.1.2` (2026-11-27)
+## VZ Mail & VZ Links — `v0.4.0-beta` (2026-11-27)
 
+**Tahap:** Beta (`beta`)  
 **Domain:** `mail.vz.gay` · `links.vz.gay` · `*.imy.li` · `imy.li/s/`  
-**Rilis:** Optimasi Safe-Area Multi-UA, Panduan SSO In-App Browser, Middleware Auth0 JWT & Kunci PIN VZ Vault
+**Tonggak:** Optimasi Safe-Area Multi-UA, Panduan SSO In-App Browser, Middleware Auth0 JWT & Kunci PIN VZ Vault
 
 ### Added & Security
 - **Kunci PIN VZ Vault (3 Opsi Opt-In):** Menambahkan proteksi PIN lokal 4–6 digit (`PBKDF2-SHA256` 150.000 iterasi dengan auto-reset setelah 5x salah) yang mendukung seluruh 3 mode opt-in: (1) Layar Kunci Penuh + Auto-Lock (1/5/15 menit & kunci otomatis saat pindah tab), (2) Kunci PIN Khusus Aksi Sensitif (Ekspor, Impor/Restore, dan Frasa 12-Kata), serta (3) Panduan opt-in pembuatan PIN saat pertama kali membuka VZ Vault.
@@ -75,10 +94,11 @@ Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.
 
 ---
 
-## VZ Mail & VZ Links — `v1.1.1` (2026-11-27)
+## VZ Mail & VZ Links — `v0.3.0-alpha` (2026-11-27)
 
+**Tahap:** Alpha (`alpha`)  
 **Domain:** `mail.vz.gay` · `links.vz.gay` · `*.imy.li` · `imy.li/s/` · `files.vz.gay`  
-**Rilis:** Pengerasan Keamanan API Auth0 JWT, Stabilitas Edge & Kompatibilitas Multi-Browser/OS
+**Tonggak:** Pengerasan Keamanan API Auth0 JWT, Stabilitas Edge & Kompatibilitas Multi-Browser/OS
 
 ### Security
 - **Verifikasi Auth0 RS256 OIDC JWT & Isolasi Kepemilikan Akun:** Menambahkan verifikasi RS256 JWKS zero-dependency pada Cloudflare Worker dan Express (`server.ts`) untuk seluruh endpoint privat `/api/mail/*`, `/api/vzfiles/*`, mutasi Bio/Avatar, Recycle Bin, serta pengelolaan shortlink berpemilik.
@@ -94,10 +114,11 @@ Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.
 
 ---
 
-## VZ Mail — `v1.1.0` (2026-11-26)
+## VZ Mail — `v0.2.0-alpha` (2026-11-26)
 
+**Tahap:** Alpha (`alpha`)  
 **Domain:** `mail.vz.gay` · `@imy.li` · `files.vz.gay` · `chipervaultro.app.vz.gay`  
-**Rilis:** Standar Enkripsi Ekosistem VZ (`.anf` & CipherVault Pro) + VZ Files Cloud (`>10 MB`)
+**Tonggak:** Standar Enkripsi Ekosistem VZ (`.anf` & CipherVault Pro) + VZ Files Cloud (`>10 MB`)
 
 ### Added
 - **Standar Enkripsi Ekosistem VZ `.anf` (*Advanced/Archival Neural File*):** Peningkatan skema ekspor & pemulihan email/backup lokal ke standar platform **CipherVault Pro** (`chipervaultro.app.vz.gay` / `github.com/nabhan-rp/chipervaultpro`) selaras dengan **VZ Desk** (`desk.vz.gay`). Format default `.anf` (`vz-anf-v1`, AES-256-GCM + PBKDF2-SHA256 `200.000` iterasi) menjadi standar resmi ekosistem VZ yang dapat dibuka lintas layanan VZ (seperti Mail dan Desk).
@@ -114,10 +135,11 @@ Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.
 
 ---
 
-## VZ Mail — `v1.0.0` (2026-11-25)
+## VZ Mail — `v0.1.0-alpha` (2026-11-25)
 
+**Tahap:** Alpha (`alpha`)  
 **Domain:** `mail.vz.gay` · `@imy.li`  
-**Rilis:** Rilis Perdana Zero-Retention Local-First
+**Tonggak:** Pondasi Awal Zero-Retention Local-First
 
 ### Added
 - **Arsitektur Zero-Retention Pop-and-Purge & IndexedDB Lokal:** Email masuk diantrekan sementara pada Cloudflare `MAIL_TRANSIT_KV` (auto-TTL 72 jam), ditarik ke IndexedDB browser perangkat pengguna, lalu langsung dimusnahkan permanen dari edge setelah konfirmasi (`POST /api/mail/ack`).
@@ -128,10 +150,11 @@ Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.
 
 ---
 
-## VZ Links — `v1.0.0` (2026-11-25)
+## VZ Links — `v0.1.0-alpha` (2026-11-25)
 
+**Tahap:** Alpha (`alpha`)  
 **Domain:** `links.vz.gay` · `*.imy.li` · `imy.li/s/`  
-**Rilis:** Rilis Perdana Multi-Page Bio, Shortlink & QR Studio
+**Tonggak:** Pondasi Awal Multi-Page Bio, Shortlink & QR Studio
 
 ### Added
 - **Link-in-Bio Multi-Halaman (`$USERNAME.imy.li` & `/$PAGE`):** Satu akun berpasangan 1:1 dengan handle email VZ Mail, mendukung halaman utama dan sub-halaman tak terbatas (`/promo`, `/event`, dsb.), 6 tema per halaman, 16 ikon media sosial, unggah foto profil AVIF/WebP otomatis ke Cloudflare R2/D1, dan pencatatan klik nyata.

@@ -1274,6 +1274,123 @@ async function startServer() {
     });
   });
 
+  app.patch('/api/links/shortlinks/:slug', async (req, res) => {
+    const oldSlug = sanitizeSlug(String(req.params.slug || ''));
+    if (!oldSlug) {
+      res.status(400).json({ ok: false, error: 'Slug shortlink tidak valid.' });
+      return;
+    }
+
+    const existing = localShortlinks.get(oldSlug);
+    if (!existing) {
+      res.status(404).json({ ok: false, error: 'Shortlink tidak ditemukan.' });
+      return;
+    }
+
+    if (!existing.ownerUser) {
+      res.status(403).json({
+        ok: false,
+        error:
+          'Shortlink tamu (non-SSO) tidak dapat diedit. Masuk dengan SSO untuk mengelola shortlink akun.',
+      });
+      return;
+    }
+
+    const verifiedAuth = await requireAuthenticatedUser(req, res, existing.ownerUser);
+    if (!verifiedAuth) return;
+
+    const rawNextSlug = String(req.body?.newSlug ?? req.body?.slug ?? oldSlug).trim();
+    const isSlugChanging = rawNextSlug.toLowerCase() !== oldSlug;
+    let finalSlug = oldSlug;
+
+    if (isSlugChanging) {
+      const cleanNextSlug = sanitizeShortlinkSlugInput(rawNextSlug);
+      if (!cleanNextSlug) {
+        res.status(400).json({
+          ok: false,
+          error:
+            'Slug baru harus 2–48 karakter (huruf kecil, angka, tanda hubung) dan bukan kata sistem.',
+        });
+        return;
+      }
+      if (cleanNextSlug !== oldSlug && localShortlinks.has(cleanNextSlug)) {
+        res.status(409).json({
+          ok: false,
+          error: `Slug "${cleanNextSlug}" sudah dipakai. Silakan pilih slug lain.`,
+        });
+        return;
+      }
+      finalSlug = cleanNextSlug;
+    }
+
+    const rawTarget = String(req.body?.targetUrl ?? existing.targetUrl).trim();
+    const withProtocol = /^https?:\/\//i.test(rawTarget) ? rawTarget : `https://${rawTarget}`;
+    const safeTarget = sanitizeExternalUrl(withProtocol, {
+      allowMailto: false,
+      blockPrivateHosts: true,
+    });
+    if (!safeTarget) {
+      res.status(400).json({
+        ok: false,
+        error: 'URL tujuan tidak valid atau diblokir. Gunakan alamat https:// publik yang sah.',
+      });
+      return;
+    }
+
+    const nextTitle =
+      req.body?.title !== undefined
+        ? stripHeaderInjection(String(req.body.title || ''), 120)
+        : existing.title;
+
+    const oldSlugAction: 'disable' | 'keep_alias' =
+      req.body?.oldSlugAction === 'keep_alias' ? 'keep_alias' : 'disable';
+    const slugChanged = finalSlug !== oldSlug;
+
+    const updatedRecord: ShortlinkRecord = {
+      slug: finalSlug,
+      ownerUser: existing.ownerUser,
+      title: nextTitle,
+      targetUrl: safeTarget,
+      isCustomSlug: slugChanged ? true : existing.isCustomSlug,
+      clicks: existing.clicks,
+      createdAt: existing.createdAt,
+      lastClickedAt: existing.lastClickedAt,
+    };
+
+    let aliasRecord: ShortlinkRecord | null = null;
+    if (slugChanged) {
+      if (oldSlugAction === 'keep_alias') {
+        aliasRecord = {
+          slug: oldSlug,
+          ownerUser: existing.ownerUser,
+          title: stripHeaderInjection(
+            `Alias → /s/${finalSlug}${nextTitle ? ` (${nextTitle})` : ''}`,
+            120
+          ),
+          targetUrl: safeTarget,
+          isCustomSlug: existing.isCustomSlug,
+          clicks: 0,
+          createdAt: existing.createdAt,
+          lastClickedAt: null,
+        };
+        localShortlinks.set(oldSlug, aliasRecord);
+      } else {
+        localShortlinks.delete(oldSlug);
+      }
+    }
+
+    localShortlinks.set(finalSlug, updatedRecord);
+    res.json({
+      ok: true,
+      storageEngine: 'local-dev-memory',
+      previousSlug: oldSlug,
+      oldSlugAction: slugChanged ? oldSlugAction : 'disable',
+      shortUrl: `https://imy.li/s/${updatedRecord.slug}`,
+      record: updatedRecord,
+      aliasRecord,
+    });
+  });
+
   app.delete('/api/links/shortlinks/:slug', async (req, res) => {
     const slug = sanitizeSlug(String(req.params.slug || ''));
     const existing = localShortlinks.get(slug);

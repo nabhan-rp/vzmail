@@ -4,6 +4,7 @@ import {
   Download,
   ExternalLink,
   Globe,
+  History,
   Link2,
   LogOut,
   Mail,
@@ -18,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { CHANGELOG_VERSION } from '../data/changelogReleases';
 import type { Language } from '../data/i18n';
 import type { SsoSession } from '../hooks/useSsoSession';
 import type { ThemePreference } from '../hooks/useTheme';
@@ -837,6 +839,39 @@ export function MailLinksTopBar({
                       </button>
                     );
                   })}
+
+                  <button
+                    type="button"
+                    onClick={() => handleNavigateFromDrawer('changelog')}
+                    className={`w-full min-h-[48px] px-3 py-2 rounded-xl flex items-center gap-3 text-left transition-colors cursor-pointer ${
+                      activeHost === 'changelog'
+                        ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300'
+                        : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#191E28]'
+                    }`}
+                  >
+                    <History
+                      className={`w-4 h-4 shrink-0 ${
+                        activeHost === 'changelog'
+                          ? 'text-blue-600 dark:text-blue-400'
+                          : 'text-slate-400'
+                      }`}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold truncate">
+                          Changelog
+                        </span>
+                        <span className="text-[11px] font-mono tabular-nums text-blue-600 dark:text-blue-400 shrink-0">
+                          {CHANGELOG_VERSION}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                        {lang === 'id'
+                          ? 'Riwayat perubahan VZ Mail & VZ Links'
+                          : 'VZ Mail & VZ Links release timeline'}
+                      </div>
+                    </div>
+                  </button>
                 </nav>
               </div>
 

@@ -153,7 +153,7 @@ function getMailSoftwareNode(): Record<string, unknown> {
     url: 'https://mail.vz.gay/',
     applicationCategory: 'CommunicationApplication',
     operatingSystem: 'Web, iOS, Android, macOS, Windows, Linux',
-    softwareVersion: '1.0.0',
+    softwareVersion: CHANGELOG_VERSION.replace(/^v/, ''),
     inLanguage: ['id', 'en'],
     description:
       'Layanan email privat lokal tanpa penyimpanan kotak surat permanen di server (@imy.li) berbasis Cloudflare Email Routing, Pop-and-Purge KV, IndexedDB, alias tak terbatas (+ dan .), QR mailto/vCard, serta cadangan terenkripsi MyVault.',
@@ -175,7 +175,7 @@ function getLinksSoftwareNode(): Record<string, unknown> {
     url: 'https://links.vz.gay/',
     applicationCategory: 'UtilitiesApplication',
     operatingSystem: 'Web, iOS, Android, macOS, Windows, Linux',
-    softwareVersion: '1.0.0',
+    softwareVersion: CHANGELOG_VERSION.replace(/^v/, ''),
     inLanguage: ['id', 'en'],
     description:
       'Platform Link-in-Bio multi-halaman ($USERNAME.imy.li & /$PAGE) berpasangan 1:1 dengan VZ Mail, pemendek URL mandiri (imy.li/s/), Studio desain QR Code kustom, foto profil AVIF, dan kontrol privasi indeksasi mesin pencari & AI.',
@@ -377,12 +377,12 @@ export function buildServiceSeoMeta(params: BuildServiceSeoParams): SeoMetadataP
     const canonicalUrl = `${origin}/changelog`;
     const title =
       lang === 'en'
-        ? `Changelog Releases ${CHANGELOG_VERSION} — VZ Mail & VZ Links`
-        : `Changelog Rilis ${CHANGELOG_VERSION} — VZ Mail & VZ Links`;
+        ? `Changelog Timeline ${CHANGELOG_VERSION} — VZ Mail & VZ Links`
+        : `Timeline Changelog ${CHANGELOG_VERSION} — VZ Mail & VZ Links`;
     const description =
       lang === 'en'
-        ? 'Official release notes for VZ Mail v1.0.0 (mail.vz.gay) and VZ Links v1.0.0 (links.vz.gay, *.imy.li): Zero-Retention email, multi-page Bio, custom QR codes, and AI/SEO controls.'
-        : 'Catatan rilis resmi VZ Mail v1.0.0 (mail.vz.gay) dan VZ Links v1.0.0 (links.vz.gay, *.imy.li): email Zero-Retention, Bio multi-halaman, QR Code kustom, dan kontrol SEO/AI.';
+        ? `Pre-1.0 development changelog (${CHANGELOG_VERSION}) for VZ Mail (mail.vz.gay) and VZ Links (links.vz.gay, *.imy.li): chronological history from v0.1.0-alpha to ${CHANGELOG_VERSION}.`
+        : `Catatan perubahan pengembangan prarilis (${CHANGELOG_VERSION}) untuk VZ Mail (mail.vz.gay) dan VZ Links (links.vz.gay, *.imy.li): riwayat kronologis dari v0.1.0-alpha hingga ${CHANGELOG_VERSION}.`;
 
     return {
       title,
@@ -393,7 +393,7 @@ export function buildServiceSeoMeta(params: BuildServiceSeoParams): SeoMetadataP
       ogType: 'article',
       ogSiteName: 'VZ Mail & VZ Links',
       ogImage: host === 'links.vz.gay' ? DEFAULT_OG_IMAGE_LINKS : DEFAULT_OG_IMAGE_MAIL,
-      ogImageAlt: `Changelog Rilis ${CHANGELOG_VERSION} VZ Mail & VZ Links`,
+      ogImageAlt: `Timeline Changelog ${CHANGELOG_VERSION} VZ Mail & VZ Links`,
       twitterTitle: title,
       twitterDescription: description,
       jsonLd: {
@@ -698,8 +698,8 @@ export function buildLlmsTxt(): string {
 
 ## Releases & Documentation
 
-- [Changelog Releases ${CHANGELOG_VERSION}](https://mail.vz.gay/changelog): Official v1.0.0 release notes for both VZ Mail and VZ Links (${CHANGELOG_RELEASE_DATE}).
-- [Full AI Reference (llms-full.txt)](https://mail.vz.gay/llms-full.txt): Complete architecture, domain mapping, privacy guarantees, and v1.0.0 feature reference for LLMs and AI search engines.
+- [Changelog Timeline ${CHANGELOG_VERSION}](https://mail.vz.gay/changelog): Pre-1.0 development release notes from v0.1.0-alpha through ${CHANGELOG_VERSION} for both VZ Mail and VZ Links (${CHANGELOG_RELEASE_DATE}).
+- [Full AI Reference (llms-full.txt)](https://mail.vz.gay/llms-full.txt): Complete architecture, domain mapping, privacy guarantees, and ${CHANGELOG_VERSION} feature reference for LLMs and AI search engines.
 - [Terms of Service](https://mail.vz.gay/terms): Official terms governing VZ Mail, VZ Links, and *.imy.li subdomains.
 - [Privacy Policy](https://mail.vz.gay/privacy): Zero-retention data handling and user opt-in indexing controls.
 
@@ -726,7 +726,7 @@ ${items}`;
   return `# VZ Mail & VZ Links — Full Technical & Product Reference
 
 Publisher: ${PUBLISHER_NAME} (${PUBLISHER_URL})
-Latest Stable Version: ${CHANGELOG_VERSION} (${CHANGELOG_RELEASE_DATE})
+Current Development Version: ${CHANGELOG_VERSION} (${CHANGELOG_RELEASE_DATE})
 Universal SSO: https://accounts.vz.gay (Account Portal: https://myaccount.vz.gay)
 
 ## 1. Domain Architecture (2-in-1 Cloudflare Worker)
@@ -735,19 +735,19 @@ Universal SSO: https://accounts.vz.gay (Account Portal: https://myaccount.vz.gay
 2. **https://links.vz.gay** — VZ Links Studio for managing multi-page Link-in-Bio, QR designs, Recycle Bin, and Bio indexing preferences.
 3. **https://imy.li** & **https://imy.li/s/$CODE** — Standalone URL shortener & HTTP 302 redirector.
 4. **https://$USERNAME.imy.li** & **https://$USERNAME.imy.li/$PAGE** — Public Link-in-Bio pages isolated with Zero-Cookie PSL headers and strict CSP.
-5. **https://mail.vz.gay/changelog** & **https://links.vz.gay/changelog** — Public bilingual release changelog.
+5. **https://mail.vz.gay/changelog** & **https://links.vz.gay/changelog** — Public bilingual pre-1.0 development changelog timeline.
 
 ## 2. Privacy & Security Guarantees
 
 - **VZ Mail Zero-Retention Pop-and-Purge**: Inbound emails received via Cloudflare Email Routing are held transiently in Cloudflare KV (\`MAIL_TRANSIT_KV\`, max 72-hour TTL). As soon as the user's browser saves the message to local IndexedDB and calls \`POST /api/mail/ack\`, the server deletes the transit packet immediately. No permanent server-side mailbox exists.
-- **Client-Side Encrypted Backups**: Users can export/restore local mail history into AES-GCM encrypted \`.vzvault\` files without exposing passphrases to the server.
+- **Client-Side Encrypted Backups**: Users can export/restore local mail history into AES-GCM encrypted \`.anf\`, \`.cvp\`, or \`.enc\` vault archives without exposing passphrases to the server.
 - **User Bio Opt-In Indexing (Meta-Style Controls)**: Every \`$USERNAME.imy.li\` profile defaults to \`none\` (\`noindex, nofollow, noai, noimageai\`). Owners can choose one of four explicit modes enforced at the edge via \`robots.txt\`, \`X-Robots-Tag\`, and HTML \`<meta name="robots">\`:
   - \`none\`: Blocked from both search engines and AI crawlers (default).
   - \`search_only\`: Indexed by search engines, blocked for AI crawlers (\`noai, noimageai\`).
   - \`ai_only\`: Accessible to AI search/crawler agents, blocked from traditional search engine indexes.
   - \`search_and_ai\`: Opted in for both search engines and AI crawlers.
 
-## 3. Official Releases (${CHANGELOG_VERSION})
+## 3. Pre-1.0 Development Releases (v0.1.0-alpha → ${CHANGELOG_VERSION})
 
 ${releaseSections}
 

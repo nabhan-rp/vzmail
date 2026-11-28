@@ -1,5 +1,10 @@
 export type ChangelogServiceId = 'vz-mail' | 'vz-links';
-export type ChangelogCategoryId = 'core' | 'privacy_security' | 'ux_tools' | 'seo_infra';
+export type ChangelogCategoryId =
+  | 'core'
+  | 'privacy_security'
+  | 'ux_tools'
+  | 'seo_infra';
+export type ChangelogReleaseStage = 'alpha' | 'beta' | 'dev';
 
 export interface BilingualText {
   id: string;
@@ -15,19 +20,42 @@ export interface ChangelogItem {
 
 export interface ChangelogServiceRelease {
   serviceId: ChangelogServiceId;
+  affectedServices: readonly ChangelogServiceId[];
   serviceName: string;
   domains: string[];
   version: string;
+  stage: ChangelogReleaseStage;
   releaseDate: string; // ISO YYYY-MM-DD
   codename: BilingualText;
   summary: BilingualText;
   highlights: ChangelogItem[];
 }
 
-export const CHANGELOG_VERSION = 'v1.1.6';
+export const CHANGELOG_VERSION = 'v0.9.0-dev';
 export const CHANGELOG_RELEASE_DATE = '2026-11-28';
 
-export const CHANGELOG_CATEGORY_LABELS: Record<ChangelogCategoryId, BilingualText> = {
+export const CHANGELOG_STAGE_LABELS: Record<
+  ChangelogReleaseStage,
+  BilingualText
+> = {
+  dev: {
+    id: 'Pengembangan (Dev)',
+    en: 'Active Dev',
+  },
+  beta: {
+    id: 'Tahap Beta',
+    en: 'Beta Stage',
+  },
+  alpha: {
+    id: 'Tahap Alpha',
+    en: 'Alpha Stage',
+  },
+};
+
+export const CHANGELOG_CATEGORY_LABELS: Record<
+  ChangelogCategoryId,
+  BilingualText
+> = {
   core: {
     id: 'Fitur Utama',
     en: 'Core Features',
@@ -49,9 +77,78 @@ export const CHANGELOG_CATEGORY_LABELS: Record<ChangelogCategoryId, BilingualTex
 export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
   {
     serviceId: 'vz-links',
+    affectedServices: ['vz-links', 'vz-mail'],
+    serviceName: 'VZ Links & VZ Mail',
+    domains: ['links.vz.gay', 'imy.li', 'www.imy.li', 'mail.vz.gay'],
+    version: '0.9.0-dev',
+    stage: 'dev',
+    releaseDate: '2026-11-28',
+    codename: {
+      id: 'Edit Shortlink Khusus SSO (Slug, URL & Label) & Timeline Changelog Prarilis',
+      en: 'SSO Shortlink Editing (Slug, URL & Label) & Pre-1.0 Changelog Timeline',
+    },
+    summary: {
+      id: 'Menghadirkan penyuntingan shortlink pasca-pembuatan khusus pengguna login Auth0 SSO dengan sinkronisasi atomik D1 & KV, serta merapikan seluruh riwayat pengembangan VZ Mail dan VZ Links ke timeline prarilis bertahap (v0.1.0-alpha hingga v0.9.0-dev) yang kini mudah diakses dari menu drawer HP dan footer dinamis.',
+      en: 'Introduces post-creation shortlink editing exclusively for Auth0 SSO users with atomic D1 & KV sync, and reorganizes the complete VZ Mail & VZ Links development history into a chronological pre-1.0 timeline (v0.1.0-alpha through v0.9.0-dev) accessible from the mobile drawer and dynamic footer.',
+    },
+    highlights: [
+      {
+        id: 'v090-sso-edit-modal',
+        category: 'core',
+        title: {
+          id: 'Modal Edit Shortlink Ringkas dengan Pratinjau Link Langsung',
+          en: 'Compact Shortlink Edit Modal with Live Link Preview',
+        },
+        description: {
+          id: 'Pengguna yang login SSO dapat menyunting slug kustom (2–48 karakter), URL tujuan, dan label catatan sekaligus dengan pratinjau real-time https://imy.li/s/<slug-baru> serta mempertahankan seluruh jumlah klik nyata.',
+          en: 'Authenticated SSO users can edit custom slugs (2–48 chars), destination URLs, and notes in one modal with live https://imy.li/s/<new-slug> preview while preserving real click counts.',
+        },
+      },
+      {
+        id: 'v090-old-slug-policy',
+        category: 'ux_tools',
+        title: {
+          id: 'Pilihan Nasib Slug Lama (Nonaktifkan atau Alias Redirect)',
+          en: 'Per-Edit Old Slug Policy (Deactivate or Keep Redirect Alias)',
+        },
+        description: {
+          id: 'Setiap kali slug diubah, pengguna dapat memilih menonaktifkan slug lama (langsung terhapus di backend D1/KV) atau mempertahankannya sebagai alias redirect aktif menuju URL tujuan terbaru agar tautan lama yang sudah dibagikan tidak mati.',
+          en: 'Whenever a slug changes, users can choose to deactivate the old slug (immediately deleted from backend D1/KV) or keep it as a live redirect alias pointing to the latest destination URL.',
+        },
+      },
+      {
+        id: 'v090-backend-patch-auth',
+        category: 'privacy_security',
+        title: {
+          id: 'Endpoint PATCH Atomik D1/KV & Verifikasi Kepemilikan SSO Ketat',
+          en: 'Atomic D1/KV PATCH Endpoint & Strict SSO Ownership Check',
+        },
+        description: {
+          id: 'Endpoint PATCH /api/links/shortlinks/:slug dilindungi penuh oleh JWT Auth0 RS256, menolak penyuntingan tautan tamu atau milik akun lain (403), mencegah bentrok slug (409), dan memperbarui D1 secara atomik sekaligus membersihkan salinan KV lama.',
+          en: 'PATCH /api/links/shortlinks/:slug is strictly protected by Auth0 RS256 JWT verification, blocks editing guest or other accounts’ links (403), prevents slug collisions (409), and atomically updates D1 while clearing stale KV entries.',
+        },
+      },
+      {
+        id: 'v090-changelog-timeline-discovery',
+        category: 'ux_tools',
+        title: {
+          id: 'Timeline Changelog Prarilis Bertahap + Akses Menu Drawer HP & Footer Dinamis',
+          en: 'Progressive Pre-1.0 Changelog Timeline + Mobile Drawer & Dynamic Footer Access',
+        },
+        description: {
+          id: 'Seluruh riwayat perubahan sejak awal disusun dalam timeline kronologis v0.1.0-alpha hingga v0.9.0-dev dengan filter ganda layanan & kategori, dilengkapi tautan Changelog langsung di menu drawer HP dan footer dinamis tanpa membebani header desktop.',
+          en: 'Maps the complete project history into a chronological v0.1.0-alpha to v0.9.0-dev timeline with dual service & category filters, paired with direct Changelog access in the mobile drawer and dynamic footer while keeping the desktop header uncluttered.',
+        },
+      },
+    ],
+  },
+  {
+    serviceId: 'vz-links',
+    affectedServices: ['vz-links', 'vz-mail'],
     serviceName: 'VZ Links & VZ Ecosystem API',
     domains: ['imy.li', 'www.imy.li', 'links.vz.gay', 'mail.vz.gay', '*.vz.gay'],
-    version: '1.1.6',
+    version: '0.8.0-dev',
+    stage: 'dev',
     releaseDate: '2026-11-28',
     codename: {
       id: 'Pengerasan Verifikasi Cloudflare Turnstile (siteverify) & Standar Spin',
@@ -63,7 +160,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
     },
     highlights: [
       {
-        id: 'v116-valid-url-debounce',
+        id: 'v080-valid-url-debounce',
         category: 'ux_tools',
         title: {
           id: 'Pemicu Widget Berbasis URL Valid (Debounce 450 ms)',
@@ -75,7 +172,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
         },
       },
       {
-        id: 'v116-mandatory-siteverify-mail-exclusion',
+        id: 'v080-mandatory-siteverify-mail-exclusion',
         category: 'privacy_security',
         title: {
           id: 'Wajib siteverify untuk Token Klien & Penutupan Bypass Anonim mail.vz.gay',
@@ -87,7 +184,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
         },
       },
       {
-        id: 'v116-spin-env-observability',
+        id: 'v080-spin-env-observability',
         category: 'seo_infra',
         title: {
           id: 'Standar Cloudflare Spin (TURNSTILE_SECRET, TURNSTILE_HOSTNAMES & Log Terstruktur)',
@@ -102,9 +199,17 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
   },
   {
     serviceId: 'vz-links',
+    affectedServices: ['vz-links'],
     serviceName: 'VZ Links & VZ Ecosystem API',
-    domains: ['links.vz.gay', 'imy.li', 'builder.vz.gay', 'desk.vz.gay', 'files.vz.gay'],
-    version: '1.1.5',
+    domains: [
+      'links.vz.gay',
+      'imy.li',
+      'builder.vz.gay',
+      'desk.vz.gay',
+      'files.vz.gay',
+    ],
+    version: '0.7.0-dev',
+    stage: 'dev',
     releaseDate: '2026-11-28',
     codename: {
       id: 'Proteksi Anti-Bot Cloudflare Turnstile & Bypass Hibrida Ekosistem VZ',
@@ -116,7 +221,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
     },
     highlights: [
       {
-        id: 'v115-turnstile-ondemand',
+        id: 'v070-turnstile-ondemand',
         category: 'privacy_security',
         title: {
           id: 'Cloudflare Turnstile On-Demand untuk Shortlink Publik',
@@ -128,19 +233,19 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
         },
       },
       {
-        id: 'v115-vz-ecosystem-hybrid-bypass',
+        id: 'v070-vz-ecosystem-hybrid-bypass',
         category: 'seo_infra',
         title: {
           id: 'Bypass Hibrida & CORS Terverifikasi untuk Ekosistem VZ',
           en: 'Hybrid Bypass & Allowlisted CORS for VZ Ecosystem Apps',
         },
         description: {
-          id: 'Mendukung 3 jalur bypass resmi tanpa mengganggu pengguna layanan saudara: token Auth0 SSO, API Key konstan-waktu (X-VZ-Ecosystem-Key), serta Origin HTTPS terverifikasi khusus untuk builder.vz.gay (*.builder.vz.gay), desk.vz.gay (*.desk.vz.gay), files.vz.gay (*.files.vz.gay), dan mail.vz.gay.',
-          en: 'Supports 3 trusted bypass paths so sibling apps are never blocked: verified Auth0 SSO JWT, constant-time API Key (X-VZ-Ecosystem-Key), and scoped HTTPS Origin allowlist covering builder.vz.gay (*.builder.vz.gay), desk.vz.gay (*.desk.vz.gay), files.vz.gay (*.files.vz.gay), and mail.vz.gay.',
+          id: 'Mendukung 3 jalur bypass resmi tanpa mengganggu pengguna layanan saudara: token Auth0 SSO, API Key konstan-waktu (X-VZ-Ecosystem-Key), serta Origin HTTPS terverifikasi khusus untuk builder.vz.gay (*.builder.vz.gay), desk.vz.gay (*.desk.vz.gay), files.vz.gay (*.files.vz.gay), serta domain saudara VZ.',
+          en: 'Supports 3 trusted bypass paths so sibling apps are never blocked: verified Auth0 SSO JWT, constant-time API Key (X-VZ-Ecosystem-Key), and scoped HTTPS Origin allowlist covering builder.vz.gay (*.builder.vz.gay), desk.vz.gay (*.desk.vz.gay), files.vz.gay (*.files.vz.gay), and trusted VZ hosts.',
         },
       },
       {
-        id: 'v115-csp-ratelimit-hardening',
+        id: 'v070-csp-ratelimit-hardening',
         category: 'privacy_security',
         title: {
           id: 'Pengerasan CSP Edge & Rate-Limit Burst Origin',
@@ -155,9 +260,11 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
   },
   {
     serviceId: 'vz-mail',
+    affectedServices: ['vz-mail', 'vz-links'],
     serviceName: 'VZ Mail & VZ Links',
     domains: ['mail.vz.gay', 'links.vz.gay', '*.imy.li'],
-    version: '1.1.4',
+    version: '0.6.0-dev',
+    stage: 'dev',
     releaseDate: '2026-11-27',
     codename: {
       id: 'Biometrik & Passkey VZ Vault (Standar CipherVault Pro · WebAuthn + PRF)',
@@ -169,7 +276,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
     },
     highlights: [
       {
-        id: 'vault-passkey-multi-enroll-v114',
+        id: 'vault-passkey-multi-enroll-v060',
         category: 'privacy_security',
         title: {
           id: 'Pendaftaran Multi-Passkey & Biometrik Perangkat (100% Client-Side)',
@@ -181,7 +288,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
         },
       },
       {
-        id: 'vault-passkey-unlock-and-pin-fallback-v114',
+        id: 'vault-passkey-unlock-and-pin-fallback-v060',
         category: 'core',
         title: {
           id: 'Buka Vault & Gerbang Aksi Sensitif via Biometrik + Cadangan PIN',
@@ -193,7 +300,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
         },
       },
       {
-        id: 'vault-webauthn-prf-crypto-v114',
+        id: 'vault-webauthn-prf-crypto-v060',
         category: 'ux_tools',
         title: {
           id: 'Brankas Frasa Biometrik & Enkripsi Backup Langsung WebAuthn PRF',
@@ -208,21 +315,23 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
   },
   {
     serviceId: 'vz-mail',
+    affectedServices: ['vz-mail', 'vz-links'],
     serviceName: 'VZ Mail & VZ Links',
     domains: ['mail.vz.gay', 'links.vz.gay', '*.imy.li'],
-    version: '1.1.3',
+    version: '0.5.0-beta',
+    stage: 'beta',
     releaseDate: '2026-11-27',
     codename: {
       id: 'Deliverability Anti-Spam, Diagnostik Inbound, Navigasi 2 Hamburger Mobile & Background Sync Hemat RAM',
       en: 'Anti-Spam Deliverability, Inbound Diagnostics, Dual-Hamburger Mobile Nav & Low-RAM Background Sync',
     },
     summary: {
-      id: 'Pembaruan besar untuk kualitas pengiriman email (format HTML Minimalis / Plain-Text / Kartu + cek SPF/DKIM/DMARC), perbaikan fail-closed email masuk Cloudflare, penghapusan bug hantu (1) pada Pull & Purge, navigasi mobile 2 hamburger yang intuitif, penguncian overflow toast alamat panjang, serta Background Sync hemat RAM & Notifikasi opt-in.',
-      en: 'Major upgrade for outbound email deliverability (Minimal HTML / Plain-Text / Rich Card selector + live SPF/DKIM/DMARC check), fail-closed Cloudflare inbound routing, elimination of ghost (1) Pull & Purge badges, dual-hamburger mobile navigation, mobile overflow clamping for long email toasts, and opt-in Low-RAM Background Sync + Notifications.',
+      id: 'Pembaruan besar tahap beta untuk kualitas pengiriman email (format HTML Minimalis / Plain-Text / Kartu + cek SPF/DKIM/DMARC), perbaikan fail-closed email masuk Cloudflare, penghapusan bug hantu (1) pada Pull & Purge, navigasi mobile 2 hamburger yang intuitif, penguncian overflow toast alamat panjang, serta Background Sync hemat RAM & Notifikasi opt-in.',
+      en: 'Major beta upgrade for outbound email deliverability (Minimal HTML / Plain-Text / Rich Card selector + live SPF/DKIM/DMARC check), fail-closed Cloudflare inbound routing, elimination of ghost (1) Pull & Purge badges, dual-hamburger mobile navigation, mobile overflow clamping for long email toasts, and opt-in Low-RAM Background Sync + Notifications.',
     },
     highlights: [
       {
-        id: 'outbound-deliverability-formats-v113',
+        id: 'outbound-deliverability-formats-v050',
         category: 'core',
         title: {
           id: 'Pilihan Format Kirim Anti-Spam + Header Bersih & Cek DNS SPF/DKIM/DMARC',
@@ -234,7 +343,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
         },
       },
       {
-        id: 'inbound-fail-closed-and-diagnostics-v113',
+        id: 'inbound-fail-closed-and-diagnostics-v050',
         category: 'seo_infra',
         title: {
           id: 'Inbound Fail-Closed SMTP 451 & Panel Diagnostik Mail',
@@ -246,7 +355,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
         },
       },
       {
-        id: 'pull-purge-ghost-one-fix-v113',
+        id: 'pull-purge-ghost-one-fix-v050',
         category: 'privacy_security',
         title: {
           id: 'Perbaikan Bug Hantu (1) Pull & Purge dengan Tombstone 90 Detik',
@@ -258,7 +367,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
         },
       },
       {
-        id: 'dual-hamburger-and-mobile-clamp-v113',
+        id: 'dual-hamburger-and-mobile-clamp-v050',
         category: 'ux_tools',
         title: {
           id: 'Navigasi Mobile 2 Hamburger & Anti-Overflow Toast Alamat Panjang',
@@ -270,7 +379,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
         },
       },
       {
-        id: 'low-ram-bg-sync-and-notifications-v113',
+        id: 'low-ram-bg-sync-and-notifications-v050',
         category: 'ux_tools',
         title: {
           id: 'Background Sync Hemat RAM (Opt-In) & Notifikasi Terkendali',
@@ -285,17 +394,19 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
   },
   {
     serviceId: 'vz-mail',
+    affectedServices: ['vz-mail', 'vz-links'],
     serviceName: 'VZ Mail & VZ Links',
     domains: ['mail.vz.gay', 'links.vz.gay', '*.imy.li'],
-    version: '1.1.2',
+    version: '0.4.0-beta',
+    stage: 'beta',
     releaseDate: '2026-11-27',
     codename: {
       id: 'Optimasi Safe-Area Multi-UA, Panduan SSO In-App Browser, Middleware Auth0 JWT & Kunci PIN VZ Vault',
       en: 'Multi-UA Safe-Area Optimization, Inline In-App SSO Guidance, Auth0 JWT Middleware & VZ Vault PIN Lock',
     },
     summary: {
-      id: 'Menyempurnakan responsivitas & safe-area di perangkat mobile (notch, Dynamic Island, home indicator, orientasi lanskap), menambahkan panduan SSO kontekstual langsung di dekat tombol Login untuk In-App Browser, memusatkan middleware verifikasi Auth0 JWT di Worker & Express, serta menghadirkan 3 mode opt-in Kunci PIN VZ Vault.',
-      en: 'Refines mobile safe-area responsiveness (notch, Dynamic Island, home indicator, landscape), adds inline SSO guidance next to Sign-In buttons for In-App WebViews, centralizes Auth0 JWT verification middleware in Cloudflare Worker & Express, and introduces 3 opt-in VZ Vault PIN Lock modes.',
+      id: 'Memasuki tahap beta dengan penyempurnaan responsivitas & safe-area di perangkat mobile (notch, Dynamic Island, home indicator, orientasi lanskap), panduan SSO kontekstual langsung di dekat tombol Login untuk In-App Browser, pemusatan middleware verifikasi Auth0 JWT di Worker & Express, serta 3 mode opt-in Kunci PIN VZ Vault.',
+      en: 'Enters beta with mobile safe-area responsiveness (notch, Dynamic Island, home indicator, landscape), inline SSO guidance next to Sign-In buttons for In-App WebViews, centralized Auth0 JWT verification middleware in Cloudflare Worker & Express, and 3 opt-in VZ Vault PIN Lock modes.',
     },
     highlights: [
       {
@@ -338,9 +449,11 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
   },
   {
     serviceId: 'vz-mail',
+    affectedServices: ['vz-mail'],
     serviceName: 'VZ Mail',
     domains: ['mail.vz.gay', '@imy.li', 'files.vz.gay'],
-    version: '1.1.1',
+    version: '0.3.0-alpha',
+    stage: 'alpha',
     releaseDate: '2026-11-27',
     codename: {
       id: 'Pengerasan Keamanan API Auth0 JWT, Stabilitas Edge & Kompatibilitas Multi-Browser/OS',
@@ -391,9 +504,11 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
   },
   {
     serviceId: 'vz-links',
+    affectedServices: ['vz-links'],
     serviceName: 'VZ Links',
     domains: ['links.vz.gay', '*.imy.li', 'imy.li/s/'],
-    version: '1.1.1',
+    version: '0.3.0-alpha',
+    stage: 'alpha',
     releaseDate: '2026-11-27',
     codename: {
       id: 'Proteksi Kepemilikan Shortlink/Bio, Pemblokiran SVG Berbahaya & Optimasi Mobile Multi-OS',
@@ -432,9 +547,11 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
   },
   {
     serviceId: 'vz-mail',
+    affectedServices: ['vz-mail'],
     serviceName: 'VZ Mail',
     domains: ['mail.vz.gay', '@imy.li', 'files.vz.gay', 'chipervaultro.app.vz.gay'],
-    version: '1.1.0',
+    version: '0.2.0-alpha',
+    stage: 'alpha',
     releaseDate: '2026-11-26',
     codename: {
       id: 'Standar Enkripsi Ekosistem VZ (.anf & CipherVault Pro) + VZ Files Cloud (>10 MB)',
@@ -497,17 +614,19 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
   },
   {
     serviceId: 'vz-mail',
+    affectedServices: ['vz-mail'],
     serviceName: 'VZ Mail',
     domains: ['mail.vz.gay', '@imy.li'],
-    version: '1.0.0',
+    version: '0.1.0-alpha',
+    stage: 'alpha',
     releaseDate: '2026-11-25',
     codename: {
-      id: 'Rilis Perdana Zero-Retention Local-First',
-      en: 'Initial Zero-Retention Local-First Release',
+      id: 'Pondasi Awal Zero-Retention Local-First',
+      en: 'Initial Zero-Retention Local-First Foundation',
     },
     summary: {
-      id: 'Rilis stabil pertama layanan email percakapan lokal privat (@imy.li) tanpa penyimpanan kotak surat permanen di server, ditenagai Cloudflare Email Routing, IndexedDB terenkripsi perangkat, dan integrasi SSO Universal vz.gay.',
-      en: 'First stable release of local-first private conversational email (@imy.li) with zero permanent server mailbox storage, powered by Cloudflare Email Routing, device-local IndexedDB, and vz.gay Universal SSO.',
+      id: 'Rilis awal tahap alpha layanan email percakapan lokal privat (@imy.li) tanpa penyimpanan kotak surat permanen di server, ditenagai Cloudflare Email Routing, IndexedDB terenkripsi perangkat, dan integrasi SSO Universal vz.gay.',
+      en: 'Initial alpha release of local-first private conversational email (@imy.li) with zero permanent server mailbox storage, powered by Cloudflare Email Routing, device-local IndexedDB, and vz.gay Universal SSO.',
     },
     highlights: [
       {
@@ -542,7 +661,7 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
           en: 'QR Codes for Primary Address & All Aliases (mailto: & vCard)',
         },
         description: {
-          id: 'Setiap alamat utama @imy.li maupun alias (+ dan .) kini dapat langsung diubah menjadi QR Code mode mailto: (langsung buka aplikasi email) atau vCard 3.0 (simpan kontak instan) dengan unduhan PNG/SVG.',
+          id: 'Setiap alamat utama @imy.li maupun alias (+ dan .) dapat langsung diubah menjadi QR Code mode mailto: (langsung buka aplikasi email) atau vCard 3.0 (simpan kontak instan) dengan unduhan PNG/SVG.',
           en: 'Every primary @imy.li address and (+ / .) alias can generate instant QR codes in mailto: mode (open email composer) or vCard 3.0 mode (save contact card) with HD PNG/SVG download.',
         },
       },
@@ -574,17 +693,19 @@ export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
   },
   {
     serviceId: 'vz-links',
+    affectedServices: ['vz-links'],
     serviceName: 'VZ Links',
     domains: ['links.vz.gay', '*.imy.li', 'imy.li/s/'],
-    version: '1.0.0',
+    version: '0.1.0-alpha',
+    stage: 'alpha',
     releaseDate: '2026-11-25',
     codename: {
-      id: 'Rilis Perdana Multi-Page Bio, Shortlink & QR Studio',
-      en: 'Initial Multi-Page Bio, Shortlink & QR Studio Release',
+      id: 'Pondasi Awal Multi-Page Bio, Shortlink & QR Studio',
+      en: 'Initial Multi-Page Bio, Shortlink & QR Studio Foundation',
     },
     summary: {
-      id: 'Rilis stabil pertama layanan Link-in-Bio multi-halaman ($USERNAME.imy.li dan /$PAGE) berpasangan 1:1 dengan akun VZ Mail, pemendek URL mandiri imy.li/s/, kustomisasi QR Code penuh, serta kontrol privasi indeksasi mesin pencari & AI bergaya Meta.',
-      en: 'First stable release of multi-page Link-in-Bio ($USERNAME.imy.li and /$PAGE) paired 1:1 with VZ Mail handles, standalone imy.li/s/ URL shortener, customizable QR studio, and Meta-style opt-in Search/AI indexing controls.',
+      id: 'Rilis awal tahap alpha layanan Link-in-Bio multi-halaman ($USERNAME.imy.li dan /$PAGE) berpasangan 1:1 dengan akun VZ Mail, pemendek URL mandiri imy.li/s/, kustomisasi QR Code penuh, serta kontrol privasi indeksasi mesin pencari & AI bergaya Meta.',
+      en: 'Initial alpha release of multi-page Link-in-Bio ($USERNAME.imy.li and /$PAGE) paired 1:1 with VZ Mail handles, standalone imy.li/s/ URL shortener, customizable QR studio, and Meta-style opt-in Search/AI indexing controls.',
     },
     highlights: [
       {

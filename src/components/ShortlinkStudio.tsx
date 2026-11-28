@@ -5,6 +5,7 @@ import {
   ExternalLink,
   Link2,
   LogIn,
+  Pencil,
   QrCode,
   RefreshCw,
   Scissors,
@@ -18,6 +19,11 @@ import { apiFetch } from '../utils/apiAuthClient';
 import { copyTextSafely } from '../utils/clipboard';
 import type { ShortlinkRecord } from '../utils/linksModel';
 import { ConfirmActionModal } from './ConfirmActionModal';
+import {
+  EditShortlinkModal,
+  type EditShortlinkPayload,
+  type OldSlugAction,
+} from './EditShortlinkModal';
 import { InAppSsoNotice } from './InAppSsoNotice';
 import type { ActiveHostView } from './MailLinksTopBar';
 import { QrCodeModal } from './QrCodeModal';
@@ -128,6 +134,13 @@ export function ShortlinkStudio({
   const [copiedSlug, setCopiedSlug] = useState<string | null>(null);
   const [deletingSlug, setDeletingSlug] = useState<string | null>(null);
   const [pendingDeleteItem, setPendingDeleteItem] = useState<ShortlinkRecord | null>(null);
+  const [editingItem, setEditingItem] = useState<ShortlinkRecord | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editNotice, setEditNotice] = useState<{
+    text: string;
+    slug: string;
+  } | null>(null);
   const [qrTargetRecord, setQrTargetRecord] = useState<ShortlinkRecord | null>(null);
   const [deleteNotice, setDeleteNotice] = useState<{
     text: string;
@@ -349,6 +362,101 @@ export function ShortlinkStudio({
     }
   };
 
+  const handleSaveEdit = async (
+    original: ShortlinkRecord,
+    payload: EditShortlinkPayload
+  ) => {
+    setSavingEdit(true);
+    setEditError(null);
+    try {
+      const res = await apiFetch(
+        `/api/links/shortlinks/${encodeURIComponent(original.slug)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }
+      );
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        storageEngine?: string;
+        previousSlug?: string;
+        oldSlugAction?: OldSlugAction;
+        record?: ShortlinkRecord;
+        aliasRecord?: ShortlinkRecord | null;
+      } | null;
+
+      if (!res.ok || !data?.ok || !data.record) {
+        setEditError(
+          data?.error ||
+            (lang === 'id'
+              ? 'Gagal menyimpan perubahan shortlink. Coba lagi.'
+              : 'Failed to save shortlink changes. Please try again.')
+        );
+        return;
+      }
+
+      const updated = data.record;
+      const aliasRec = data.aliasRecord || null;
+      if (data.storageEngine) setStorageEngine(data.storageEngine);
+
+      setItems((prev) => {
+        const next: ShortlinkRecord[] = [];
+        let replaced = false;
+        for (const item of prev) {
+          if (item.slug === original.slug) {
+            next.push(updated);
+            if (aliasRec && aliasRec.slug !== updated.slug) {
+              next.push(aliasRec);
+            }
+            replaced = true;
+          } else if (
+            item.slug !== updated.slug &&
+            (!aliasRec || item.slug !== aliasRec.slug)
+          ) {
+            next.push(item);
+          }
+        }
+        if (!replaced) {
+          next.unshift(updated);
+          if (aliasRec && aliasRec.slug !== updated.slug) {
+            next.push(aliasRec);
+          }
+        }
+        return next;
+      });
+
+      if (createdRecord?.slug === original.slug) {
+        setCreatedRecord(updated);
+      }
+
+      const slugChanged = updated.slug !== original.slug;
+      const noticeText = slugChanged
+        ? data.oldSlugAction === 'keep_alias'
+          ? lang === 'id'
+            ? `Shortlink diperbarui ke ${domain}/s/${updated.slug}. Slug lama ${domain}/s/${original.slug} tetap aktif sebagai alias redirect.`
+            : `Shortlink updated to ${domain}/s/${updated.slug}. Previous slug ${domain}/s/${original.slug} remains active as a redirect alias.`
+          : lang === 'id'
+            ? `Slug berhasil diubah dari /s/${original.slug} menjadi ${domain}/s/${updated.slug}. Slug lama telah dinonaktifkan di backend.`
+            : `Slug renamed from /s/${original.slug} to ${domain}/s/${updated.slug}. The previous slug has been deactivated on the backend.`
+        : lang === 'id'
+          ? `Perubahan untuk ${domain}/s/${updated.slug} telah disimpan di backend.`
+          : `Changes for ${domain}/s/${updated.slug} have been saved on the backend.`;
+
+      setEditNotice({ text: noticeText, slug: updated.slug });
+      setEditingItem(null);
+    } catch {
+      setEditError(
+        lang === 'id'
+          ? 'Koneksi ke server edge gagal saat menyimpan perubahan.'
+          : 'Failed to reach the edge server while saving changes.'
+      );
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return items;
@@ -567,6 +675,20 @@ export function ShortlinkStudio({
                 <span>QR Code</span>
               </button>
 
+              {session.isAuthenticated && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditError(null);
+                    setEditingItem(createdRecord);
+                  }}
+                  className="min-h-[38px] px-3 py-2 text-xs font-medium text-slate-800 dark:text-slate-100 bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A303E] hover:bg-slate-100 dark:hover:bg-[#222836] rounded-lg inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  <span>{lang === 'id' ? 'Edit Slug' : 'Edit Slug'}</span>
+                </button>
+              )}
+
               <a
                 href={`/s/${createdRecord.slug}`}
                 target="_blank"
@@ -605,6 +727,37 @@ export function ShortlinkStudio({
 
       {/* Shortlinks History & Real Click Stats */}
       <section className="bg-white dark:bg-[#13161C] border border-slate-200 dark:border-[#232732] rounded-xl overflow-hidden">
+        {editNotice && (
+          <div className="px-5 py-3 bg-emerald-50/80 dark:bg-emerald-950/30 border-b border-emerald-200 dark:border-emerald-900/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-emerald-900 dark:text-emerald-200">
+            <span className="flex items-center gap-1.5">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              <span>{editNotice.text}</span>
+            </span>
+            <div className="flex items-center gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleCopy(editNotice.slug)}
+                className="font-semibold text-emerald-700 dark:text-emerald-300 hover:underline cursor-pointer"
+              >
+                {copiedSlug === editNotice.slug
+                  ? lang === 'id'
+                    ? 'Tersalin'
+                    : 'Copied'
+                  : lang === 'id'
+                    ? 'Salin Link Baru'
+                    : 'Copy New Link'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditNotice(null)}
+                className="text-slate-500 hover:text-slate-900 dark:hover:text-white cursor-pointer"
+              >
+                {lang === 'id' ? 'Tutup' : 'Dismiss'}
+              </button>
+            </div>
+          </div>
+        )}
+
         {deleteNotice && (
           <div className="px-5 py-3 bg-amber-50/80 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-900/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-amber-900 dark:text-amber-200">
             <span>{deleteNotice.text}</span>
@@ -774,6 +927,24 @@ export function ShortlinkStudio({
                             </>
                           )}
                         </button>
+                        {session.isAuthenticated && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditError(null);
+                              setEditingItem(item);
+                            }}
+                            aria-label={`Edit ${domain}/s/${item.slug}`}
+                            title={
+                              lang === 'id'
+                                ? 'Edit Slug, URL Tujuan & Label'
+                                : 'Edit Slug, Destination URL & Label'
+                            }
+                            className="p-1.5 text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 rounded-md hover:bg-slate-100 dark:hover:bg-[#1C212C] transition-colors cursor-pointer"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => setQrTargetRecord(item)}
@@ -810,6 +981,23 @@ export function ShortlinkStudio({
           </div>
         )}
       </section>
+
+      {/* SSO Shortlink Edit Modal */}
+      <EditShortlinkModal
+        isOpen={Boolean(editingItem)}
+        lang={lang}
+        domain={domain}
+        item={editingItem}
+        saving={savingEdit}
+        error={editError}
+        onClose={() => {
+          if (!savingEdit) {
+            setEditingItem(null);
+            setEditError(null);
+          }
+        }}
+        onSave={handleSaveEdit}
+      />
 
       {/* Simple Yes/Cancel Confirmation Modal (No typing required for shortlinks) */}
       <ConfirmActionModal

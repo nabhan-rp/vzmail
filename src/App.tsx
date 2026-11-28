@@ -9,6 +9,7 @@ import {
   type ActiveHostView,
 } from './components/MailLinksTopBar';
 import { MobileBottomNav } from './components/MobileBottomNav';
+import { CHANGELOG_VERSION } from './data/changelogReleases';
 import { useLanguage } from './hooks/useLanguage';
 import { usePwaInstall } from './hooks/usePwaInstall';
 import { useSsoSession } from './hooks/useSsoSession';
@@ -565,9 +566,16 @@ export default function App() {
                     e.preventDefault();
                     handleSelectHost('changelog');
                   }}
-                  className="hover:text-slate-900 dark:hover:text-white transition-colors font-medium"
+                  className={`transition-colors font-medium whitespace-nowrap ${
+                    activeHost === 'changelog'
+                      ? 'text-blue-600 dark:text-blue-400 font-semibold'
+                      : 'hover:text-slate-900 dark:hover:text-white'
+                  }`}
                 >
-                  {lang === 'id' ? 'Changelog v1.1.2' : 'Changelog v1.1.2'}
+                  <span>Changelog </span>
+                  <span className="font-mono tabular-nums">
+                    {CHANGELOG_VERSION}
+                  </span>
                 </a>
                 <a
                   href="/terms"

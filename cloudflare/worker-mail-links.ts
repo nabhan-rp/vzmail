@@ -1459,6 +1459,160 @@ async function saveShortlinkRecord(env: WorkerEnv, record: ShortlinkRecord): Pro
   }
 }
 
+async function updateShortlinkRecord(
+  env: WorkerEnv,
+  existing: ShortlinkRecord,
+  nextSlug: string,
+  nextTargetUrl: string,
+  nextTitle: string,
+  oldSlugAction: 'disable' | 'keep_alias'
+): Promise<
+  | { ok: true; record: ShortlinkRecord; aliasRecord: ShortlinkRecord | null }
+  | { ok: false; conflict: boolean }
+> {
+  const slugChanged = nextSlug !== existing.slug;
+  const updatedRecord: ShortlinkRecord = {
+    slug: nextSlug,
+    ownerUser: existing.ownerUser,
+    title: nextTitle,
+    targetUrl: nextTargetUrl,
+    isCustomSlug: slugChanged ? true : existing.isCustomSlug,
+    clicks: existing.clicks,
+    createdAt: existing.createdAt,
+    lastClickedAt: existing.lastClickedAt,
+  };
+
+  const aliasRecord: ShortlinkRecord | null =
+    slugChanged && oldSlugAction === 'keep_alias'
+      ? {
+          slug: existing.slug,
+          ownerUser: existing.ownerUser,
+          title: stripHeaderInjection(
+            `Alias → /s/${nextSlug}${nextTitle ? ` (${nextTitle})` : ''}`,
+            120
+          ),
+          targetUrl: nextTargetUrl,
+          isCustomSlug: existing.isCustomSlug,
+          clicks: 0,
+          createdAt: existing.createdAt,
+          lastClickedAt: null,
+        }
+      : null;
+
+  let persistedToD1 = false;
+  if (env.LINKS_DB && (await ensureLinksD1Schema(env))) {
+    try {
+      if (!slugChanged) {
+        await env.LINKS_DB.prepare(
+          'INSERT INTO shortlinks (slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(slug) DO UPDATE SET title = excluded.title, target_url = excluded.target_url'
+        )
+          .bind(
+            updatedRecord.slug,
+            updatedRecord.ownerUser,
+            updatedRecord.title,
+            updatedRecord.targetUrl,
+            updatedRecord.isCustomSlug ? 1 : 0,
+            updatedRecord.clicks,
+            updatedRecord.createdAt,
+            updatedRecord.lastClickedAt
+          )
+          .run();
+      } else if (aliasRecord) {
+        await env.LINKS_DB.batch([
+          env.LINKS_DB.prepare(
+            'INSERT INTO shortlinks (slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(
+            updatedRecord.slug,
+            updatedRecord.ownerUser,
+            updatedRecord.title,
+            updatedRecord.targetUrl,
+            1,
+            updatedRecord.clicks,
+            updatedRecord.createdAt,
+            updatedRecord.lastClickedAt
+          ),
+          env.LINKS_DB.prepare(
+            'INSERT INTO shortlinks (slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at) VALUES (?, ?, ?, ?, ?, 0, ?, NULL) ON CONFLICT(slug) DO UPDATE SET title = excluded.title, target_url = excluded.target_url, clicks = 0, last_clicked_at = NULL'
+          ).bind(
+            aliasRecord.slug,
+            aliasRecord.ownerUser,
+            aliasRecord.title,
+            aliasRecord.targetUrl,
+            aliasRecord.isCustomSlug ? 1 : 0,
+            aliasRecord.createdAt
+          ),
+        ]);
+      } else {
+        await env.LINKS_DB.batch([
+          env.LINKS_DB.prepare(
+            'INSERT INTO shortlinks (slug, owner_user, title, target_url, is_custom_slug, clicks, created_at, last_clicked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(
+            updatedRecord.slug,
+            updatedRecord.ownerUser,
+            updatedRecord.title,
+            updatedRecord.targetUrl,
+            1,
+            updatedRecord.clicks,
+            updatedRecord.createdAt,
+            updatedRecord.lastClickedAt
+          ),
+          env.LINKS_DB.prepare(
+            'DELETE FROM shortlinks WHERE slug = ? AND owner_user = ?'
+          ).bind(existing.slug, existing.ownerUser),
+        ]);
+      }
+      persistedToD1 = true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/unique/i.test(msg)) {
+        return { ok: false, conflict: true };
+      }
+      logError('d1_update_shortlink_failed', err, {
+        oldSlug: existing.slug,
+        newSlug: nextSlug,
+      });
+      if (!env.LINKS_KV) throw err;
+    }
+  }
+
+  if (env.LINKS_KV) {
+    if (persistedToD1) {
+      // Remove any stale legacy KV copies so D1 stays the single source of truth for redirects & listing
+      await env.LINKS_KV.delete(`short:${existing.slug}`);
+      if (slugChanged) {
+        await env.LINKS_KV.delete(`short:${updatedRecord.slug}`);
+      }
+      if (existing.ownerUser) {
+        const idx = await env.LINKS_KV.get<string[]>(`short_idx:${existing.ownerUser}`, 'json');
+        if (Array.isArray(idx) && idx.includes(existing.slug)) {
+          await env.LINKS_KV.put(
+            `short_idx:${existing.ownerUser}`,
+            JSON.stringify(idx.filter((s) => s !== existing.slug && s !== updatedRecord.slug))
+          );
+        }
+      }
+    } else {
+      await env.LINKS_KV.put(`short:${updatedRecord.slug}`, JSON.stringify(updatedRecord));
+      if (slugChanged && aliasRecord) {
+        await env.LINKS_KV.put(`short:${aliasRecord.slug}`, JSON.stringify(aliasRecord));
+      } else if (slugChanged) {
+        await env.LINKS_KV.delete(`short:${existing.slug}`);
+      }
+      if (existing.ownerUser) {
+        const idx = await env.LINKS_KV.get<string[]>(`short_idx:${existing.ownerUser}`, 'json');
+        const currentList = Array.isArray(idx) ? idx : [];
+        const filtered = currentList.filter(
+          (s) => s !== updatedRecord.slug && (aliasRecord ? true : s !== existing.slug)
+        );
+        const nextIdx = [updatedRecord.slug, ...filtered].slice(0, 200);
+        await env.LINKS_KV.put(`short_idx:${existing.ownerUser}`, JSON.stringify(nextIdx));
+      }
+    }
+  }
+
+  return { ok: true, record: updatedRecord, aliasRecord };
+}
+
 async function deleteShortlinkRecord(
   env: WorkerEnv,
   slug: string,
@@ -3706,6 +3860,133 @@ async function handleApiRequest(
       201,
       shortlinkCorsHeaders
     );
+  }
+
+  if (url.pathname.startsWith('/api/links/shortlinks/') && request.method === 'PATCH') {
+    const oldSlug = sanitizeSlug(url.pathname.replace('/api/links/shortlinks/', ''));
+    if (!oldSlug) {
+      return jsonResponse({ ok: false, error: 'Slug shortlink tidak valid.' }, 400);
+    }
+
+    const existing = await getShortlinkRecord(env, oldSlug);
+    if (!existing) {
+      return jsonResponse({ ok: false, error: 'Shortlink tidak ditemukan.' }, 404);
+    }
+
+    if (!existing.ownerUser) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: 'Shortlink tamu (non-SSO) tidak dapat diedit. Masuk dengan SSO untuk mengelola shortlink akun.',
+        },
+        403
+      );
+    }
+
+    const ownershipDenied = requireOwnership(existing.ownerUser);
+    if (ownershipDenied) return ownershipDenied;
+
+    const parsed = await readBoundedJson<{
+      newSlug?: string;
+      slug?: string;
+      targetUrl?: string;
+      title?: string;
+      oldSlugAction?: string;
+    }>(request);
+    if (!parsed.ok) {
+      return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
+    }
+
+    const rawNextSlug = String(parsed.data.newSlug ?? parsed.data.slug ?? oldSlug).trim();
+    const isSlugChanging = rawNextSlug.toLowerCase() !== oldSlug;
+    let finalSlug = oldSlug;
+
+    if (isSlugChanging) {
+      const cleanNextSlug = sanitizeShortlinkSlugInput(rawNextSlug);
+      if (!cleanNextSlug) {
+        return jsonResponse(
+          {
+            ok: false,
+            error:
+              'Slug baru harus 2–48 karakter (huruf kecil, angka, tanda hubung) dan bukan kata sistem.',
+          },
+          400
+        );
+      }
+      if (cleanNextSlug !== oldSlug) {
+        const conflict = await getShortlinkRecord(env, cleanNextSlug);
+        if (conflict) {
+          return jsonResponse(
+            {
+              ok: false,
+              error: `Slug "${cleanNextSlug}" sudah dipakai. Silakan pilih slug lain.`,
+            },
+            409
+          );
+        }
+      }
+      finalSlug = cleanNextSlug;
+    }
+
+    const rawTarget = String(parsed.data.targetUrl ?? existing.targetUrl).trim();
+    const withProtocol = /^https?:\/\//i.test(rawTarget) ? rawTarget : `https://${rawTarget}`;
+    const safeTarget = sanitizeExternalUrl(withProtocol, {
+      allowMailto: false,
+      blockPrivateHosts: true,
+    });
+    if (!safeTarget) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: 'URL tujuan tidak valid atau diblokir. Gunakan alamat https:// publik yang sah.',
+        },
+        400
+      );
+    }
+
+    const nextTitle =
+      parsed.data.title !== undefined
+        ? stripHeaderInjection(String(parsed.data.title || ''), 120)
+        : existing.title;
+
+    const oldSlugAction: 'disable' | 'keep_alias' =
+      parsed.data.oldSlugAction === 'keep_alias' ? 'keep_alias' : 'disable';
+
+    const updateResult = await updateShortlinkRecord(
+      env,
+      existing,
+      finalSlug,
+      safeTarget,
+      nextTitle,
+      oldSlugAction
+    );
+
+    if (!updateResult.ok) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: `Slug "${finalSlug}" sudah dipakai. Silakan pilih slug lain.`,
+        },
+        409
+      );
+    }
+
+    logInfo('shortlink_updated', {
+      oldSlug,
+      newSlug: updateResult.record.slug,
+      oldSlugAction: finalSlug !== oldSlug ? oldSlugAction : 'unchanged',
+      storageEngine: getLinksStorageEngine(env),
+    });
+
+    return jsonResponse({
+      ok: true,
+      storageEngine: getLinksStorageEngine(env),
+      previousSlug: oldSlug,
+      oldSlugAction: finalSlug !== oldSlug ? oldSlugAction : 'disable',
+      shortUrl: `https://${primaryDomain}/s/${updateResult.record.slug}`,
+      record: updateResult.record,
+      aliasRecord: updateResult.aliasRecord,
+    });
   }
 
   if (url.pathname.startsWith('/api/links/shortlinks/') && request.method === 'DELETE') {
