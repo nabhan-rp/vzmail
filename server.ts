@@ -57,6 +57,11 @@ import {
   buildLlmsFullTxt,
   buildLlmsTxt,
 } from './src/utils/seoConfig.ts';
+import { isLocalDevHostname } from './src/utils/auth0JwtVerify.ts';
+import {
+  buildVzEcosystemCorsHeaders,
+  verifyShortlinkAntiBotGuard,
+} from './src/utils/turnstileVerify.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -117,6 +122,29 @@ const localBioAvatars: Map<
 > = new Map();
 const localRecycleBin: Map<string, RecycleBinRecord> = new Map();
 const localBioDeleteCooldowns: Map<string, { deletedAt: string; unlockAt: string }> = new Map();
+const localShortlinkOriginBurst: Map<string, { minute: number; count: number }> = new Map();
+
+function checkLocalShortlinkOriginBurstLimit(clientIp: string): boolean {
+  const ip = (clientIp || 'unknown').trim().slice(0, 64);
+  const currentMinute = Math.floor(Date.now() / 60000);
+  if (localShortlinkOriginBurst.size > 500) {
+    for (const [key, entry] of localShortlinkOriginBurst.entries()) {
+      if (entry.minute < currentMinute) {
+        localShortlinkOriginBurst.delete(key);
+      }
+    }
+  }
+  const existing = localShortlinkOriginBurst.get(ip);
+  if (!existing || existing.minute !== currentMinute) {
+    localShortlinkOriginBurst.set(ip, { minute: currentMinute, count: 1 });
+    return true;
+  }
+  if (existing.count >= 60) {
+    return false;
+  }
+  existing.count += 1;
+  return true;
+}
 
 function sanitizeLocalFilename(raw: string): string {
   const cleaned = stripHeaderInjection(raw, 120)
@@ -298,6 +326,22 @@ async function startServer() {
     next();
   });
 
+  // Scoped CORS for sibling VZ ecosystem web apps on /api/links/shortlinks (never wildcard *)
+  app.use('/api/links/shortlinks', (req, res, next) => {
+    const corsHeaders = buildVzEcosystemCorsHeaders(
+      req.header('origin'),
+      process.env.VZ_ECOSYSTEM_ALLOWED_ORIGINS
+    );
+    for (const [headerName, headerValue] of Object.entries(corsHeaders)) {
+      res.setHeader(headerName, headerValue);
+    }
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
   // Dedicated Express Auth0 RS256 JWT + Relay Token Verification Middleware
   app.use('/api', apiGuardMiddleware);
 
@@ -341,6 +385,8 @@ async function startServer() {
         brevoApi: hasBrevo,
         assets: true,
         relayAuthProtected: Boolean(process.env.RELAY_AUTH_TOKEN),
+        turnstileProtected: Boolean(process.env.TURNSTILE_SECRET_KEY),
+        vzEcosystemApiKeyConfigured: Boolean(process.env.VZ_ECOSYSTEM_API_KEY),
       },
       pendingInMemoryPackets: ephemeralQueue.size,
       timestamp: new Date().toISOString(),
@@ -1083,6 +1129,70 @@ async function startServer() {
   });
 
   app.post('/api/links/shortlinks', async (req, res) => {
+    const ownerUser =
+      typeof req.body?.ownerUser === 'string' && req.body.ownerUser.trim()
+        ? sanitizeHandle(req.body.ownerUser)
+        : null;
+
+    let hasVerifiedAuth0Sso = false;
+    const rawAuthHeader = (req.header('authorization') || '').trim();
+    if (ownerUser) {
+      const verifiedAuth = await requireAuthenticatedUser(req, res, ownerUser);
+      if (!verifiedAuth) return;
+      hasVerifiedAuth0Sso =
+        verifiedAuth.mode === 'auth0_jwt' || verifiedAuth.mode === 'relay_token';
+    } else if (/^bearer\s+/i.test(rawAuthHeader)) {
+      const verifiedAuth = await requireAuthenticatedUser(req, res);
+      if (!verifiedAuth) return;
+      hasVerifiedAuth0Sso =
+        verifiedAuth.mode === 'auth0_jwt' || verifiedAuth.mode === 'relay_token';
+    }
+
+    const reqHost = (req.hostname || 'localhost').toLowerCase();
+    const clientIp =
+      req.header('cf-connecting-ip') ||
+      req.header('x-forwarded-for')?.split(',')[0]?.trim() ||
+      req.ip ||
+      null;
+
+    const antiBot = await verifyShortlinkAntiBotGuard({
+      hasVerifiedAuth0Sso,
+      ecosystemKeyHeader: req.header('x-vz-ecosystem-key'),
+      expectedEcosystemApiKey: process.env.VZ_ECOSYSTEM_API_KEY,
+      relayTokenHeader: req.header('x-vz-relay-token'),
+      expectedRelayToken: process.env.RELAY_AUTH_TOKEN,
+      originHeader: req.header('origin'),
+      extraAllowedOriginsCsv: process.env.VZ_ECOSYSTEM_ALLOWED_ORIGINS,
+      turnstileToken: String(
+        req.body?.turnstileToken ?? req.body?.['cf-turnstile-response'] ?? ''
+      ).trim(),
+      turnstileSecretKey: process.env.TURNSTILE_SECRET_KEY,
+      clientIp,
+      requestHostname: reqHost,
+      allowLocalDevFallback:
+        isLocalDevHostname(reqHost) || process.env.ALLOW_LOCAL_DEV_AUTH === 'true',
+    });
+
+    if (!antiBot.ok) {
+      res.status(antiBot.status).json({
+        ok: false,
+        error: antiBot.error,
+        errorCodes: antiBot.errorCodes,
+      });
+      return;
+    }
+
+    if (antiBot.mode === 'vz_ecosystem_origin' && clientIp) {
+      if (!checkLocalShortlinkOriginBurstLimit(clientIp)) {
+        res.status(429).json({
+          ok: false,
+          error:
+            'Terlalu banyak permintaan pembuatan shortlink dari IP ini. Coba lagi dalam 1 menit atau gunakan API Key ekosistem VZ.',
+        });
+        return;
+      }
+    }
+
     const rawTarget = String(req.body?.targetUrl || '').trim();
     const withProtocol = /^https?:\/\//i.test(rawTarget) ? rawTarget : `https://${rawTarget}`;
     const safeTarget = sanitizeExternalUrl(withProtocol, {
@@ -1131,13 +1241,6 @@ async function startServer() {
       if (!finalSlug) finalSlug = generateShortlinkCode(8);
     }
 
-    const ownerUser =
-      typeof req.body?.ownerUser === 'string' && req.body.ownerUser.trim()
-        ? sanitizeHandle(req.body.ownerUser)
-        : null;
-    if (ownerUser) {
-      if (!(await requireAuthenticatedUser(req, res, ownerUser))) return;
-    }
     const title = stripHeaderInjection(String(req.body?.title || ''), 120);
 
     const record: ShortlinkRecord = {
@@ -1154,6 +1257,7 @@ async function startServer() {
     res.status(201).json({
       ok: true,
       storageEngine: 'local-dev-memory',
+      antiBotMode: antiBot.mode,
       shortUrl: `https://imy.li/s/${record.slug}`,
       record,
     });

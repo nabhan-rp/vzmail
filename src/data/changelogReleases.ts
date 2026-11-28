@@ -24,8 +24,8 @@ export interface ChangelogServiceRelease {
   highlights: ChangelogItem[];
 }
 
-export const CHANGELOG_VERSION = 'v1.1.4';
-export const CHANGELOG_RELEASE_DATE = '2026-11-27';
+export const CHANGELOG_VERSION = 'v1.1.5';
+export const CHANGELOG_RELEASE_DATE = '2026-11-28';
 
 export const CHANGELOG_CATEGORY_LABELS: Record<ChangelogCategoryId, BilingualText> = {
   core: {
@@ -47,6 +47,59 @@ export const CHANGELOG_CATEGORY_LABELS: Record<ChangelogCategoryId, BilingualTex
 };
 
 export const CHANGELOG_RELEASES: readonly ChangelogServiceRelease[] = [
+  {
+    serviceId: 'vz-links',
+    serviceName: 'VZ Links & VZ Ecosystem API',
+    domains: ['links.vz.gay', 'imy.li', 'builder.vz.gay', 'desk.vz.gay', 'files.vz.gay'],
+    version: '1.1.5',
+    releaseDate: '2026-11-28',
+    codename: {
+      id: 'Proteksi Anti-Bot Cloudflare Turnstile & Bypass Hibrida Ekosistem VZ',
+      en: 'Cloudflare Turnstile Anti-Bot Protection & VZ Ecosystem Hybrid Bypass',
+    },
+    summary: {
+      id: 'Menambahkan verifikasi Cloudflare Turnstile on-demand untuk pembuatan shortlink imy.li/s/ publik (tanpa login SSO), disertai jalur bypass hibrida & CORS terverifikasi agar sub-aplikasi ekosistem VZ (VZ Builder beserta go-blog & business, VZ Desk beserta 20+ subdomain, serta VZ Files) tetap berjalan lancar tanpa terblokir.',
+      en: 'Adds on-demand Cloudflare Turnstile verification for public (non-SSO) imy.li/s/ shortlink creation, paired with a hybrid bypass and allowlisted CORS so sibling VZ ecosystem apps (VZ Builder including go-blog & business, VZ Desk with 20+ subdomains, and VZ Files) remain uninterrupted.',
+    },
+    highlights: [
+      {
+        id: 'v115-turnstile-ondemand',
+        category: 'privacy_security',
+        title: {
+          id: 'Cloudflare Turnstile On-Demand untuk Shortlink Publik',
+          en: 'On-Demand Cloudflare Turnstile for Public Shortlinks',
+        },
+        description: {
+          id: 'Widget Turnstile Managed hanya dimuat dan ditampilkan otomatis saat tamu (non-login SSO) mulai mengetik URL tujuan, dengan verifikasi server-side ketat (fail-closed) di produksi serta bypass otomatis di localhost/preview.',
+          en: 'Managed Turnstile widget lazy-loads only when an unauthenticated guest begins typing a URL, backed by strict fail-closed server-side verification in production and automatic local/preview bypass.',
+        },
+      },
+      {
+        id: 'v115-vz-ecosystem-hybrid-bypass',
+        category: 'seo_infra',
+        title: {
+          id: 'Bypass Hibrida & CORS Terverifikasi untuk Ekosistem VZ',
+          en: 'Hybrid Bypass & Allowlisted CORS for VZ Ecosystem Apps',
+        },
+        description: {
+          id: 'Mendukung 3 jalur bypass resmi tanpa mengganggu pengguna layanan saudara: token Auth0 SSO, API Key konstan-waktu (X-VZ-Ecosystem-Key), serta Origin HTTPS terverifikasi khusus untuk builder.vz.gay (*.builder.vz.gay), desk.vz.gay (*.desk.vz.gay), files.vz.gay (*.files.vz.gay), dan mail.vz.gay.',
+          en: 'Supports 3 trusted bypass paths so sibling apps are never blocked: verified Auth0 SSO JWT, constant-time API Key (X-VZ-Ecosystem-Key), and scoped HTTPS Origin allowlist covering builder.vz.gay (*.builder.vz.gay), desk.vz.gay (*.desk.vz.gay), files.vz.gay (*.files.vz.gay), and mail.vz.gay.',
+        },
+      },
+      {
+        id: 'v115-csp-ratelimit-hardening',
+        category: 'privacy_security',
+        title: {
+          id: 'Pengerasan CSP Edge & Rate-Limit Burst Origin',
+          en: 'Edge CSP Hardening & Origin Burst Rate-Limiting',
+        },
+        description: {
+          id: 'Memperbarui Content-Security-Policy Cloudflare Worker untuk challenges.cloudflare.com, mengecualikan links.vz.gay dan *.imy.li dari bypass Origin agar tamu publik selalu melewati Turnstile, serta menambahkan batas burst 60 permintaan/menit per IP pada jalur Origin.',
+          en: 'Updated Worker CSP for challenges.cloudflare.com, explicitly excluded links.vz.gay and *.imy.li from Origin bypass so public guests always pass Turnstile, and added a 60 req/min per-IP burst limiter for Origin-bypassed calls.',
+        },
+      },
+    ],
+  },
   {
     serviceId: 'vz-mail',
     serviceName: 'VZ Mail & VZ Links',

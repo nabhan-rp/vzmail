@@ -6,6 +6,18 @@ Format ini mengikuti prinsip [Keep a Changelog](https://keepachangelog.com/en/1.
 
 ---
 
+## VZ Links & VZ Ecosystem API — `v1.1.5` (2026-11-28)
+
+**Domain:** `links.vz.gay` · `imy.li` · `builder.vz.gay` · `desk.vz.gay` · `files.vz.gay`  
+**Rilis:** Proteksi Anti-Bot Cloudflare Turnstile & Bypass Hibrida Ekosistem VZ
+
+### Added & Security
+- **Cloudflare Turnstile On-Demand untuk Shortlink Publik (`imy.li/s/`):** Widget Cloudflare Turnstile Managed otomatis dimuat hanya ketika tamu (non-login SSO) mulai mengetik URL tujuan pada form pemendek URL, dengan verifikasi server-side `siteverify` ketat (*fail-closed*) di produksi serta bypass otomatis di lingkungan `localhost`/preview lokal.
+- **Bypass Hibrida & CORS Terverifikasi untuk Sub-Aplikasi Ekosistem VZ:** Mendukung 3 jalur resmi agar seluruh layanan saudara tidak terblokir perlindungan anti-bot: (1) JWT Auth0 SSO terverifikasi, (2) header API Key konstan-waktu `X-VZ-Ecosystem-Key` / `X-VZ-Relay-Token`, serta (3) allowlist `Origin` HTTPS spesifik dan CORS non-wildcard untuk `builder.vz.gay` (`*.builder.vz.gay` termasuk `go-blog` & `business`), `desk.vz.gay` (`*.desk.vz.gay` untuk 20+ sub-aplikasi), `files.vz.gay` (`*.files.vz.gay`), dan `mail.vz.gay` (dengan pengecualian keras terhadap `links.vz.gay` dan `*.imy.li`).
+- **Pengerasan CSP Edge & Batas Burst Origin:** Menambahkan `https://challenges.cloudflare.com` pada CSP Cloudflare Worker (`script-src`, `frame-src`, `connect-src`) serta menerapkan batas burst 60 permintaan/menit per IP pada jalur bypass Origin.
+
+---
+
 ## VZ Mail & VZ Links — `v1.1.4` (2026-11-27)
 
 **Domain:** `mail.vz.gay` · `links.vz.gay` · `*.imy.li`  

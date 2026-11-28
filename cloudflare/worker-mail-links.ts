@@ -92,6 +92,11 @@ import {
   type SeoMetadataPayload,
   type SeoRouteKind,
 } from '../src/utils/seoConfig.ts';
+import { isLocalDevHostname } from '../src/utils/auth0JwtVerify.ts';
+import {
+  buildVzEcosystemCorsHeaders,
+  verifyShortlinkAntiBotGuard,
+} from '../src/utils/turnstileVerify.ts';
 
 export interface CloudflareImagesTransformResult {
   response(): Response;
@@ -151,6 +156,9 @@ export interface WorkerEnv {
   CPANEL_RELAY_SECRET?: string;
   RESEND_API_KEY?: string;
   BREVO_API_KEY?: string;
+  TURNSTILE_SECRET_KEY?: string;
+  VZ_ECOSYSTEM_API_KEY?: string;
+  VZ_ECOSYSTEM_ALLOWED_ORIGINS?: string;
 }
 
 type OutboundProviderId = 'cpanel_relay' | 'resend' | 'brevo' | 'cloudflare' | 'none';
@@ -507,12 +515,12 @@ function buildAppCsp(auth0Domain?: string): string {
 
   return [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com data:",
     "img-src 'self' data: blob: https:",
-    `connect-src 'self' ${authList} https://*.vikingfile.com https://*.io.cloud.ovh.net`,
-    `frame-src 'self' ${authList}`,
+    `connect-src 'self' ${authList} https://challenges.cloudflare.com https://*.vikingfile.com https://*.io.cloud.ovh.net`,
+    `frame-src 'self' ${authList} https://challenges.cloudflare.com`,
     "worker-src 'self'",
     "manifest-src 'self'",
     "object-src 'none'",
@@ -565,6 +573,44 @@ function jsonResponse(
     ...extraHeaders,
   });
   return new Response(JSON.stringify(body), { status, headers });
+}
+
+function attachCorsHeaders(
+  response: Response,
+  corsHeaders: Record<string, string>
+): Response {
+  const keys = Object.keys(corsHeaders);
+  if (keys.length === 0) return response;
+  const headers = new Headers(response.headers);
+  for (const key of keys) {
+    headers.set(key, corsHeaders[key]);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+async function checkShortlinkOriginBurstLimit(
+  env: WorkerEnv,
+  clientIp: string
+): Promise<boolean> {
+  if (!env.LINKS_KV) return true;
+  const ip = (clientIp || 'unknown').trim().slice(0, 64);
+  const minuteBucket = Math.floor(Date.now() / 60000);
+  const key = `rl:shortlink-origin:${ip}:${minuteBucket}`;
+  try {
+    const raw = await env.LINKS_KV.get(key);
+    const count = raw ? Number.parseInt(raw, 10) || 0 : 0;
+    if (count >= 60) {
+      return false;
+    }
+    await env.LINKS_KV.put(key, String(count + 1), { expirationTtl: 120 });
+    return true;
+  } catch {
+    return true;
+  }
 }
 
 function applyHtmlSecurityHeaders(
@@ -2364,6 +2410,24 @@ async function handleApiRequest(
   ctx: ExecutionContext
 ): Promise<Response> {
   const primaryDomain = getPrimaryDomain(env);
+  const shortlinkCorsHeaders =
+    url.pathname === '/api/links/shortlinks'
+      ? buildVzEcosystemCorsHeaders(
+          request.headers.get('Origin'),
+          env.VZ_ECOSYSTEM_ALLOWED_ORIGINS
+        )
+      : {};
+
+  // Scoped CORS preflight for sibling VZ ecosystem web apps (builder, desk, files, mail + sub-apps)
+  if (url.pathname === '/api/links/shortlinks' && request.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Cache-Control': 'no-store',
+        ...shortlinkCorsHeaders,
+      },
+    });
+  }
 
   // Public health check endpoint (booleans & safe format enums only — never exposes secret values)
   if (url.pathname === '/api/health' && request.method === 'GET') {
@@ -2397,6 +2461,8 @@ async function handleApiRequest(
         brevoApi: caps.brevo,
         assets: Boolean(env.ASSETS),
         relayAuthProtected: Boolean(env.RELAY_AUTH_TOKEN),
+        turnstileProtected: Boolean(env.TURNSTILE_SECRET_KEY),
+        vzEcosystemApiKeyConfigured: Boolean(env.VZ_ECOSYSTEM_API_KEY),
       },
       timestamp: new Date().toISOString(),
     });
@@ -2405,7 +2471,7 @@ async function handleApiRequest(
   // Dedicated Auth0 RS256 OIDC ID Token JWT + Relay Token Verification Middleware
   const authMiddleware = await runWorkerAuthMiddleware(request, url, env, jsonResponse);
   if (!authMiddleware.ok) {
-    return authMiddleware.response;
+    return attachCorsHeaders(authMiddleware.response, shortlinkCorsHeaders);
   }
   const { requireOwnership, requireAuthenticatedUser } = authMiddleware.context;
 
@@ -3421,9 +3487,9 @@ async function handleApiRequest(
     if (ownerParam) {
       const owner = sanitizeHandle(ownerParam);
       const ownershipDenied = requireOwnership(owner);
-      if (ownershipDenied) return ownershipDenied;
+      if (ownershipDenied) return attachCorsHeaders(ownershipDenied, shortlinkCorsHeaders);
       const items = await listShortlinksByOwner(env, owner);
-      return jsonResponse({ ok: true, storageEngine, items });
+      return jsonResponse({ ok: true, storageEngine, items }, 200, shortlinkCorsHeaders);
     }
 
     if (slugsParam) {
@@ -3434,10 +3500,10 @@ async function handleApiRequest(
         .slice(0, 50);
       const fetched = await Promise.all(slugs.map((s) => getShortlinkRecord(env, s)));
       const items = fetched.filter((item): item is ShortlinkRecord => Boolean(item));
-      return jsonResponse({ ok: true, storageEngine, items });
+      return jsonResponse({ ok: true, storageEngine, items }, 200, shortlinkCorsHeaders);
     }
 
-    return jsonResponse({ ok: true, storageEngine, items: [] });
+    return jsonResponse({ ok: true, storageEngine, items: [] }, 200, shortlinkCorsHeaders);
   }
 
   if (url.pathname === '/api/links/shortlinks' && request.method === 'POST') {
@@ -3447,9 +3513,94 @@ async function handleApiRequest(
       slug?: string;
       title?: string;
       ownerUser?: string | null;
+      turnstileToken?: string;
+      'cf-turnstile-response'?: string;
     }>(request);
     if (!parsed.ok) {
-      return jsonResponse({ ok: false, error: parsed.error }, parsed.status);
+      return jsonResponse(
+        { ok: false, error: parsed.error },
+        parsed.status,
+        shortlinkCorsHeaders
+      );
+    }
+
+    const ownerUser =
+      typeof parsed.data.ownerUser === 'string' && parsed.data.ownerUser.trim()
+        ? sanitizeHandle(parsed.data.ownerUser)
+        : null;
+
+    let hasVerifiedAuth0Sso = false;
+    const rawAuthHeader = (request.headers.get('Authorization') || '').trim();
+    if (ownerUser) {
+      const authCheck = await requireAuthenticatedUser(ownerUser);
+      if (!authCheck.ok) {
+        return attachCorsHeaders(authCheck.response, shortlinkCorsHeaders);
+      }
+      hasVerifiedAuth0Sso =
+        authCheck.auth.mode === 'auth0_jwt' || authCheck.auth.mode === 'relay_token';
+    } else if (/^bearer\s+/i.test(rawAuthHeader)) {
+      const authCheck = await requireAuthenticatedUser();
+      if (!authCheck.ok) {
+        return attachCorsHeaders(authCheck.response, shortlinkCorsHeaders);
+      }
+      hasVerifiedAuth0Sso =
+        authCheck.auth.mode === 'auth0_jwt' || authCheck.auth.mode === 'relay_token';
+    }
+
+    const clientIp =
+      request.headers.get('CF-Connecting-IP') ||
+      request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
+      null;
+
+    const antiBot = await verifyShortlinkAntiBotGuard({
+      hasVerifiedAuth0Sso,
+      ecosystemKeyHeader: request.headers.get('X-VZ-Ecosystem-Key'),
+      expectedEcosystemApiKey: env.VZ_ECOSYSTEM_API_KEY,
+      relayTokenHeader: request.headers.get('X-VZ-Relay-Token'),
+      expectedRelayToken: env.RELAY_AUTH_TOKEN,
+      originHeader: request.headers.get('Origin'),
+      extraAllowedOriginsCsv: env.VZ_ECOSYSTEM_ALLOWED_ORIGINS,
+      turnstileToken: String(
+        parsed.data.turnstileToken ?? parsed.data['cf-turnstile-response'] ?? ''
+      ).trim(),
+      turnstileSecretKey: env.TURNSTILE_SECRET_KEY,
+      clientIp,
+      requestHostname: url.hostname,
+      allowLocalDevFallback:
+        isLocalDevHostname(url.hostname) || env.ALLOW_LOCAL_DEV_AUTH === 'true',
+    });
+
+    if (!antiBot.ok) {
+      logInfo('shortlink_antibot_rejected', {
+        status: antiBot.status,
+        errorCodes: antiBot.errorCodes || [],
+        origin: request.headers.get('Origin') || null,
+        host: url.hostname,
+      });
+      return jsonResponse(
+        {
+          ok: false,
+          error: antiBot.error,
+          errorCodes: antiBot.errorCodes,
+        },
+        antiBot.status,
+        shortlinkCorsHeaders
+      );
+    }
+
+    if (antiBot.mode === 'vz_ecosystem_origin' && clientIp) {
+      const allowedBurst = await checkShortlinkOriginBurstLimit(env, clientIp);
+      if (!allowedBurst) {
+        return jsonResponse(
+          {
+            ok: false,
+            error:
+              'Terlalu banyak permintaan pembuatan shortlink dari IP ini. Coba lagi dalam 1 menit atau gunakan API Key ekosistem VZ.',
+          },
+          429,
+          shortlinkCorsHeaders
+        );
+      }
     }
 
     const rawTarget = String(parsed.data.targetUrl || '').trim();
@@ -3464,7 +3615,8 @@ async function handleApiRequest(
           ok: false,
           error: 'URL tujuan tidak valid atau diblokir. Gunakan alamat https:// publik yang sah.',
         },
-        400
+        400,
+        shortlinkCorsHeaders
       );
     }
 
@@ -3481,7 +3633,8 @@ async function handleApiRequest(
             error:
               'Custom slug harus 2–48 karakter (huruf kecil, angka, tanda hubung) dan bukan kata sistem.',
           },
-          400
+          400,
+          shortlinkCorsHeaders
         );
       }
       const existing = await getShortlinkRecord(env, cleanCustom);
@@ -3491,7 +3644,8 @@ async function handleApiRequest(
             ok: false,
             error: `Slug "${cleanCustom}" sudah dipakai. Pilih slug lain atau kosongkan untuk kode acak.`,
           },
-          409
+          409,
+          shortlinkCorsHeaders
         );
       }
       finalSlug = cleanCustom;
@@ -3510,14 +3664,6 @@ async function handleApiRequest(
       }
     }
 
-    const ownerUser =
-      typeof parsed.data.ownerUser === 'string' && parsed.data.ownerUser.trim()
-        ? sanitizeHandle(parsed.data.ownerUser)
-        : null;
-    if (ownerUser) {
-      const authCheck = await requireAuthenticatedUser(ownerUser);
-      if (!authCheck.ok) return authCheck.response;
-    }
     const title = stripHeaderInjection(String(parsed.data.title || ''), 120);
 
     const record: ShortlinkRecord = {
@@ -3537,10 +3683,12 @@ async function handleApiRequest(
       {
         ok: true,
         storageEngine: getLinksStorageEngine(env),
+        antiBotMode: antiBot.mode,
         shortUrl: `https://${primaryDomain}/s/${record.slug}`,
         record,
       },
-      201
+      201,
+      shortlinkCorsHeaders
     );
   }
 

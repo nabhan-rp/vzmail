@@ -21,6 +21,10 @@ import { ConfirmActionModal } from './ConfirmActionModal';
 import { InAppSsoNotice } from './InAppSsoNotice';
 import type { ActiveHostView } from './MailLinksTopBar';
 import { QrCodeModal } from './QrCodeModal';
+import {
+  TurnstileWidget,
+  type TurnstileWidgetStatus,
+} from './TurnstileWidget';
 
 interface ShortlinkStudioProps {
   lang: Language;
@@ -75,6 +79,14 @@ export function ShortlinkStudio({
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [createdRecord, setCreatedRecord] = useState<ShortlinkRecord | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileStatus, setTurnstileStatus] =
+    useState<TurnstileWidgetStatus>('loading');
+  const [turnstileResetCounter, setTurnstileResetCounter] = useState(0);
+
+  const shouldShowTurnstile = !session.isAuthenticated && targetUrl.trim().length > 0;
+  const requiresTurnstileToken =
+    shouldShowTurnstile && turnstileStatus !== 'local_preview';
 
   const [items, setItems] = useState<ShortlinkRecord[]>([]);
   const [loadingList, setLoadingList] = useState(true);
@@ -160,6 +172,15 @@ export function ShortlinkStudio({
       return;
     }
 
+    if (requiresTurnstileToken && !turnstileToken) {
+      setFormError(
+        lang === 'id'
+          ? 'Tunggu hingga verifikasi keamanan Cloudflare Turnstile selesai sebelum menyingkat URL.'
+          : 'Please wait for Cloudflare Turnstile security verification to finish before shortening.'
+      );
+      return;
+    }
+
     setSubmitting(true);
     try {
       const res = await apiFetch('/api/links/shortlinks', {
@@ -170,6 +191,7 @@ export function ShortlinkStudio({
           customSlug: customSlug.trim() || undefined,
           title: title.trim() || undefined,
           ownerUser: session.isAuthenticated ? session.username : null,
+          turnstileToken: !session.isAuthenticated ? turnstileToken || undefined : undefined,
         }),
       });
       const data = (await res.json().catch(() => null)) as {
@@ -180,6 +202,10 @@ export function ShortlinkStudio({
       } | null;
 
       if (!res.ok || !data?.ok || !data.record) {
+        if (!session.isAuthenticated) {
+          setTurnstileToken(null);
+          setTurnstileResetCounter((c) => c + 1);
+        }
         setFormError(
           data?.error ||
             (lang === 'id'
@@ -195,6 +221,10 @@ export function ShortlinkStudio({
       setTargetUrl('');
       setCustomSlug('');
       setTitle('');
+      if (!session.isAuthenticated) {
+        setTurnstileToken(null);
+        setTurnstileResetCounter((c) => c + 1);
+      }
 
       if (!session.isAuthenticated) {
         const nextSlugs = [rec.slug, ...readGuestSlugs().filter((s) => s !== rec.slug)];
@@ -203,6 +233,10 @@ export function ShortlinkStudio({
 
       setItems((prev) => [rec, ...prev.filter((item) => item.slug !== rec.slug)]);
     } catch {
+      if (!session.isAuthenticated) {
+        setTurnstileToken(null);
+        setTurnstileResetCounter((c) => c + 1);
+      }
       setFormError(
         lang === 'id'
           ? 'Koneksi ke server edge gagal. Coba lagi.'
@@ -352,8 +386,8 @@ export function ShortlinkStudio({
               />
               <button
                 type="submit"
-                disabled={submitting}
-                className="min-h-[46px] px-6 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 rounded-lg inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                disabled={submitting || (requiresTurnstileToken && !turnstileToken)}
+                className="min-h-[46px] px-6 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed rounded-lg inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Scissors className="w-4 h-4 shrink-0" />
                 <span>
@@ -418,6 +452,15 @@ export function ShortlinkStudio({
               />
             </div>
           </div>
+
+          {shouldShowTurnstile && (
+            <TurnstileWidget
+              lang={lang}
+              resetTrigger={turnstileResetCounter}
+              onTokenChange={setTurnstileToken}
+              onStatusChange={setTurnstileStatus}
+            />
+          )}
 
           {formError && (
             <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/50 text-xs text-rose-700 dark:text-rose-300">
